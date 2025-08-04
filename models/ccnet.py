@@ -251,10 +251,10 @@ class ccnet(torch.nn.Module):
     https://ieeexplore.ieee.org/document/9512475
     '''
 
-    def __init__(self, num_classes,weight):
+    def __init__(self, weight):
         super(ccnet, self).__init__()
 
-        self.num_classes = num_classes
+        #self.num_classes = num_classes
 
         self.cb1 = CompetitiveBlock_Mul_Ord_Comp(channel_in=1, n_competitor=9, ksize=35, stride=3, padding=17, init_ratio=1,weight=weight)
         self.cb2 = CompetitiveBlock_Mul_Ord_Comp(channel_in=1, n_competitor=36, ksize=17, stride=3, padding=8, init_ratio=0.5, o2=24,weight=weight)
@@ -292,11 +292,11 @@ class ccnet(torch.nn.Module):
         x3 = x3.view(x3.shape[0], -1)
         x = torch.cat((x1, x2, x3), dim=1)
 
-        x = self.fc(x)
-        x = self.fc1(x)
+        x1 = self.fc(x)
+        x2 = self.fc1(x1)
         # x = x / torch.norm(x, p=2, dim=1, keepdim=True)
 
-        fe = torch.cat((x1, x), dim=1)
+        fe = torch.cat((x1, x2), dim=1)
         fe = fe / torch.norm(fe, p=2, dim=1, keepdim=True)
 
         return fe
@@ -304,5 +304,5 @@ class ccnet(torch.nn.Module):
 
 if __name__== "__main__" :
     inp = torch.randn(256,1,128,128)
-    net = ccnet(600,weight=0.8)
+    net = ccnet(weight=0.8)
     out = net(inp)

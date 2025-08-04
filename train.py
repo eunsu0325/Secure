@@ -314,8 +314,8 @@ def main():
     # Set GPU
     os.environ["CUDA_VISIBLE_DEVICES"] = config.training.gpu_ids
 
-    print('weight of cross:', config.training.ce_weight)
-    print('weight of contra:', config.training.contrastive_weight)
+    #print('weight of cross:', config.training.ce_weight)
+    #print('weight of contra:', config.training.contrastive_weight)
     print('weight of competition:', config.model.competition_weight)
     print('temperature:', config.training.temperature)
 
@@ -359,11 +359,11 @@ def main():
     
     # Create model
     net = ccnet(
-        num_classes=config.model.num_classes,
+        #num_classes=config.model.num_classes,
         weight=config.model.competition_weight
     )
     best_net = ccnet(
-        num_classes=config.model.num_classes,
+        #num_classes=config.model.num_classes,
         weight=config.model.competition_weight
     )
     net.cuda()
