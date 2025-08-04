@@ -13,6 +13,7 @@ plt.switch_backend('agg')
 from torch.optim import lr_scheduler
 import cv2 as cv
 import numpy as np
+import faiss
 from loss import SupConLoss
 from models import MyDataset
 from models.ccnet import ccnet
@@ -214,6 +215,10 @@ def fit(epoch, model, data_loader, phase, optimizer, criterion, con_criterion, c
 
     running_loss = 0
     running_correct = 0
+    
+    # Faiss를 위한 feature와 label 수집
+    all_features = []
+    all_labels = []
 
     for batch_id, (datas, target) in enumerate(data_loader):
         data = datas[0].cuda()
@@ -222,30 +227,71 @@ def fit(epoch, model, data_loader, phase, optimizer, criterion, con_criterion, c
 
         if phase == 'training':
             optimizer.zero_grad()
-            output, fe1 = model(data, target)
-            output2, fe2 = model(data_con, target)
+            # output, fe1 = model(data, target) 🔥
+            # output2, fe2 = model(data_con, target) 🔥
+            fe1 = model(data, target)
+            fe2 = model(data_con, target)
             fe = torch.cat([fe1.unsqueeze(1), fe2.unsqueeze(1)], dim=1)
         else:
             with torch.no_grad():
-                output, fe1 = model(data, None)
-                output2, fe2 = model(data_con, None)
+                # output, fe1 = model(data, None) 🔥
+                # output2, fe2 = model(data_con, None) 🔥
+                fe1 = model(data, None)
+                fe2 = model(data_con, None)
                 fe = torch.cat([fe1.unsqueeze(1), fe2.unsqueeze(1)], dim=1)
 
-        ce = criterion(output, target)
+        # ce = criterion(output, target) 🔥
         ce2 = con_criterion(fe, target)
-        loss = config.training.ce_weight * ce + config.training.contrastive_weight * ce2
+        # loss = config.training.ce_weight * ce + config.training.contrastive_weight * ce2 🔥
+        loss = ce2  # Only use SupConLoss
 
         running_loss += loss.data.cpu().numpy()
-        preds = output.data.max(dim=1, keepdim=True)[1]
-        running_correct += preds.eq(target.data.view_as(preds)).cpu().sum().numpy()
+        
+        # preds = output.data.max(dim=1, keepdim=True)[1] 🔥
+        # running_correct += preds.eq(target.data.view_as(preds)).cpu().sum().numpy() 🔥
+        
+        # Feature 수집 (나중에 Faiss로 계산)
+        all_features.append(fe1.detach().cpu().numpy())
+        all_labels.append(target.detach().cpu().numpy())
 
         if phase == 'training':
             loss.backward(retain_graph=None)
             optimizer.step()
+    
+    # Faiss를 사용한 Nearest Neighbor 정확도 계산
+    all_features = np.concatenate(all_features, axis=0)
+    all_labels = np.concatenate(all_labels, axis=0)
+    
+    # Faiss index 생성 (fit 함수 전용 임시 인덱스)
+    feature_dim = all_features.shape[1]
+    fit_index = faiss.IndexFlatL2(feature_dim)  # fit_index로 명명하여 구분
+    fit_index.add(all_features.astype(np.float32))
+    
+    # k=2로 검색 (자기 자신 + 가장 가까운 이웃)
+    _, indices = fit_index.search(all_features.astype(np.float32), k=2)
+    
+    # 정확도 계산 (자기 자신 제외한 가장 가까운 이웃)
+    nearest_labels = all_labels[indices[:, 1]]
+    running_correct = (nearest_labels == all_labels).sum()
+    
+    # 기존 torch.mm 방식 🔥
+    # if phase == 'testing':
+    #     batch_size = fe1.size(0)
+    #     similarity = torch.mm(fe1, fe1.t())
+    #     _, indices = similarity.topk(2, dim=1)
+    #     nearest_labels = target[indices[:, 1]]
+    #     running_correct += (nearest_labels == target).cpu().sum().numpy()
+    # else:
+    #     running_correct = 0 🔥
 
     total = len(data_loader.dataset)
     loss = running_loss / total
     accuracy = (100.0 * running_correct) / total
+    
+    # if phase == 'testing': 🔥
+    #     accuracy = (100.0 * running_correct) / total
+    # else:
+    #     accuracy = 0.0 🔥
 
     if epoch % 10 == 0:
         print('epoch %d: \t%s loss is \t%7.5f ;\t%s accuracy is \t%d/%d \t%7.3f%%' % (
@@ -323,7 +369,7 @@ def main():
     net.cuda()
 
     # Loss functions
-    criterion = nn.CrossEntropyLoss()
+    # criterion = nn.CrossEntropyLoss() 🔥
     con_criterion = SupConLoss(
         temperature=config.training.temperature,
         base_temperature=config.training.temperature
@@ -345,12 +391,12 @@ def main():
     for epoch in range(config.training.num_epochs):
         epoch_loss, epoch_accuracy = fit(
             epoch, net, data_loader_train, 'training',
-            optimizer, criterion, con_criterion, config
+            optimizer, None, con_criterion, config # Pass None for criterion
         )
         
         val_epoch_loss, val_epoch_accuracy = fit(
             epoch, net, data_loader_train, 'testing',
-            optimizer, criterion, con_criterion, config
+            optimizer, None, con_criterion, config # Pass None for criterion
         )
 
         scheduler.step()

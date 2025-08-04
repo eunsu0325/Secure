@@ -263,8 +263,8 @@ class ccnet(torch.nn.Module):
         self.fc = torch.nn.Linear(13152, 4096)  # <---
         self.fc1 = torch.nn.Linear(4096, 2048)
         self.drop = torch.nn.Dropout(p=0.5)
-        # self.arclayer = torch.nn.Linear(1024,num_classes)
-        self.arclayer_ = ArcMarginProduct(2048, num_classes, s=30, m=0.5, easy_margin=False)
+        # self.arclayer = torch.nn.Linear(1024,num_classes) 🔥
+        # self.arclayer_ = ArcMarginProduct(2048, num_classes, s=30, m=0.5, easy_margin=False)
 
     def forward(self, x, y=None):
         x1 = self.cb1(x)
@@ -276,10 +276,11 @@ class ccnet(torch.nn.Module):
         x1 = self.fc(x)
         x = self.fc1(x1)
         fe = torch.cat((x1,x),dim=1) # 4096D + 2048D = 6144D Feature Embedding
-        x = self.drop(x)
-        x = self.arclayer_(x, y)
+        # x = self.drop(x) 🔥
+        # x = self.arclayer_(x, y) 🔥
 
-        return x, F.normalize(fe, dim=-1)
+        # return x, F.normalize(fe, dim=-1) 🔥
+        return F.normalize(fe, dim=-1)  # Only return normalized features for SupConLoss
 
     def getFeatureCode(self, x):
         x1 = self.cb1(x)
@@ -293,9 +294,12 @@ class ccnet(torch.nn.Module):
 
         x = self.fc(x)
         x = self.fc1(x)
-        x = x / torch.norm(x, p=2, dim=1, keepdim=True)
+        # x = x / torch.norm(x, p=2, dim=1, keepdim=True)
 
-        return x
+        fe = torch.cat((x1, x), dim=1)
+        fe = fe / torch.norm(fe, p=2, dim=1, keepdim=True)
+
+        return fe
 
 
 if __name__== "__main__" :
