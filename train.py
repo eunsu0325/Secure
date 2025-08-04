@@ -1,5 +1,4 @@
 import os
-# os.environ["KMP_DUPLICATE_LIB_OK"]= "TRUE"
 import argparse
 import time
 import sys
@@ -12,59 +11,51 @@ import matplotlib.pyplot as plt
 plt.switch_backend('agg')
 
 from torch.optim import lr_scheduler
-# import pickle
 import cv2 as cv
+import numpy as np
 from loss import SupConLoss
 from models import MyDataset
 from models.ccnet import ccnet
 from utils import *
+from config import ConfigParser
 
 import copy
 
 
-
-def test(model):
-
+def test(model, config):
     print('Start Testing!')
     print('%s' % (time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())))
 
-    path_hard = os.path.join(path_rst, 'rank1_hard')
+    path_hard = os.path.join(config.training.results_path, 'rank1_hard')
 
-    # train_set_file = './data/train_IITD.txt'
-    # test_set_file = './data/test_IITD.txt'
-
-    trainset = MyDataset(txt=train_set_file, transforms=None, train=False)
-    testset = MyDataset(txt=test_set_file, transforms=None, train=False)
+    trainset = MyDataset(txt=config.dataset.train_set_file, transforms=None, train=False)
+    testset = MyDataset(txt=config.dataset.test_set_file, transforms=None, train=False)
 
     batch_size = 512  # 128
 
     data_loader_train = DataLoader(dataset=trainset, batch_size=batch_size, num_workers=2)
     data_loader_test = DataLoader(dataset=testset, batch_size=batch_size, num_workers=2)
 
-    fileDB_train = getFileNames(train_set_file)
-    fileDB_test = getFileNames(test_set_file)
+    fileDB_train = getFileNames(config.dataset.train_set_file)
+    fileDB_test = getFileNames(config.dataset.test_set_file)
 
     # output dir
-    if not os.path.exists(path_rst):
-        os.makedirs(path_rst)
+    if not os.path.exists(config.training.results_path):
+        os.makedirs(config.training.results_path)
 
     if not os.path.exists(path_hard):
         os.makedirs(path_hard)
 
     net = model
-
     net.cuda()
     net.eval()
 
     # feature extraction:
-
     featDB_train = []
     iddb_train = []
 
     for batch_id, (datas, target) in enumerate(data_loader_train):
-
         data = datas[0]
-
         data = data.cuda()
         target = target.cuda()
 
@@ -94,13 +85,11 @@ def test(model):
 
     print('Start Test Feature Extraction.')
     for batch_id, (datas, target) in enumerate(data_loader_test):
-
         data = datas[0]
         data = data.cuda()
         target = target.cuda()
 
         codes = net.getFeatureCode(data)
-
         codes = codes.cpu().detach().numpy()
         y = target.cpu().detach().numpy()
 
@@ -111,73 +100,58 @@ def test(model):
             featDB_test = np.concatenate((featDB_test, codes), axis=0)
             iddb_test = np.concatenate((iddb_test, y))
 
-    if batch_id != 1:
-        print('aaaa')
-
     print('completed feature extraction.')
     print('featDB_test.shape: ', featDB_test.shape)
-
     print('\nFeature Extraction Done!')
-
     print('start feature matching ...\n')
 
-    print('Verification EER of the test-test set ...')
-
-    print('Start EER for Test-Test Set! \n')
-
     # verification EER of the test set
-    s = []  # matching score
-    l = []  # intra-class or inter-class matching
+    s = []
+    l = []
     ntest = featDB_test.shape[0]
     ntrain = featDB_train.shape[0]
 
     for i in range(ntest):
         feat1 = featDB_test[i]
-
         for j in range(ntrain):
             feat2 = featDB_train[j]
-
             cosdis = np.dot(feat1, feat2)
             dis = np.arccos(np.clip(cosdis, -1, 1)) / np.pi
-
             s.append(dis)
-
-            if iddb_test[i] == iddb_train[j]:  # same palm
+            if iddb_test[i] == iddb_train[j]:
                 l.append(1)
             else:
                 l.append(-1)
 
-    if not os.path.exists(path_rst+'veriEER'):
-        os.makedirs(path_rst+'veriEER')
-    if not os.path.exists(path_rst+'veriEER/rank1_hard/'):
-        os.makedirs(path_rst+'veriEER/rank1_hard/')
+    veriEER_path = str(config.training.results_path) + 'veriEER'
+    if not os.path.exists(veriEER_path):
+        os.makedirs(veriEER_path)
+    if not os.path.exists(veriEER_path + '/rank1_hard/'):
+        os.makedirs(veriEER_path + '/rank1_hard/')
 
-    with open(path_rst+'veriEER/scores_VeriEER.txt', 'w') as f:
+    with open(veriEER_path + '/scores_VeriEER.txt', 'w') as f:
         for i in range(len(s)):
             score = str(s[i])
             label = str(l[i])
             f.write(score + ' ' + label + '\n')
 
     sys.stdout.flush()
-    os.system('python ./getGI.py' + '  ' + path_rst + 'veriEER/scores_VeriEER.txt scores_VeriEER')
-    os.system('python ./getEER.py' + '  ' + path_rst + 'veriEER/scores_VeriEER.txt scores_VeriEER')
+    os.system('python ./getGI.py' + '  ' + veriEER_path + '/scores_VeriEER.txt scores_VeriEER')
+    os.system('python ./getEER.py' + '  ' + veriEER_path + '/scores_VeriEER.txt scores_VeriEER')
 
     print('\n------------------')
     print('Rank-1 acc of the test set...')
+    
     # rank-1 acc
     cnt = 0
     corr = 0
     for i in range(ntest):
         probeID = iddb_test[i]
-
         dis = np.zeros((ntrain, 1))
-
         for j in range(ntrain):
             dis[j] = s[cnt]
             cnt += 1
-
         idx = np.argmin(dis[:])
-
         galleryID = iddb_train[idx]
 
         if probeID == galleryID:
@@ -185,37 +159,32 @@ def test(model):
         else:
             testname = fileDB_test[i]
             trainname = fileDB_train[idx]
-            # store similar inter-class samples
             im_test = cv.imread(testname)
             im_train = cv.imread(trainname)
             img = np.concatenate((im_test, im_train), axis=1)
-            cv.imwrite(path_rst + 'veriEER/rank1_hard/%6.4f_%s_%s.png' % (
+            cv.imwrite(veriEER_path + '/rank1_hard/%6.4f_%s_%s.png' % (
                 np.min(dis[:]), testname[-13:-4], trainname[-13:-4]), img)
 
     rankacc = corr / ntest * 100
     print('rank-1 acc: %.3f%%' % rankacc)
     print('-----------')
 
-    with open(path_rst + 'veriEER/rank1.txt', 'w') as f:
+    with open(veriEER_path + '/rank1.txt', 'w') as f:
         f.write('rank-1 acc: %.3f%%' % rankacc)
 
+    # Real EER
     print('\n\nReal EER of the test set...')
-    # dataset EER of the test set (the gallery set is not used)
-    s = []  # matching score
-    l = []  # genuine / impostor matching
+    s = []
+    l = []
     n = featDB_test.shape[0]
     for i in range(n - 1):
         feat1 = featDB_test[i]
-
         for jj in range(n - i - 1):
             j = i + jj + 1
             feat2 = featDB_test[j]
-
             cosdis = np.dot(feat1, feat2)
             dis = np.arccos(np.clip(cosdis, -1, 1)) / np.pi
-
             s.append(dis)
-
             if iddb_test[i] == iddb_test[j]:
                 l.append(1)
             else:
@@ -223,40 +192,34 @@ def test(model):
 
     print('feature extraction about real EER done!\n')
 
-    with open(path_rst + 'veriEER/scores_EER_test.txt', 'w') as f:
+    with open(veriEER_path + '/scores_EER_test.txt', 'w') as f:
         for i in range(len(s)):
             score = str(s[i])
             label = str(l[i])
             f.write(score + ' ' + label + '\n')
 
     sys.stdout.flush()
-    os.system('python ./getGI.py' + '  ' + path_rst + 'veriEER/scores_EER_test.txt scores_EER_test')
-    os.system('python ./getEER.py' + '  ' + path_rst + 'veriEER/scores_EER_test.txt scores_EER_test')
+    os.system('python ./getGI.py' + '  ' + veriEER_path + '/scores_EER_test.txt scores_EER_test')
+    os.system('python ./getEER.py' + '  ' + veriEER_path + '/scores_EER_test.txt scores_EER_test')
 
-# perform one epoch
-def fit(epoch, model, data_loader, phase='training'):
-    if phase != 'training' and phase != 'testing':
+
+def fit(epoch, model, data_loader, phase, optimizer, criterion, con_criterion, config):
+    if phase not in ['training', 'testing']:
         raise TypeError('input error!')
 
     if phase == 'training':
         model.train()
-
-    if phase == 'testing':
-        # print('test')
+    else:
         model.eval()
 
     running_loss = 0
     running_correct = 0
 
     for batch_id, (datas, target) in enumerate(data_loader):
-
-        data = datas[0]
-        data = data.cuda()
-
-        data_con = datas[1]
-        data_con = data_con.cuda()
-
+        data = datas[0].cuda()
+        data_con = datas[1].cuda()
         target = target.cuda()
+
         if phase == 'training':
             optimizer.zero_grad()
             output, fe1 = model(data, target)
@@ -270,153 +233,160 @@ def fit(epoch, model, data_loader, phase='training'):
 
         ce = criterion(output, target)
         ce2 = con_criterion(fe, target)
+        loss = config.training.ce_weight * ce + config.training.contrastive_weight * ce2
 
-        loss = weight1*ce+weight2*ce2
-
-        ## log
         running_loss += loss.data.cpu().numpy()
-
-        preds = output.data.max(dim=1, keepdim=True)[1]  # max returns (value, index)
+        preds = output.data.max(dim=1, keepdim=True)[1]
         running_correct += preds.eq(target.data.view_as(preds)).cpu().sum().numpy()
 
-        ## update
         if phase == 'training':
-            loss.backward(retain_graph=None)  #
+            loss.backward(retain_graph=None)
             optimizer.step()
 
-    ## log info of this epoch
     total = len(data_loader.dataset)
     loss = running_loss / total
     accuracy = (100.0 * running_correct) / total
 
     if epoch % 10 == 0:
         print('epoch %d: \t%s loss is \t%7.5f ;\t%s accuracy is \t%d/%d \t%7.3f%%' % (
-        epoch, phase, loss, phase, running_correct, total, accuracy))
+            epoch, phase, loss, phase, running_correct, total, accuracy))
 
     return loss, accuracy
 
-if __name__== "__main__" :
 
-    parser = argparse.ArgumentParser(
-        description="CO3Net for Palmprint Recfognition"
+def main():
+    parser = argparse.ArgumentParser(description='CCNet Training')
+    parser.add_argument('--config', type=str, default='./config/config.yaml',
+                        help='Path to config file')
+    args = parser.parse_args()
+    
+    # Load configuration
+    config = ConfigParser(args.config)
+    print(f"Using config: {args.config}")
+    print(config)
+    
+    # Set GPU
+    os.environ["CUDA_VISIBLE_DEVICES"] = config.training.gpu_ids
+
+    print('weight of cross:', config.training.ce_weight)
+    print('weight of contra:', config.training.contrastive_weight)
+    print('weight of competition:', config.model.competition_weight)
+    print('temperature:', config.training.temperature)
+
+    # Create directories
+    if not os.path.exists(config.training.checkpoint_path):
+        os.makedirs(config.training.checkpoint_path)
+    if not os.path.exists(config.training.results_path):
+        os.makedirs(config.training.results_path)
+
+    # Create dataset
+    trainset = MyDataset(
+        txt=config.dataset.train_set_file,
+        transforms=None,
+        train=True,
+        imside=config.dataset.height,
+        outchannels=config.dataset.channels
+    )
+    testset = MyDataset(
+        txt=config.dataset.test_set_file,
+        transforms=None,
+        train=False,
+        imside=config.dataset.height,
+        outchannels=config.dataset.channels
     )
 
-    parser.add_argument("--batch_size", type=int, default=1024)
-    parser.add_argument("--epoch_num", type=int, default=3000)
-    parser.add_argument("--temp", type=float, default=0.07)
-    parser.add_argument("--weight1", type=float, default=0.8)
-    parser.add_argument("--weight2", type=float, default=0.2)
-    parser.add_argument("--com_weight",type=float,default=0.8)
-    parser.add_argument("--id_num", type=int, default=378,
-                        help="IITD: 460 KTU: 145 Tongji: 600 REST: 358 XJTU: 200 POLYU 378 Multi-Spec 500 IITD_Right 230 Tongji_LR 300")
-    parser.add_argument("--gpu_id", type=str, default='0')
-    parser.add_argument("--lr", type=float, default=0.001)
-    parser.add_argument("--redstep", type=int, default=500)
-
-    parser.add_argument("--test_interval", type=str, default=1000)
-    parser.add_argument("--save_interval", type=str, default=500)  ## 200 for Multi-spec 500 for RED
-
-    ##Training Path
-    parser.add_argument("--train_set_file", type=str, default='./data/train_Tongji.txt')
-    parser.add_argument("--test_set_file", type=str, default='./data/test_Tongji.txt')
-
-    ##Store Path
-    parser.add_argument("--des_path", type=str, default='./results/checkpoint/')
-    parser.add_argument("--path_rst", type=str, default='./results/rst_test/')
-
-    args = parser.parse_args()
-
-    # print(args.gpu_id)
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
-
-    batch_size = args.batch_size
-    epoch_num = args.epoch_num
-    num_classes = args.id_num
-    weight1 = args.weight1
-    weight2 = args.weight2
-    comp_weight = args.com_weight
-
-    print('weight of cross:', weight1)
-    print('weight of contra:', weight2)
-    print('weight of competition:',comp_weight)
-    print('tempture:', args.temp)
-
-    des_path = args.des_path
-    path_rst = args.path_rst
-
-    if not os.path.exists(des_path):
-        os.makedirs(des_path)
-    if not os.path.exists(path_rst):
-        os.makedirs(path_rst)
-
-    # path
-    train_set_file = args.train_set_file
-    test_set_file = args.test_set_file
-
-    # dataset
-    trainset = MyDataset(txt=train_set_file, transforms=None, train=True, imside=128, outchannels=1)
-    testset = MyDataset(txt=test_set_file, transforms=None, train=False, imside=128, outchannels=1)
-
-    data_loader_train = DataLoader(dataset=trainset, batch_size=batch_size, num_workers=2, shuffle=True)
-    data_loader_test = DataLoader(dataset=testset, batch_size=128, num_workers=2, shuffle=True)
+    data_loader_train = DataLoader(
+        dataset=trainset,
+        batch_size=config.training.batch_size,
+        num_workers=config.training.num_workers,
+        shuffle=True
+    )
+    data_loader_test = DataLoader(
+        dataset=testset,
+        batch_size=128,
+        num_workers=config.training.num_workers,
+        shuffle=True
+    )
 
     print('%s' % (time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())))
-
     print('------Init Model------')
-    net = ccnet(num_classes=num_classes,weight=comp_weight)
-    best_net = ccnet(num_classes=num_classes,weight=comp_weight)
+    
+    # Create model
+    net = ccnet(
+        num_classes=config.model.num_classes,
+        weight=config.model.competition_weight
+    )
+    best_net = ccnet(
+        num_classes=config.model.num_classes,
+        weight=config.model.competition_weight
+    )
     net.cuda()
 
-    #
+    # Loss functions
     criterion = nn.CrossEntropyLoss()
-    con_criterion = SupConLoss(temperature=args.temp, base_temperature=args.temp)  ######agfzgfda
+    con_criterion = SupConLoss(
+        temperature=config.training.temperature,
+        base_temperature=config.training.temperature
+    )
 
-    optimizer = optim.Adam(net.parameters(), lr=args.lr)
-    scheduler = lr_scheduler.StepLR(optimizer, step_size=args.redstep, gamma=0.8)
+    # Optimizer
+    optimizer = optim.Adam(net.parameters(), lr=config.training.learning_rate)
+    scheduler = lr_scheduler.StepLR(
+        optimizer,
+        step_size=config.training.scheduler_step_size,
+        gamma=config.training.scheduler_gamma
+    )
 
     train_losses, train_accuracy = [], []
     val_losses, val_accuracy = [], []
     bestacc = 0
 
-    for epoch in range(epoch_num):
-
-        epoch_loss, epoch_accuracy = fit(epoch, net, data_loader_train, phase='training')
-        # print('finish')
-
-        val_epoch_loss, val_epoch_accuracy = fit(epoch, net, data_loader_train, phase='testing')
+    # Training loop
+    for epoch in range(config.training.num_epochs):
+        epoch_loss, epoch_accuracy = fit(
+            epoch, net, data_loader_train, 'training',
+            optimizer, criterion, con_criterion, config
+        )
+        
+        val_epoch_loss, val_epoch_accuracy = fit(
+            epoch, net, data_loader_train, 'testing',
+            optimizer, criterion, con_criterion, config
+        )
 
         scheduler.step()
 
-        # ------------------------logs----------------------
+        # Logs
         train_losses.append(epoch_loss)
         train_accuracy.append(epoch_accuracy)
-
         val_losses.append(val_epoch_loss)
         val_accuracy.append(val_epoch_accuracy)
 
-        # save the best model
+        # Save best model
         if epoch_accuracy >= bestacc:
             bestacc = epoch_accuracy
-            torch.save(net.state_dict(), des_path + 'net_params_best.pth')
+            torch.save(net.state_dict(), str(config.training.checkpoint_path) + '/net_params_best.pth')
             best_net = copy.deepcopy(net)
 
-        # save the current model and log info:
-        if epoch % 10 == 0 or epoch == (epoch_num - 1) and epoch != 0:
-            torch.save(net.state_dict(), des_path + 'net_params.pth')
+        # Save current model
+        if epoch % 10 == 0 or epoch == (config.training.num_epochs - 1) and epoch != 0:
+            torch.save(net.state_dict(), str(config.training.checkpoint_path) + '/net_params.pth')
+            saveLossACC(train_losses, val_losses, train_accuracy, val_accuracy, bestacc, config.training.results_path)
 
-            saveLossACC(train_losses, val_losses, train_accuracy, val_accuracy, bestacc,path_rst)
+        if epoch % config.training.save_interval == 0:
+            torch.save(net.state_dict(), str(config.training.checkpoint_path) + f'/epoch_{epoch}_net_params.pth')
 
-        if epoch % args.save_interval == 0:
-            torch.save(net.state_dict(), des_path + 'epoch_' + str(epoch) + '_net_params.pth')
-
-        if epoch % args.test_interval == 0 and epoch != 0:
+        if epoch % config.training.test_interval == 0 and epoch != 0:
             print('------------\n')
-            test(net)
+            test(net, config)
 
     print('------------\n')
     print('Last')
-    test(net)
+    test(net, config)
 
     print('------------\n')
     print('Best')
-    test(best_net)
+    test(best_net, config)
+
+
+if __name__ == "__main__":
+    main()

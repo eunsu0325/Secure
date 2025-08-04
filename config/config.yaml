@@ -1,0 +1,38 @@
+Dataset:
+  dataset: Tongji  # Tongji, IITD, PolyU, Multi-Spectrum
+  train_set_file: ./data/train_Tongji.txt
+  test_set_file: ./data/test_Tongji.txt
+  height: 128
+  width: 128
+  channels: 1
+  augmentation: true
+
+Model:
+  architecture: ccnet
+  num_classes: 600  # Tongji: 600, IITD: 460, PolyU: 378
+  # Competition weights
+  competition_weight: 0.8  # channel competition weight
+
+Training:
+  batch_size: 1024
+  num_epochs: 3000
+  num_workers: 2
+  
+  # Learning rate
+  learning_rate: 0.001
+  scheduler_step_size: 500
+  scheduler_gamma: 0.8
+  
+  # Loss weights
+  ce_weight: 0.8
+  contrastive_weight: 0.2
+  temperature: 0.07
+  
+  # Checkpointing
+  save_interval: 1000
+  test_interval: 1000
+  checkpoint_path: ./results/checkpoint/
+  results_path: ./results/rst_test/
+  
+  # GPU settings
+  gpu_ids: "0"

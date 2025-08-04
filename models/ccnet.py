@@ -275,7 +275,7 @@ class ccnet(torch.nn.Module):
 
         x1 = self.fc(x)
         x = self.fc1(x1)
-        fe = torch.cat((x1,x),dim=1)
+        fe = torch.cat((x1,x),dim=1) # 4096D + 2048D = 6144D Feature Embedding
         x = self.drop(x)
         x = self.arclayer_(x, y)
 
@@ -302,4 +302,3 @@ if __name__== "__main__" :
     inp = torch.randn(256,1,128,128)
     net = ccnet(600,weight=0.8)
     out = net(inp)
-
