@@ -18,6 +18,7 @@ import pickle
 import numpy as np
 from PIL import Image
 import cv2 as cv
+import faiss  # 추가
 from loss import SupConLoss
 
 import matplotlib.pyplot as plt
@@ -154,28 +155,56 @@ def test(model, config):
     print('\n------------------')
     print('Rank-1 acc of the test set...')
     
-    # rank-1 acc
-    cnt = 0
+    # rank-1 acc with Faiss (더 빠른 버전)
+    # Faiss index 생성
+    feature_dim = featDB_train.shape[1]
+    index = faiss.IndexFlatL2(feature_dim)
+    index.add(featDB_train.astype(np.float32))
+    
+    # 각 테스트 샘플에 대해 가장 가까운 train 샘플 찾기
+    distances, indices = index.search(featDB_test.astype(np.float32), k=1)
+    
+    # 정확도 계산
     corr = 0
     for i in range(ntest):
         probeID = iddb_test[i]
-        dis = np.zeros((ntrain, 1))
-        for j in range(ntrain):
-            dis[j] = s[cnt]
-            cnt += 1
-        idx = np.argmin(dis[:])
-        galleryID = iddb_train[idx]
-
+        galleryID = iddb_train[indices[i][0]]
+        
         if probeID == galleryID:
             corr += 1
         else:
+            # 잘못 매칭된 샘플 저장
             testname = fileDB_test[i]
-            trainname = fileDB_train[idx]
+            trainname = fileDB_train[indices[i][0]]
             im_test = cv.imread(testname)
             im_train = cv.imread(trainname)
-            img = np.concatenate((im_test, im_train), axis=1)
-            cv.imwrite(veriEER_path + '/rank1_hard/%6.4f_%s_%s.png' % (
-                np.min(dis[:]), testname[-13:-4], trainname[-13:-4]), img)
+            if im_test is not None and im_train is not None:
+                img = np.concatenate((im_test, im_train), axis=1)
+                cv.imwrite(veriEER_path + '/rank1_hard/%6.4f_%s_%s.png' % (
+                    distances[i][0], testname[-13:-4], trainname[-13:-4]), img)
+    
+    # 기존 방식 (주석처리) 🔥
+    # cnt = 0
+    # corr = 0
+    # for i in range(ntest):
+    #     probeID = iddb_test[i]
+    #     dis = np.zeros((ntrain, 1))
+    #     for j in range(ntrain):
+    #         dis[j] = s[cnt]
+    #         cnt += 1
+    #     idx = np.argmin(dis[:])
+    #     galleryID = iddb_train[idx]
+    #
+    #     if probeID == galleryID:
+    #         corr += 1
+    #     else:
+    #         testname = fileDB_test[i]
+    #         trainname = fileDB_train[idx]
+    #         im_test = cv.imread(testname)
+    #         im_train = cv.imread(trainname)
+    #         img = np.concatenate((im_test, im_train), axis=1)
+    #         cv.imwrite(veriEER_path + '/rank1_hard/%6.4f_%s_%s.png' % (
+    #             np.min(dis[:]), testname[-13:-4], trainname[-13:-4]), img)
 
     rankacc = corr / ntest * 100
     print('rank-1 acc: %.3f%%' % rankacc)
@@ -202,7 +231,7 @@ def main():
 
     # Create model
     net = ccnet(
-        num_classes=config.model.num_classes,
+        # num_classes=config.model.num_classes,  # 🔥 제거
         weight=config.model.competition_weight
     )
     net.load_state_dict(torch.load(args.checkpoint), strict=False)

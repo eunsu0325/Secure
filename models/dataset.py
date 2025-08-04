@@ -92,8 +92,8 @@ class MyDataset(data.Dataset):
                         T.RandomResizedCrop(size=self.imside, scale=(0.8,1.0), ratio=(1.0, 1.0)),
                         T.RandomPerspective(distortion_scale=0.15, p=1),# (0.1, 0.2) (0.05, 0.05)
                         T.RandomChoice(transforms=[
-                            T.RandomRotation(degrees=10, resample=Image.BICUBIC, expand=False, center=(0.5*self.imside, 0.0)),
-                            T.RandomRotation(degrees=10, resample=Image.BICUBIC, expand=False, center=(0.0, 0.5*self.imside)),
+                            T.RandomRotation(degrees=10, interpolation=Image.BICUBIC, expand=False, center=(0.5*self.imside, 0.0)),
+                            T.RandomRotation(degrees=10, interpolation=Image.BICUBIC, expand=False, center=(0.0, 0.5*self.imside)),
                         ]),
                     ]),     
 
