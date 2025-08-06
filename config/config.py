@@ -35,4 +35,5 @@ class Training:
     checkpoint_path: Path
     results_path: Path
     gpu_ids: str
+    inference_checkpoint: Optional[Path] = None
     config_file: Optional[Path] = None

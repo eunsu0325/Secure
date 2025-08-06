@@ -14,7 +14,7 @@ Training:
   batch_size: 1024
   num_epochs: 3000
   num_workers: 2
-  
+
   learning_rate: 0.001
   scheduler_step_size: 500
   scheduler_gamma: 0.8
@@ -25,5 +25,7 @@ Training:
   test_interval: 1000
   checkpoint_path: /content/drive/MyDrive/rladmstn
   results_path: /content/drive/MyDrive/rladmstn
-  
+
+  inference_checkpoint: /content/drive/MyDrive/rladmstn/net_params_best.pth
+
   gpu_ids: "0"

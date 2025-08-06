@@ -218,23 +218,31 @@ def main():
     parser = argparse.ArgumentParser(description="CCNet Inference")
     parser.add_argument('--config', type=str, default='./config/config.yaml',
                         help='Path to config file')
-    parser.add_argument("--checkpoint", type=str, required=True,
+    parser.add_argument("--checkpoint", type=str, required=False,
                         help="Path to checkpoint file")
     args = parser.parse_args()
     
     # Load configuration
     config = ConfigParser(args.config)
+    # checkpoint_path = args.checkpoint if args.checkpoint else config.training.inference_checkpoin ⚰️
+    checkpoint_path = args.checkpoint if args.checkpoint else config.training.inference_checkpoint  # 오타 수정 (inference_checkpoin → inference_checkpoint)
+    
+    if not checkpoint_path:
+        raise ValueError("Checkpoint path must be provided via --checkpoint or config file")
+    
     print(f"Using config: {args.config}")
+    print(f"Using checkpoint: {checkpoint_path}")  # checkpoint 경로 출력 추가
     
     # Set GPU
     os.environ["CUDA_VISIBLE_DEVICES"] = config.training.gpu_ids
-
+    
     # Create model
     net = ccnet(
-        # num_classes=config.model.num_classes,  # 🔥 제거
+        # num_classes=config.model.num_classes, # 🔥 제거
         weight=config.model.competition_weight
     )
-    net.load_state_dict(torch.load(args.checkpoint), strict=False)
+    # net.load_state_dict(torch.load(args.checkpoint), strict=False) ⚰️
+    net.load_state_dict(torch.load(checkpoint_path), strict=False)  # args.checkpoint → checkpoint_path
     
     # Run test
     test(net, config)
