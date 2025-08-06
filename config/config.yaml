@@ -5,27 +5,34 @@ Dataset:
   width: 128
   channels: 1
   augmentation: true
+  # SCR 추가 🐣
+  negative_samples_file: /content/drive/MyDrive/CCNet_OKD_CD/data/negative_samples.txt  # 🐣
+  num_negative_classes: 10  # 🐣
 
 Model:
   architecture: ccnet
   competition_weight: 0.8
 
 Training:
-  batch_size: 1024
+  # batch_size: 1024  # 🪦 기존 배치 사이즈 제거
+  scr_batch_size: 10  # 🐣 새 사용자 샘플 수
+  memory_batch_size: 246  # 🐣
+  
+  # SCR 특화 설정 🐣
+  num_experiences: 600  # 🐣
+  memory_size: 2000  # 🐣
+  min_samples_per_class: 10  # 🐣
+  scr_epochs: 10  # 🐣 각 experience당 epoch 수
+  
   num_epochs: 3000
   num_workers: 2
-
   learning_rate: 0.001
   scheduler_step_size: 500
   scheduler_gamma: 0.8
-  
   temperature: 0.07
-  
   save_interval: 1000
-  test_interval: 1000
+  test_interval: 50  # 🐣 50명마다 평가
   checkpoint_path: /content/drive/MyDrive/rladmstn
   results_path: /content/drive/MyDrive/rladmstn
-
   inference_checkpoint: /content/drive/MyDrive/rladmstn/net_params_best.pth
-
   gpu_ids: "0"
