@@ -36,3 +36,4 @@ Training:
   results_path: /content/drive/MyDrive/rladmstn
   inference_checkpoint: /content/drive/MyDrive/rladmstn/net_params_best.pth
   gpu_ids: "0"
+  ncm_momentum: 0.5  # 🐣 추가 (Avalanche 기본값)

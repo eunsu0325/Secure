@@ -47,3 +47,4 @@ class Training:
     gpu_ids: str
     inference_checkpoint: Optional[Path] = None
     config_file: Optional[Path] = None
+    ncm_momentum: float = 0.5  # 🐣 NCM 클래스 평균 업데이트 momentum
