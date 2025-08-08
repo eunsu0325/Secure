@@ -12,6 +12,8 @@ Dataset:
 Model:
   architecture: ccnet
   competition_weight: 0.8
+  use_pretrained: true
+  pretrained_path: /content/drive/MyDrive/pretrained_models/ccnet_tongji_pretrained.pth
 
 Training:
   # batch_size: 1024  # 🪦 기존 배치 사이즈 제거

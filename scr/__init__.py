@@ -1,6 +1,12 @@
-from scr.memory_buffer import ReservoirSamplingBuffer, ClassBalancedBuffer
-from scr.ncm_classifier import NCMClassifier
+# scr/__init__.py
 from scr.data_stream import ExperienceStream
-from scr.scr_trainer import SCRTrainer  # 🐣 추가
+from scr.memory_buffer import ClassBalancedBuffer
+from scr.ncm_classifier import NCMClassifier
+from scr.scr_trainer import SCRTrainer
 
-__all__ = ['ReservoirSamplingBuffer', 'ClassBalancedBuffer', 'NCMClassifier', 'ExperienceStream', 'SCRTrainer']
+__all__ = [
+    'ExperienceStream',
+    'ClassBalancedBuffer', 
+    'NCMClassifier',
+    'SCRTrainer'
+]

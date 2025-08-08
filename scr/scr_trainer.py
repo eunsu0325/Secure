@@ -11,6 +11,8 @@ from PIL import Image
 from loss import SupConLoss
 from models import get_scr_transforms
 from utils.util import AverageMeter
+# 👻 사전훈련 로더 import 추가
+from utils.pretrained_loader import PretrainedLoader  # 👻
 
 
 class MemoryDataset(Dataset):
@@ -54,6 +56,25 @@ class SCRTrainer:
                  memory_buffer,
                  config,
                  device='cuda'):
+        
+        # 👻 사전훈련 로딩 (모델을 device로 옮기기 전에)
+        if hasattr(config.model, 'use_pretrained') and config.model.use_pretrained:  # 👻
+            if config.model.pretrained_path and config.model.pretrained_path.exists():  # 👻
+                print(f"\n📦 Loading pretrained weights in SCRTrainer...")  # 👻
+                loader = PretrainedLoader()  # 👻
+                try:  # 👻
+                    model = loader.load_ccnet_pretrained(  # 👻
+                        model=model,  # 👻
+                        checkpoint_path=config.model.pretrained_path,  # 👻
+                        device=device,  # 👻
+                        verbose=True  # 👻
+                    )  # 👻
+                    print("✅ Pretrained weights loaded successfully in trainer!")  # 👻
+                except Exception as e:  # 👻
+                    print(f"⚠️  Failed to load pretrained: {e}")  # 👻
+                    print("Continuing with current weights...")  # 👻
+            else:  # 👻
+                print(f"⚠️  Pretrained path not found: {config.model.pretrained_path}")  # 👻
         
         self.model = model
         self.ncm = ncm_classifier
@@ -100,6 +121,12 @@ class SCRTrainer:
         # Statistics
         self.experience_count = 0
         
+        # 👻 사전훈련 사용 여부 로그
+        if hasattr(config.model, 'use_pretrained') and config.model.use_pretrained:  # 👻
+            print(f"🔥 SCRTrainer initialized with pretrained model")  # 👻
+        else:  # 👻
+            print(f"🎲 SCRTrainer initialized with random weights")  # 👻
+    
     def train_experience(self, user_id: int, image_paths: List[str], labels: List[int]) -> Dict:
         """하나의 experience (한 명의 사용자) 학습."""
         
@@ -139,7 +166,7 @@ class SCRTrainer:
                 if len(self.memory_buffer) > 0:
                     # 메모리에서 샘플링
                     memory_paths, memory_labels = self.memory_buffer.sample(
-                        self.config.training.scr_batch_size
+                        self.config.training.memory_batch_size  # 👻 scr_batch_size → memory_batch_size
                     )
                     
                     if torch.is_tensor(memory_labels):

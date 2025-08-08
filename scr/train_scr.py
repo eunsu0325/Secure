@@ -21,6 +21,8 @@ from torch.utils.data import DataLoader, Subset
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import ConfigParser
+# 👻 사전훈련 로더 import 추가
+from utils.pretrained_loader import PretrainedLoader  # 👻
 
 from models import ccnet, MyDataset, get_scr_transforms
 from scr import (
@@ -208,6 +210,8 @@ def main(args):
     
     # 1. Configuration 로드
     config = ConfigParser(args.config)
+    # 👻 config 객체 가져오기
+    config_obj = config.get_config()  # 👻
     print(f"Using config: {args.config}")
     print(config)
     
@@ -232,7 +236,7 @@ def main(args):
     data_stream = ExperienceStream(
         train_file=config.dataset.train_set_file,
         negative_file=config.dataset.negative_samples_file,
-       num_negative_classes=config.dataset.num_negative_classes  
+        num_negative_classes=config.dataset.num_negative_classes  
     )
     
     stats = data_stream.get_statistics()
@@ -244,7 +248,32 @@ def main(args):
     print("\n=== Initializing Model and Components ===")
     
     # CCNet 모델
-    model = ccnet(weight=config.model.competition_weight).to(device)
+    # 💀 model = ccnet(weight=config.model.competition_weight).to(device)
+    model = ccnet(weight=config.model.competition_weight)  # 👻 device 이동 전에 생성
+    
+    # 👻 사전훈련 가중치 로드 (device 이동 전에!)
+    if hasattr(config.model, 'use_pretrained') and config.model.use_pretrained:  # 👻
+        if config.model.pretrained_path and config.model.pretrained_path.exists():  # 👻
+            print(f"\n📦 Loading pretrained weights from main script...")  # 👻
+            loader = PretrainedLoader()  # 👻
+            try:  # 👻
+                model = loader.load_ccnet_pretrained(  # 👻
+                    model=model,  # 👻
+                    checkpoint_path=config.model.pretrained_path,  # 👻
+                    device=device,  # 👻
+                    verbose=True  # 👻
+                )  # 👻
+                print("✅ Pretrained weights loaded successfully!")  # 👻
+            except Exception as e:  # 👻
+                print(f"⚠️  Failed to load pretrained model: {e}")  # 👻
+                print("Continuing with random initialization...")  # 👻
+        else:  # 👻
+            print(f"⚠️  Pretrained path not found or not set")  # 👻
+    else:  # 👻
+        print("🎲 Starting from random initialization")  # 👻
+    
+    # 👻 모델을 device로 이동
+    model = model.to(device)  # 👻
     
     # NCM Classifier
     ncm_classifier = NCMClassifier(normalize=False).to(device)
@@ -256,11 +285,12 @@ def main(args):
     )
     
     # SCR Trainer
+    # 👻 config_obj 전달
     trainer = SCRTrainer(
         model=model,
         ncm_classifier=ncm_classifier,
         memory_buffer=memory_buffer,
-        config=config,
+        config=config_obj,  # 👻 config → config_obj
         device=device
     )
     
@@ -285,6 +315,16 @@ def main(args):
     # NCM 초기화 🐣
     initialize_ncm_with_negatives(trainer, neg_paths, neg_labels)
     
+    # 👻 초기 성능 확인 (사전훈련 효과 검증)
+    if config.model.use_pretrained:  # 👻
+        print("\n🔍 Checking initial performance with pretrained model...")  # 👻
+        initial_acc = evaluate_on_test_set(trainer, config_obj)  # 👻 config → config_obj
+        print(f"Initial accuracy (pretrained): {initial_acc:.2f}%")  # 👻
+        if initial_acc > 5:  # 👻
+            print("✅ Pretrained model is working well!")  # 👻
+        else:  # 👻
+            print("⚠️  Low initial accuracy. Check learning rate and pretrained weights.")  # 👻
+    
     # 6. 평가자 초기화
     evaluator = ContinualLearningEvaluator(num_experiences=config.training.num_experiences)
     
@@ -294,19 +334,25 @@ def main(args):
         'accuracies': [],
         'forgetting_measures': [],
         'memory_sizes': [],
-        'negative_removal_history': []
+        'negative_removal_history': [],
+        # 👻 사전훈련 정보 추가
+        'pretrained_used': config.model.use_pretrained,  # 👻
+        'pretrained_path': str(config.model.pretrained_path) if config.model.pretrained_path else None  # 👻
     }
     
     # 8. Continual Learning 시작
     print("\n=== Starting Continual Learning ===")
     print(f"Total experiences: {config.training.num_experiences}")
     print(f"Evaluation interval: every {config.training.test_interval} users")
+    # 👻 중요 파라미터 출력
+    print(f"Learning rate: {config.training.learning_rate}")  # 👻
+    print(f"Memory batch size: {config.training.memory_batch_size}")  # 👻
+    print(f"Temperature: {config.training.temperature}")  # 👻
     
     start_time = time.time()
     
     for exp_id, (user_id, image_paths, labels) in enumerate(data_stream):
         
-
         print(f"\n=== Debug: Experience {exp_id} ===")
         print(f"user_id: {user_id}")
         print(f"image_paths type: {type(image_paths)}, len: {len(image_paths)}")
@@ -336,7 +382,8 @@ def main(args):
             print(f"\n=== Evaluation at Experience {exp_id + 1} ===")
             
             # 테스트셋으로 평가
-            accuracy = evaluate_on_test_set(trainer, config)
+            # 💀 accuracy = evaluate_on_test_set(trainer, config)
+            accuracy = evaluate_on_test_set(trainer, config_obj)  # 👻 config → config_obj
             
             # 메트릭 업데이트
             evaluator.update(exp_id, accuracy)

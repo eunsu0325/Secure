@@ -1,6 +1,7 @@
+# config/config.py
 import dataclasses
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 @dataclasses.dataclass
 class Dataset:
@@ -10,31 +11,27 @@ class Dataset:
     width: int
     channels: int
     augmentation: bool
-    # SCR 추가 🐣
-    negative_samples_file: Path  # 🐣
-    num_negative_classes: int = 10  # 🐣
-    config_file: Optional[Path] = None
+    negative_samples_file: Path
+    num_negative_classes: int
 
 @dataclasses.dataclass
 class Model:
     architecture: str
-    # num_classes: int  # 🪦 제거
     competition_weight: float
+    # 🔥 사전훈련 관련 추가
+    use_pretrained: bool = False
+    pretrained_path: Optional[Path] = None
     config_file: Optional[Path] = None
 
 @dataclasses.dataclass
 class Training:
-    # batch_size: int  # 🪦 기존 배치 사이즈 제거
-    scr_batch_size: int  # 🐣 새 사용자 샘플 수 (기본 10)
-    memory_batch_size: int  # 🐣 메모리에서 가져올 샘플 수
-    
-    # SCR 특화 설정 🐣
-    num_experiences: int  # 🐣
-    memory_size: int  # 🐣
-    min_samples_per_class: int  # 🐣
-    scr_epochs: int  # 🐣 각 experience당 epoch 수
-    iterations_per_epoch: int  # 🐣 이거 추가!
-    
+    scr_batch_size: int
+    memory_batch_size: int
+    num_experiences: int
+    memory_size: int
+    min_samples_per_class: int
+    scr_epochs: int
+    iterations_per_epoch: int
     num_epochs: int
     num_workers: int
     learning_rate: float
@@ -46,6 +43,10 @@ class Training:
     checkpoint_path: Path
     results_path: Path
     gpu_ids: str
-    inference_checkpoint: Optional[Path] = None
-    config_file: Optional[Path] = None
-    ncm_momentum: float = 0.5  # 🐣 NCM 클래스 평균 업데이트 momentum
+    ncm_momentum: float
+
+@dataclasses.dataclass
+class Config:
+    dataset: Dataset
+    model: Model
+    training: Training
