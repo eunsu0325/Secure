@@ -61,8 +61,8 @@ class SCRTrainer:
         
         # Loss function
         self.criterion = SupConLoss(
-            temperature=config.Training.temperature,
-            base_temperature=config.Training.temperature
+            temperature=config.training.temperature,
+            base_temperature=config.training.temperature
         )
         
         # Optimizer

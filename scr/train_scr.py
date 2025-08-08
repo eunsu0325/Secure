@@ -12,13 +12,13 @@ import numpy as np
 from collections import defaultdict
 from typing import Dict, List
 import json
+import random
 
 import torch
 from torch.utils.data import DataLoader, Subset
 
 # Project imports
 from config import ConfigParser
-config = ConfigParser(args.config)
 
 from models import ccnet, MyDataset, get_scr_transforms
 from scr import (
@@ -27,8 +27,14 @@ from scr import (
     NCMClassifier, 
     SCRTrainer
 )
-from utils.util import fix_random_seed, save_checkpoint
 
+def fix_random_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
 
 class ContinualLearningEvaluator:
     """
@@ -199,7 +205,7 @@ def main(args):
     """메인 실행 함수"""
     
     # 1. Configuration 로드
-    config = build_config(args.config)
+    config = ConfigParser(args.config)
     print(f"Using config: {args.config}")
     print(config)
     
