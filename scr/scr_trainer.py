@@ -9,18 +9,20 @@ from tqdm import tqdm
 from PIL import Image
 
 from loss import SupConLoss
-from models import get_scr_transforms  # 🐣 transform 분리
+from models import get_scr_transforms
 from utils.util import AverageMeter
 
 
 class MemoryDataset(Dataset):
-    """
-    메모리 버퍼의 데이터를 처리하는 래퍼.
-    같은 이미지에 다른 augmentation을 적용하여 positive pair 생성.
-    """
     def __init__(self, paths: List[str], labels: List[int], transform, train=True):
         self.paths = paths
-        self.labels = np.array(labels)
+        
+        # 텐서인 경우 CPU로 이동 후 numpy 변환
+        if torch.is_tensor(labels):
+            self.labels = labels.cpu().numpy()
+        else:
+            self.labels = np.array(labels)
+            
         self.transform = transform
         self.train = train
         
@@ -34,9 +36,9 @@ class MemoryDataset(Dataset):
         # 이미지 로드
         img = Image.open(path).convert('L')
         
-        # 🌕 같은 이미지에 다른 augmentation 적용
+        # 같은 이미지에 다른 augmentation 적용
         data1 = self.transform(img)
-        data2 = self.transform(img)  # 다시 transform 적용 (다른 augmentation)
+        data2 = self.transform(img)
         
         return [data1, data2], label
 
@@ -68,30 +70,30 @@ class SCRTrainer:
         # Optimizer
         self.optimizer = optim.Adam(
             model.parameters(), 
-            lr=config.Training.learning_rate
+            lr=config.training.learning_rate
         )
         
         # Scheduler
         self.scheduler = lr_scheduler.StepLR(
             self.optimizer,
-            step_size=config.Training.scheduler_step_size,
-            gamma=config.Training.scheduler_gamma
+            step_size=config.training.scheduler_step_size,
+            gamma=config.training.scheduler_gamma
         )
         
-        # Transform 🐣
+        # Transform
         self.train_transform = get_scr_transforms(
             train=True,
-            imside=config.Dataset.height,
-            channels=config.Dataset.channels
+            imside=config.dataset.height,
+            channels=config.dataset.channels
         )
         
         self.test_transform = get_scr_transforms(
             train=False,
-            imside=config.Dataset.height,
-            channels=config.Dataset.channels
+            imside=config.dataset.height,
+            channels=config.dataset.channels
         )
         
-        # 🐣 전체 메모리 데이터셋 캐시 (효율성 개선)
+        # 전체 메모리 데이터셋 캐시 (효율성 개선)
         self._full_memory_dataset = None
         self._memory_size_at_last_update = 0
         
@@ -102,6 +104,9 @@ class SCRTrainer:
         """하나의 experience (한 명의 사용자) 학습."""
         
         print(f"\n=== Training Experience {self.experience_count}: User {user_id} ===")
+        
+        # 👻 원본 labels를 보존 (중요!)
+        original_labels = labels.copy()
         
         # 현재 사용자 데이터셋 생성
         current_dataset = MemoryDataset(
@@ -114,30 +119,33 @@ class SCRTrainer:
         # 학습 통계
         loss_avg = AverageMeter('Loss')
         
-        # 🌕 SCR 논문 방식: epoch당 여러 iteration
+        # SCR 논문 방식: epoch당 여러 iteration
         self.model.train()
         
-        for epoch in range(self.config.Training.scr_epochs):
+        for epoch in range(self.config.training.scr_epochs):
             epoch_loss = 0
             
-            for iteration in range(self.config.Training.iterations_per_epoch):
+            for iteration in range(self.config.training.iterations_per_epoch):
                 
-                # 1. 현재 데이터에서 B_n 샘플링 (중복 허용) 🌕
+                # 1. 현재 데이터에서 B_n 샘플링 (중복 허용)
                 current_indices = np.random.choice(
                     len(current_dataset), 
-                    size=self.config.Training.scr_batch_size,
+                    size=self.config.training.scr_batch_size,
                     replace=True
                 )
                 current_subset = Subset(current_dataset, current_indices)
                 
-                # 2. 메모리에서 B_M 샘플링 🔄 수정!
+                # 2. 메모리에서 B_M 샘플링
                 if len(self.memory_buffer) > 0:
                     # 메모리에서 샘플링
                     memory_paths, memory_labels = self.memory_buffer.sample(
-                        self.config.Training.scr_batch_size
+                        self.config.training.scr_batch_size
                     )
                     
-                    # 메모리 데이터셋 생성 (간단하게)
+                    if torch.is_tensor(memory_labels):
+                        memory_labels = memory_labels.cpu().tolist()
+
+                    # 메모리 데이터셋 생성
                     memory_dataset = MemoryDataset(
                         paths=memory_paths,
                         labels=memory_labels,
@@ -145,7 +153,7 @@ class SCRTrainer:
                         train=True
                     )
                     
-                    # 3. ConcatDataset으로 결합 🔄
+                    # 3. ConcatDataset으로 결합
                     combined_dataset = ConcatDataset([current_subset, memory_dataset])
                 else:
                     combined_dataset = current_subset
@@ -153,14 +161,15 @@ class SCRTrainer:
                 # 4. DataLoader로 배치 생성
                 batch_loader = DataLoader(
                     combined_dataset,
-                    batch_size=len(combined_dataset),  # 전체를 한 배치로
-                    shuffle=False,  # 이미 랜덤 샘플링 했으므로
+                    batch_size=len(combined_dataset),
+                    shuffle=False,
                     num_workers=0
                 )
                 
                 # 5. 학습
-                for data, labels in batch_loader:
-                    batch_size = len(labels)
+                # 💀 기존: for data, labels in batch_loader:
+                for data, batch_labels in batch_loader:  # 👻 변수명 변경
+                    batch_size = len(batch_labels)  # 👻 변경
                     
                     # Flatten positive pairs
                     data_views = []
@@ -169,7 +178,7 @@ class SCRTrainer:
                         data_views.append(data[1][i])
                     
                     data = torch.stack(data_views).to(self.device)
-                    labels = labels.to(self.device)
+                    batch_labels = batch_labels.to(self.device)  # 👻 변경
                     
                     # Forward
                     self.optimizer.zero_grad()
@@ -180,7 +189,7 @@ class SCRTrainer:
                     features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
                     
                     # Calculate loss
-                    loss = self.criterion(features, labels)
+                    loss = self.criterion(features, batch_labels)  # 👻 변경
                     loss_avg.update(loss.item(), batch_size)
                     
                     # Backward with gradient clipping
@@ -191,14 +200,24 @@ class SCRTrainer:
                     epoch_loss += loss.item()
             
             if (epoch + 1) % 5 == 0:
-                avg_loss = epoch_loss / self.config.Training.iterations_per_epoch
-                print(f"  Epoch [{epoch+1}/{self.config.Training.scr_epochs}] Loss: {avg_loss:.4f}")
+                avg_loss = epoch_loss / self.config.training.iterations_per_epoch
+                print(f"  Epoch [{epoch+1}/{self.config.training.scr_epochs}] Loss: {avg_loss:.4f}")
         
-        # 5. NCM 업데이트 (메모리 버퍼 데이터만 사용) 🌕
+        # 5. NCM 업데이트 (메모리 버퍼 데이터만 사용)
         self._update_ncm()
         
         # 6. 메모리 버퍼 업데이트
-        self.memory_buffer.update_from_dataset(image_paths, labels)
+        print(f"\n=== Before buffer update ===")
+        print(f"Buffer size: {len(self.memory_buffer)}")
+        print(f"Buffer seen classes: {self.memory_buffer.seen_classes if hasattr(self.memory_buffer, 'seen_classes') else 'N/A'}")
+        print(f"image_paths: {type(image_paths)}, len: {len(image_paths)}")
+        # 💀 print(f"labels: {type(labels)}, len: {len(labels)}")
+        print(f"original_labels: {type(original_labels)}, len: {len(original_labels)}")  # 👻
+        # 💀 print(f"labels content: {labels}")
+        print(f"original_labels content: {original_labels}")  # 👻
+        
+        # 💀 self.memory_buffer.update_from_dataset(image_paths, labels)
+        self.memory_buffer.update_from_dataset(image_paths, original_labels)  # 👻 원본 labels 사용
         self._full_memory_dataset = None  # 캐시 무효화
         print(f"Memory buffer size: {len(self.memory_buffer)}")
         
@@ -219,7 +238,7 @@ class SCRTrainer:
     def _update_ncm(self):
         """
         NCM classifier의 class means를 업데이트합니다.
-        메모리 버퍼의 데이터만 사용합니다. 🌕
+        메모리 버퍼의 데이터만 사용합니다.
         """
         if len(self.memory_buffer) == 0:
             return
@@ -233,7 +252,7 @@ class SCRTrainer:
         dataset = MemoryDataset(
             paths=all_paths,
             labels=all_labels,
-            transform=self.test_transform,  # 테스트 transform (no augmentation)
+            transform=self.test_transform,
             train=False
         )
         
@@ -241,19 +260,19 @@ class SCRTrainer:
             dataset,
             batch_size=128,
             shuffle=False,
-            num_workers=self.config.Training.num_workers
+            num_workers=self.config.training.num_workers
         )
         
         # 클래스별로 features 수집
         class_features = {}
         
         for data, labels in dataloader:
-            # data1만 사용 (테스트 시) 🌕
+            # data1만 사용 (테스트 시)
             data = data[0].to(self.device)
             labels = labels.to(self.device)
             
             # Feature extraction
-            features = self.model.getFeatureCode(data)  # 이미 normalized
+            features = self.model.getFeatureCode(data)
             
             # 클래스별로 분류
             for i, label in enumerate(labels):
@@ -273,7 +292,7 @@ class SCRTrainer:
         # NCM 업데이트
         self.ncm.update_class_means_dict(
             class_means, 
-            momentum=self.config.Training.ncm_momentum
+            momentum=self.config.training.ncm_momentum
         )
         
         print(f"Updated NCM with {len(class_means)} classes")
@@ -290,7 +309,7 @@ class SCRTrainer:
             test_dataset,
             batch_size=128,
             shuffle=False,
-            num_workers=self.config.Training.num_workers
+            num_workers=self.config.training.num_workers
         )
         
         correct = 0
@@ -298,7 +317,7 @@ class SCRTrainer:
         
         with torch.no_grad():
             for data, labels in dataloader:
-                # data1만 사용 (테스트 시) 🌕
+                # data1만 사용 (테스트 시)
                 data = data[0].to(self.device)
                 labels = labels.to(self.device)
                 

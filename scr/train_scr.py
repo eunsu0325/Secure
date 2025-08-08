@@ -82,15 +82,15 @@ def evaluate_on_test_set(trainer: SCRTrainer, config) -> float:
     """
     # 전체 테스트셋 로드
     test_dataset = MyDataset(
-        txt=config.Dataset.test_set_file,
+        txt=config.dataset.test_set_file,
         transforms=get_scr_transforms(
             train=False,
-            imside=config.Dataset.height,
-            channels=config.Dataset.channels
+            imside=config.dataset.height,
+            channels=config.dataset.channels
         ),
         train=False,
-        imside=config.Dataset.height,
-        outchannels=config.Dataset.channels
+        imside=config.dataset.height,
+        outchannels=config.dataset.channels
     )
     
     # 현재까지 학습한 클래스만 필터링
@@ -213,7 +213,7 @@ def main(args):
     
     # GPU 설정
     device = torch.device(
-        f"cuda:{config.Training.gpu_ids}" 
+        f"cuda:{config.training.gpu_ids}" 
         if torch.cuda.is_available() and not args.no_cuda 
         else "cpu"
     )
@@ -224,15 +224,15 @@ def main(args):
         fix_random_seed(args.seed)
     
     # 2. 결과 저장 디렉토리 생성
-    results_dir = os.path.join(config.Training.results_path, 'scr_results')
+    results_dir = os.path.join(config.training.results_path, 'scr_results')
     os.makedirs(results_dir, exist_ok=True)
     
     # 3. 데이터 스트림 초기화
     print("\n=== Initializing Data Stream ===")
     data_stream = ExperienceStream(
-        train_file=config.Dataset.train_set_file,
-        negative_file=config.Dataset.negative_samples_file,
-        num_negative_classes=-1  # 모든 negative 클래스 사용
+        train_file=config.dataset.train_set_file,
+        negative_file=config.dataset.negative_samples_file,
+       num_negative_classes=config.dataset.num_negative_classes  
     )
     
     stats = data_stream.get_statistics()
@@ -244,15 +244,15 @@ def main(args):
     print("\n=== Initializing Model and Components ===")
     
     # CCNet 모델
-    model = ccnet(weight=config.Model.competition_weight).to(device)
+    model = ccnet(weight=config.model.competition_weight).to(device)
     
     # NCM Classifier
     ncm_classifier = NCMClassifier(normalize=False).to(device)
     
     # Memory Buffer
     memory_buffer = ClassBalancedBuffer(
-        max_size=config.Training.memory_size,
-        min_samples_per_class=config.Training.min_samples_per_class
+        max_size=config.training.memory_size,
+        min_samples_per_class=config.training.min_samples_per_class
     )
     
     # SCR Trainer
@@ -269,10 +269,10 @@ def main(args):
     neg_paths, neg_labels = data_stream.get_negative_samples()
     
     # memory_batch_size만큼만 선택
-    if len(neg_paths) > config.Training.memory_batch_size:
+    if len(neg_paths) > config.training.memory_batch_size:
         selected_indices = np.random.choice(
             len(neg_paths), 
-            size=config.Training.memory_batch_size,
+            size=config.training.memory_batch_size,
             replace=False
         )
         neg_paths = [neg_paths[i] for i in selected_indices]
@@ -286,7 +286,7 @@ def main(args):
     initialize_ncm_with_negatives(trainer, neg_paths, neg_labels)
     
     # 6. 평가자 초기화
-    evaluator = ContinualLearningEvaluator(num_experiences=config.Training.num_experiences)
+    evaluator = ContinualLearningEvaluator(num_experiences=config.training.num_experiences)
     
     # 7. 학습 결과 저장용
     training_history = {
@@ -299,12 +299,20 @@ def main(args):
     
     # 8. Continual Learning 시작
     print("\n=== Starting Continual Learning ===")
-    print(f"Total experiences: {config.Training.num_experiences}")
-    print(f"Evaluation interval: every {config.Training.test_interval} users")
+    print(f"Total experiences: {config.training.num_experiences}")
+    print(f"Evaluation interval: every {config.training.test_interval} users")
     
     start_time = time.time()
     
     for exp_id, (user_id, image_paths, labels) in enumerate(data_stream):
+        
+
+        print(f"\n=== Debug: Experience {exp_id} ===")
+        print(f"user_id: {user_id}")
+        print(f"image_paths type: {type(image_paths)}, len: {len(image_paths)}")
+        print(f"labels type: {type(labels)}, len: {len(labels)}")
+        print(f"labels content: {labels}")
+        print(f"unique labels in this batch: {set(labels)}")
         
         # Experience 학습
         stats = trainer.train_experience(user_id, image_paths, labels)
@@ -323,7 +331,7 @@ def main(args):
             trainer._update_ncm()
         
         # 평가 주기 확인
-        if (exp_id + 1) % config.Training.test_interval == 0 or exp_id == config.Training.num_experiences - 1:
+        if (exp_id + 1) % config.training.test_interval == 0 or exp_id == config.training.num_experiences - 1:
             
             print(f"\n=== Evaluation at Experience {exp_id + 1} ===")
             
@@ -359,9 +367,9 @@ def main(args):
         # 진행 상황 출력
         if (exp_id + 1) % 10 == 0:
             elapsed = time.time() - start_time
-            eta = elapsed / (exp_id + 1) * (config.Training.num_experiences - exp_id - 1)
-            print(f"Progress: {exp_id + 1}/{config.Training.num_experiences} "
-                  f"({100 * (exp_id + 1) / config.Training.num_experiences:.1f}%) "
+            eta = elapsed / (exp_id + 1) * (config.training.num_experiences - exp_id - 1)
+            print(f"Progress: {exp_id + 1}/{config.training.num_experiences} "
+                  f"({100 * (exp_id + 1) / config.training.num_experiences:.1f}%) "
                   f"| Elapsed: {elapsed/60:.1f}m | ETA: {eta/60:.1f}m")
     
     # 9. 최종 결과 저장
@@ -387,8 +395,8 @@ def main(args):
     # 결과 요약 저장
     summary = {
         'config': args.config,
-        'num_experiences': config.Training.num_experiences,
-        'memory_size': config.Training.memory_size,
+        'num_experiences': config.training.num_experiences,
+        'memory_size': config.training.memory_size,
         'final_accuracy': final_acc,
         'final_average_accuracy': final_avg_acc,
         'final_forgetting': final_forget,

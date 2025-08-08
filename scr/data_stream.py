@@ -59,38 +59,31 @@ class ExperienceStream:
         return dict(user_data)
     
     def _load_negative_data(self, txt_file: str) -> Dict[int, List[str]]:
-        """Negative 샘플을 로드합니다."""
-        if not os.path.exists(txt_file):
-            raise FileNotFoundError(f"File not found: {txt_file}")
-            
-        negative_data = defaultdict(list)
-        
-        with open(txt_file, 'r') as f:
-            lines = f.readlines()
-            for i, line in enumerate(lines):
-                try:
-                    parts = line.strip().split(' ')
-                    if len(parts) != 2:
-                        continue
-                        
-                    path, label = parts
-                    class_id = int(label)
-                    
-                    if class_id < self.num_negative_classes:
-                        negative_id = -class_id - 1  # 음수 ID 사용
-                        negative_data[negative_id].append(path)
-                        
-                except Exception as e:
-                    print(f"Error processing negative line {i}: {e}")
-                    continue
-        
-        # 디버깅 메시지
-        if negative_data:
-            neg_ids = list(negative_data.keys())
-            print(f"[DEBUG] Negative class IDs: {neg_ids} (using negative IDs)")
-            print(f"[DEBUG] If NCM fails with negative IDs, consider using positive offset")
-        
-        return dict(negative_data)
+      """Negative 샘플을 로드합니다."""
+      negative_data = defaultdict(list)
+      
+      with open(txt_file, 'r') as f:
+          lines = f.readlines()
+          for i, line in enumerate(lines):
+              try:
+                  parts = line.strip().split(' ')
+                  if len(parts) != 2:
+                      continue
+                      
+                  path, label = parts
+                  class_id = int(label)
+                  
+                  # num_negative_classes가 -1이면 모든 클래스 사용
+                  if self.num_negative_classes == -1 or class_id < self.num_negative_classes:
+                      # 큰 숫자 offset 사용 (예: 10000번부터)
+                      negative_id = 10000 + class_id  # 10000, 10001, ...
+                      negative_data[negative_id].append(path)
+                      
+              except Exception as e:
+                  print(f"Error processing negative line {i}: {e}")
+                  continue
+      
+      return dict(negative_data)
     
     def get_experience(self, exp_id: int) -> Tuple[int, List[str], List[int]]:
         """특정 experience의 데이터를 반환합니다."""

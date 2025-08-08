@@ -166,6 +166,11 @@ class ClassBalancedBuffer:  # 🌕 Avalanche storage_policy.py 라인 239-334 �
         :param new_data: 새로운 데이터 리스트
         :param new_labels: 새로운 레이블 리스트
         """
+
+        print(f"\n=== Memory Buffer Update Debug ===")
+        print(f"new_data type: {type(new_data)}, len: {len(new_data)}")
+        print(f"new_labels type: {type(new_labels)}, len: {len(new_labels)}")
+
         if len(new_data) == 0:
             return
 
@@ -176,6 +181,13 @@ class ClassBalancedBuffer:  # 🌕 Avalanche storage_policy.py 라인 239-334 �
             label = int(label)
             cl_idxs[label].append(idx)
 
+         # 디버깅 출력 추가
+        print(f"cl_idxs keys: {list(cl_idxs.keys())}")
+        for key, idxs in cl_idxs.items():
+            print(f"  class {key}: {len(idxs)} indices = {idxs}")
+        print(f"Max index needed: {max(max(idxs) for idxs in cl_idxs.values())}")
+        print(f"new_data length: {len(new_data)}")
+        
         # 클래스별로 데이터 분리
         cl_datasets = {}
         for c, c_idxs in cl_idxs.items():

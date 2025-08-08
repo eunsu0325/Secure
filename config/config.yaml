@@ -6,7 +6,7 @@ Dataset:
   channels: 1
   augmentation: true
   # SCR 추가 🐣
-  negative_samples_file: /content/drive/MyDrive/CCNet_OKD_CD/data/negative_samples.txt  # 🐣
+  negative_samples_file: /content/drive/MyDrive/Data/HandsGPDS150/data_txt/negative_samples.txt  # 🐣
   num_negative_classes: 10  # 🐣
 
 Model:
@@ -16,14 +16,15 @@ Model:
 Training:
   # batch_size: 1024  # 🪦 기존 배치 사이즈 제거
   scr_batch_size: 10  # 🐣 새 사용자 샘플 수
-  memory_batch_size: 246  # 🐣
+  memory_batch_size: 300  # 🐣
   
   # SCR 특화 설정 🐣
   num_experiences: 600  # 🐣
   memory_size: 2000  # 🐣
   min_samples_per_class: 10  # 🐣
   scr_epochs: 10  # 🐣 각 experience당 epoch 수
-  
+  iterations_per_epoch: 25  # 🐣 추가
+
   num_epochs: 3000
   num_workers: 2
   learning_rate: 0.001
@@ -37,4 +38,4 @@ Training:
   inference_checkpoint: /content/drive/MyDrive/rladmstn/net_params_best.pth
   gpu_ids: "0"
   ncm_momentum: 0.5  # 🐣 추가 (Avalanche 기본값)
-  iterations_per_epoch: 25  # 🐣 추가
+  
