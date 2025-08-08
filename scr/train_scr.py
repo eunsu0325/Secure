@@ -17,7 +17,9 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 # Project imports
-from config import build_config
+from config import ConfigParser
+config = ConfigParser(args.config)
+
 from models import ccnet, MyDataset, get_scr_transforms
 from scr import (
     ExperienceStream, 
@@ -131,7 +133,7 @@ def remove_negative_samples_gradually(memory_buffer: ClassBalancedBuffer,
     for class_id in classes_to_remove:
         if class_id in memory_buffer.buffer_groups:
             # 해당 클래스의 샘플 수
-            removed_count += len(memory_buffer.buffer_groups[class_id].buffer_data)
+            removed_count += len(memory_buffer.buffer_groups[class_id].buffer)
             # 버퍼에서 제거
             del memory_buffer.buffer_groups[class_id]
             memory_buffer.seen_classes.remove(class_id)

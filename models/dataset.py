@@ -48,6 +48,31 @@ class NormSingleROI(object):
 
 
 
+def get_scr_transforms(train=True, imside=128, channels=1):
+        """SCR을 위한 transform만 반환"""
+        if not train:
+            return T.Compose([
+                T.Resize(imside),
+                T.ToTensor(),
+                NormSingleROI(outchannels=channels)
+            ])
+        else:
+            return T.Compose([
+                T.Resize(imside),
+                T.RandomChoice(transforms=[
+                    T.ColorJitter(brightness=0, contrast=0.05, saturation=0, hue=0),
+                    T.RandomResizedCrop(size=imside, scale=(0.8,1.0), ratio=(1.0, 1.0)),
+                    T.RandomPerspective(distortion_scale=0.15, p=1),
+                    T.RandomChoice(transforms=[
+                        T.RandomRotation(degrees=10, interpolation=Image.BICUBIC, expand=False, center=(0.5*imside, 0.0)),
+                        T.RandomRotation(degrees=10, interpolation=Image.BICUBIC, expand=False, center=(0.0, 0.5*imside)),
+                    ]),
+                ]),
+                T.ToTensor(),
+                NormSingleROI(outchannels=channels)
+            ])
+
+
 class MyDataset(data.Dataset):
     '''
     Load and process the ROI images::
@@ -149,31 +174,6 @@ class MyDataset(data.Dataset):
         # print(data)
         # print(label)
         return data, int(label)#, img_path
-    
-
-    def get_scr_transforms(train=True, imside=128, channels=1):
-        """SCR을 위한 transform만 반환"""
-        if not train:
-            return T.Compose([
-                T.Resize(imside),
-                T.ToTensor(),
-                NormSingleROI(outchannels=channels)
-            ])
-        else:
-            return T.Compose([
-                T.Resize(imside),
-                T.RandomChoice(transforms=[
-                    T.ColorJitter(brightness=0, contrast=0.05, saturation=0, hue=0),
-                    T.RandomResizedCrop(size=imside, scale=(0.8,1.0), ratio=(1.0, 1.0)),
-                    T.RandomPerspective(distortion_scale=0.15, p=1),
-                    T.RandomChoice(transforms=[
-                        T.RandomRotation(degrees=10, interpolation=Image.BICUBIC, expand=False, center=(0.5*imside, 0.0)),
-                        T.RandomRotation(degrees=10, interpolation=Image.BICUBIC, expand=False, center=(0.0, 0.5*imside)),
-                    ]),
-                ]),
-                T.ToTensor(),
-                NormSingleROI(outchannels=channels)
-            ])
 
     def __len__(self):
         return len(self.images_path)

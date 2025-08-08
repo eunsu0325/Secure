@@ -248,6 +248,20 @@ class ClassBalancedBuffer:  # 🌕 Avalanche storage_policy.py 라인 239-334 �
         
         return all_data, all_labels
     
+
+        # ClassBalancedBuffer에 추가 필요
+    def get_all_data(self) -> Tuple[List, List]:
+        """버퍼의 모든 데이터를 반환"""
+        all_data = []
+        all_labels = []
+        
+        for buffer in self.buffer_groups.values():
+            for data, label in buffer.buffer:
+                all_data.append(data)
+                all_labels.append(label)
+        
+        return all_data, all_labels
+    
     def __len__(self):
         """버퍼에 저장된 총 샘플 수를 반환합니다."""
         return sum(len(buffer.buffer) for buffer in self.buffer_groups.values())
