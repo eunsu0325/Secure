@@ -33,6 +33,7 @@ class Training:
     memory_size: int  # 🐣
     min_samples_per_class: int  # 🐣
     scr_epochs: int  # 🐣 각 experience당 epoch 수
+    iterations_per_epoch: int  # 🐣 이거 추가!
     
     num_epochs: int
     num_workers: int
