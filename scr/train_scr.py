@@ -181,7 +181,7 @@ def initialize_ncm_with_negatives(trainer: SCRTrainer,
     
     with torch.no_grad():
         for data, labels in dataloader:
-            data = data[0].to(trainer.device)  # data1만 사용
+            data = data.to(trainer.device)   
             labels = labels.to(trainer.device)
             
             features = trainer.model.getFeatureCode(data)
