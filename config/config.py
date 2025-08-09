@@ -44,6 +44,7 @@ class Training:
     results_path: Path
     gpu_ids: str
     ncm_momentum: float
+    batch_size : int
 
 @dataclasses.dataclass
 class Config:

@@ -1,10 +1,12 @@
 # config/config_parser.py
+
 import dataclasses
 import sys
 from pathlib import Path
 from typing import Union, List
 import yaml
 from config.config import Dataset, Model, Training
+
 
 class ConfigParser:
     def __init__(self, config_file: Union[str, Path]) -> None:
@@ -25,15 +27,16 @@ class ConfigParser:
                 if isinstance(value, List):
                     config_type[key] = tuple(value)
         
-        # Add config file path
-        for config_type in self.config_dict.values():
-            config_type['config_file'] = self.filename
+        # 🌈 config_file 추가 부분 제거 (에러 원인)
+        # 각 데이터클래스가 config_file 필드를 갖지 않으므로 제거
+        # for config_type in self.config_dict.values():
+        #     config_type['config_file'] = self.filename
         
         # Convert paths to absolute paths
         for config_type in self.config_dict.values():
             for key, value in config_type.items():
                 if key.endswith('_path') or key.endswith('_file'):
-                    # 🔥 None 체크 추가 (pretrained_path가 없을 수 있음)
+                    # None 체크 추가 (pretrained_path가 없을 수 있음)
                     if value is not None:
                         config_type[key] = Path(value).absolute()
                     else:
@@ -41,11 +44,17 @@ class ConfigParser:
         
         # Parse sections
         if 'Dataset' in self.config_dict:
-            self.dataset = Dataset(**self.config_dict['Dataset'])
+            # 🌈 안전하게 복사 후 config_file 제거 (혹시 있다면)
+            dataset_dict = self.config_dict['Dataset'].copy()
+            dataset_dict.pop('config_file', None)
+            self.dataset = Dataset(**dataset_dict)
         
         if 'Model' in self.config_dict:
-            # 🔥 사전훈련 관련 기본값 설정
-            model_dict = self.config_dict['Model']
+            # 🌈 안전하게 복사 후 config_file 제거 (혹시 있다면)
+            model_dict = self.config_dict['Model'].copy()
+            model_dict.pop('config_file', None)
+            
+            # 사전훈련 관련 기본값 설정
             if 'use_pretrained' not in model_dict:
                 model_dict['use_pretrained'] = False
             if 'pretrained_path' not in model_dict:
@@ -54,7 +63,10 @@ class ConfigParser:
             self.model = Model(**model_dict)
         
         if 'Training' in self.config_dict:
-            self.training = Training(**self.config_dict['Training'])
+            # 🌈 안전하게 복사 후 config_file 제거 (혹시 있다면)
+            training_dict = self.config_dict['Training'].copy()
+            training_dict.pop('config_file', None)
+            self.training = Training(**training_dict)
     
     def get_config(self):
         """Config 객체들을 포함한 namespace 반환"""
@@ -63,6 +75,8 @@ class ConfigParser:
         config.dataset = self.dataset
         config.model = self.model
         config.training = self.training
+        # 🌈 config 파일 경로도 추가 (필요시 접근 가능)
+        config.config_file = self.filename
         return config
     
     def __str__(self):
@@ -70,7 +84,11 @@ class ConfigParser:
         for config_type_name, config_type in self.config_dict.items():
             string += f'----- {config_type_name} --- START -----\n'
             for name, value in config_type.items():
+                # config_file은 출력에서 제외
                 if name != 'config_file':
                     string += f'{name:25} : {value}\n'
             string += f'----- {config_type_name} --- END -------\n'
         return string
+    
+    def __repr__(self):
+        return self.__str__()
