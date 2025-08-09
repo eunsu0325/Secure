@@ -11,8 +11,7 @@ from PIL import Image
 from loss import SupConLoss
 from models import get_scr_transforms
 from utils.util import AverageMeter
-# 👻 사전훈련 로더 import 추가
-from utils.pretrained_loader import PretrainedLoader  # 👻
+from utils.pretrained_loader import PretrainedLoader
 
 
 class MemoryDataset(Dataset):
@@ -57,24 +56,24 @@ class SCRTrainer:
                  config,
                  device='cuda'):
         
-        # 👻 사전훈련 로딩 (모델을 device로 옮기기 전에)
-        if hasattr(config.model, 'use_pretrained') and config.model.use_pretrained:  # 👻
-            if config.model.pretrained_path and config.model.pretrained_path.exists():  # 👻
-                print(f"\n📦 Loading pretrained weights in SCRTrainer...")  # 👻
-                loader = PretrainedLoader()  # 👻
-                try:  # 👻
-                    model = loader.load_ccnet_pretrained(  # 👻
-                        model=model,  # 👻
-                        checkpoint_path=config.model.pretrained_path,  # 👻
-                        device=device,  # 👻
-                        verbose=True  # 👻
-                    )  # 👻
-                    print("✅ Pretrained weights loaded successfully in trainer!")  # 👻
-                except Exception as e:  # 👻
-                    print(f"⚠️  Failed to load pretrained: {e}")  # 👻
-                    print("Continuing with current weights...")  # 👻
-            else:  # 👻
-                print(f"⚠️  Pretrained path not found: {config.model.pretrained_path}")  # 👻
+        # 사전훈련 로딩 (모델을 device로 옮기기 전에)
+        if hasattr(config.model, 'use_pretrained') and config.model.use_pretrained:
+            if config.model.pretrained_path and config.model.pretrained_path.exists():
+                print(f"\n📦 Loading pretrained weights in SCRTrainer...")
+                loader = PretrainedLoader()
+                try:
+                    model = loader.load_ccnet_pretrained(
+                        model=model,
+                        checkpoint_path=config.model.pretrained_path,
+                        device=device,
+                        verbose=True
+                    )
+                    print("✅ Pretrained weights loaded successfully in trainer!")
+                except Exception as e:
+                    print(f"⚠️  Failed to load pretrained: {e}")
+                    print("Continuing with current weights...")
+            else:
+                print(f"⚠️  Pretrained path not found: {config.model.pretrained_path}")
         
         self.model = model
         self.ncm = ncm_classifier
@@ -121,18 +120,18 @@ class SCRTrainer:
         # Statistics
         self.experience_count = 0
         
-        # 👻 사전훈련 사용 여부 로그
-        if hasattr(config.model, 'use_pretrained') and config.model.use_pretrained:  # 👻
-            print(f"🔥 SCRTrainer initialized with pretrained model")  # 👻
-        else:  # 👻
-            print(f"🎲 SCRTrainer initialized with random weights")  # 👻
+        # 사전훈련 사용 여부 로그
+        if hasattr(config.model, 'use_pretrained') and config.model.use_pretrained:
+            print(f"🔥 SCRTrainer initialized with pretrained model")
+        else:
+            print(f"🎲 SCRTrainer initialized with random weights")
     
     def train_experience(self, user_id: int, image_paths: List[str], labels: List[int]) -> Dict:
         """하나의 experience (한 명의 사용자) 학습."""
         
         print(f"\n=== Training Experience {self.experience_count}: User {user_id} ===")
         
-        # 👻 원본 labels를 보존 (중요!)
+        # 원본 labels를 보존 (중요!)
         original_labels = labels.copy()
         
         # 현재 사용자 데이터셋 생성
@@ -154,11 +153,11 @@ class SCRTrainer:
             
             for iteration in range(self.config.training.iterations_per_epoch):
                 
-                # 1. 현재 데이터에서 B_n 샘플링 (중복 제거)
+                # 1. 현재 데이터에서 B_n 샘플링 (중복 제거 + 안전한 크기)
                 current_indices = np.random.choice(
                     len(current_dataset), 
-                    size=min(len(current_dataset), self.config.training.scr_batch_size),  # min 추가!
-                    replace=False
+                    size=min(len(current_dataset), self.config.training.scr_batch_size),
+                    replace=False  # 중복 제거!
                 )
                 current_subset = Subset(current_dataset, current_indices)
                 
@@ -166,7 +165,7 @@ class SCRTrainer:
                 if len(self.memory_buffer) > 0:
                     # 메모리에서 샘플링
                     memory_paths, memory_labels = self.memory_buffer.sample(
-                        self.config.training.memory_batch_size  # 👻 scr_batch_size → memory_batch_size
+                        self.config.training.memory_batch_size
                     )
                     
                     if torch.is_tensor(memory_labels):
@@ -189,34 +188,60 @@ class SCRTrainer:
                 batch_loader = DataLoader(
                     combined_dataset,
                     batch_size=len(combined_dataset),
-                    shuffle=False,
+                    shuffle=False,  # 순서 유지 중요!
                     num_workers=0
                 )
                 
-                # 5. 학습
-                # 💀 기존: for data, labels in batch_loader:
-                for data, batch_labels in batch_loader:  # 👻 변수명 변경
-                    batch_size = len(batch_labels)  # 👻 변경
+                # 5. 학습 - ✅ 수정된 부분
+                for data, batch_labels in batch_loader:
+                    batch_size = len(batch_labels)
                     
-                    # Flatten positive pairs
-                    data_views = []
-                    for i in range(batch_size):
-                        data_views.append(data[0][i])
-                        data_views.append(data[1][i])
+                    # ✅ 핵심 수정: 올바른 view 배치
+                    # data[0] = [view1_0, view1_1, ..., view1_B-1]
+                    # data[1] = [view2_0, view2_1, ..., view2_B-1]
+                    view1 = data[0]  # 첫 번째 증강들
+                    view2 = data[1]  # 두 번째 증강들
                     
-                    data = torch.stack(data_views).to(self.device)
-                    batch_labels = batch_labels.to(self.device)  # 👻 변경
+                    # ✅ 올바른 순서로 연결: [모든 view1; 모든 view2]
+                    x = torch.cat([view1, view2], dim=0).to(self.device)
+                    batch_labels = batch_labels.to(self.device)
                     
                     # Forward
                     self.optimizer.zero_grad()
-                    features = self.model(data)
+                    features = self.model(x)  # [2*batch_size, feature_dim]
                     
-                    # Reshape for SupConLoss
-                    f1, f2 = torch.split(features, [batch_size, batch_size], dim=0)
-                    features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
+                    # ✅ 올바른 페어링
+                    # f1 = features[0:batch_size] = 모든 view1의 features
+                    # f2 = features[batch_size:2*batch_size] = 모든 view2의 features
+                    f1 = features[:batch_size]
+                    f2 = features[batch_size:]
+                    
+                    # ✅ 검증: 첫 번째 iteration에서 positive similarity 확인
+                    if iteration == 0 and epoch == 0:
+                        with torch.no_grad():
+                            # Positive pairs: f1[i]와 f2[i]
+                            pos_sim = torch.nn.functional.cosine_similarity(f1, f2, dim=1).mean()
+                            # Negative pairs: f1[i]와 f2[i+1]
+                            neg_sim = torch.nn.functional.cosine_similarity(
+                                f1, f2.roll(shifts=1, dims=0), dim=1
+                            ).mean()
+                            print(f"  📊 Similarity check:")
+                            print(f"     Positive pairs: {pos_sim:.4f} (should be high)")
+                            print(f"     Negative pairs: {neg_sim:.4f} (should be low)")
+                            if pos_sim <= neg_sim:
+                                print("  ⚠️  WARNING: Positive pairs not more similar! Check pairing!")
+                    
+                    # SupConLoss 형식으로 reshape: [batch_size, 2, feature_dim]
+                    features = torch.stack([f1, f2], dim=1)
+                    
+                    # 차원 확인
+                    assert features.shape[0] == batch_labels.shape[0], \
+                        f"Batch size mismatch: features {features.shape[0]} vs labels {batch_labels.shape[0]}"
+                    assert features.shape[1] == 2, \
+                        f"Must have 2 views, got {features.shape[1]}"
                     
                     # Calculate loss
-                    loss = self.criterion(features, batch_labels)  # 👻 변경
+                    loss = self.criterion(features, batch_labels)
                     loss_avg.update(loss.item(), batch_size)
                     
                     # Backward with gradient clipping
@@ -238,13 +263,10 @@ class SCRTrainer:
         print(f"Buffer size: {len(self.memory_buffer)}")
         print(f"Buffer seen classes: {self.memory_buffer.seen_classes if hasattr(self.memory_buffer, 'seen_classes') else 'N/A'}")
         print(f"image_paths: {type(image_paths)}, len: {len(image_paths)}")
-        # 💀 print(f"labels: {type(labels)}, len: {len(labels)}")
-        print(f"original_labels: {type(original_labels)}, len: {len(original_labels)}")  # 👻
-        # 💀 print(f"labels content: {labels}")
-        print(f"original_labels content: {original_labels}")  # 👻
+        print(f"original_labels: {type(original_labels)}, len: {len(original_labels)}")
+        print(f"original_labels content: {original_labels}")
         
-        # 💀 self.memory_buffer.update_from_dataset(image_paths, labels)
-        self.memory_buffer.update_from_dataset(image_paths, original_labels)  # 👻 원본 labels 사용
+        self.memory_buffer.update_from_dataset(image_paths, original_labels)  # 원본 labels 사용
         self._full_memory_dataset = None  # 캐시 무효화
         print(f"Memory buffer size: {len(self.memory_buffer)}")
         
