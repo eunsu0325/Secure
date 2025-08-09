@@ -154,11 +154,11 @@ class SCRTrainer:
             
             for iteration in range(self.config.training.iterations_per_epoch):
                 
-                # 1. 현재 데이터에서 B_n 샘플링 (중복 허용)
+                # 1. 현재 데이터에서 B_n 샘플링 (중복 제거)
                 current_indices = np.random.choice(
                     len(current_dataset), 
-                    size=self.config.training.scr_batch_size,
-                    replace=True
+                    size=min(len(current_dataset), self.config.training.scr_batch_size),  # min 추가!
+                    replace=False
                 )
                 current_subset = Subset(current_dataset, current_indices)
                 

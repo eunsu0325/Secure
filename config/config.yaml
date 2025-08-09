@@ -1,40 +1,41 @@
 Dataset:
-  train_set_file: /content/drive/MyDrive/CCNet_OKD_CD/data/train_Tongji.txt
-  test_set_file: /content/drive/MyDrive/CCNet_OKD_CD/data/test_Tongji.txt
+  train_set_file: /content/drive/MyDrive/Data/GPDSmanosASM_txt/train_palma.txt
+  test_set_file: /content/drive/MyDrive/Data/GPDSmanosASM_txt/test_palma.txt
   height: 128
   width: 128
   channels: 1
   augmentation: true
   # SCR 추가 🐣
-  negative_samples_file: /content/drive/MyDrive/Data/HandsGPDS150/data_txt/negative_samples.txt  # 🐣
+  negative_samples_file: /content/drive/MyDrive/CCNet_OKD_CD/data/train_Tongji.txt  # 🐣
   num_negative_classes: 10  # 🐣
 
 Model:
   architecture: ccnet
   competition_weight: 0.8
   use_pretrained: true
-  pretrained_path: /content/drive/MyDrive/pretrained_models/ccnet_tongji_pretrained.pth
+  pretrained_path: /content/drive/MyDrive/rladmstn/net_params_best.pth
 
 Training:
   # batch_size: 1024  # 🪦 기존 배치 사이즈 제거
   scr_batch_size: 10  # 🐣 새 사용자 샘플 수
-  memory_batch_size: 300  # 🐣
+  memory_batch_size: 118  # 🐣
+  # scr_batch_size + memory_batch_size = 학습 배치 사이즈
   
   # SCR 특화 설정 🐣
-  num_experiences: 600  # 🐣
-  memory_size: 2000  # 🐣
+  num_experiences: 100  # 🐣
+  memory_size: 1000  # 🐣
   min_samples_per_class: 10  # 🐣
-  scr_epochs: 10  # 🐣 각 experience당 epoch 수
-  iterations_per_epoch: 25  # 🐣 추가
+  scr_epochs: 20  # 🐣 각 experience당 epoch 수
+  iterations_per_epoch: 30  # 🐣 추가
 
   num_epochs: 3000
   num_workers: 2
-  learning_rate: 0.001
-  scheduler_step_size: 500
+  learning_rate: 0.0001
+  scheduler_step_size: 50
   scheduler_gamma: 0.8
   temperature: 0.07
   save_interval: 1000
-  test_interval: 50  # 🐣 50명마다 평가
+  test_interval: 10  # 🐣 10명마다 평가
   checkpoint_path: /content/drive/MyDrive/rladmstn
   results_path: /content/drive/MyDrive/rladmstn
   inference_checkpoint: /content/drive/MyDrive/rladmstn/net_params_best.pth
