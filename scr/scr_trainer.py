@@ -192,17 +192,15 @@ class SCRTrainer:
                     num_workers=0
                 )
                 
-                # 5. 학습 - ✅ 수정된 부분
+                # 5. 학습
                 for data, batch_labels in batch_loader:
                     batch_size = len(batch_labels)
                     
-                    # ✅ 핵심 수정: 올바른 view 배치
-                    # data[0] = [view1_0, view1_1, ..., view1_B-1]
-                    # data[1] = [view2_0, view2_1, ..., view2_B-1]
+                    # 올바른 view 배치
                     view1 = data[0]  # 첫 번째 증강들
                     view2 = data[1]  # 두 번째 증강들
                     
-                    # ✅ 올바른 순서로 연결: [모든 view1; 모든 view2]
+                    # 올바른 순서로 연결
                     x = torch.cat([view1, view2], dim=0).to(self.device)
                     batch_labels = batch_labels.to(self.device)
                     
@@ -210,13 +208,11 @@ class SCRTrainer:
                     self.optimizer.zero_grad()
                     features = self.model(x)  # [2*batch_size, feature_dim]
                     
-                    # ✅ 올바른 페어링
-                    # f1 = features[0:batch_size] = 모든 view1의 features
-                    # f2 = features[batch_size:2*batch_size] = 모든 view2의 features
+                    # 올바른 페어링
                     f1 = features[:batch_size]
                     f2 = features[batch_size:]
                     
-                    # ✅ 검증: 첫 번째 iteration에서 positive similarity 확인
+                    # 검증: 첫 번째 iteration에서 positive similarity 확인
                     if iteration == 0 and epoch == 0:
                         with torch.no_grad():
                             # Positive pairs: f1[i]와 f2[i]
@@ -255,10 +251,11 @@ class SCRTrainer:
                 avg_loss = epoch_loss / self.config.training.iterations_per_epoch
                 print(f"  Epoch [{epoch+1}/{self.config.training.scr_epochs}] Loss: {avg_loss:.4f}")
         
-        # 5. NCM 업데이트 (메모리 버퍼 데이터만 사용)
-        self._update_ncm()
+        # 5. NCM 업데이트 (메모리 버퍼 데이터만 사용) 😶‍🌫️
+        # self._update_ncm() 😶‍🌫️
         
-        # 6. 메모리 버퍼 업데이트
+        # 6. 메모리 버퍼 업데이트 😶‍🌫️
+        # 🌈 올바른 순서: 버퍼 먼저, NCM 나중!
         print(f"\n=== Before buffer update ===")
         print(f"Buffer size: {len(self.memory_buffer)}")
         print(f"Buffer seen classes: {self.memory_buffer.seen_classes if hasattr(self.memory_buffer, 'seen_classes') else 'N/A'}")
@@ -266,9 +263,26 @@ class SCRTrainer:
         print(f"original_labels: {type(original_labels)}, len: {len(original_labels)}")
         print(f"original_labels content: {original_labels}")
         
+        # 🌈 Step 1: 메모리 버퍼 업데이트 (먼저!)
         self.memory_buffer.update_from_dataset(image_paths, original_labels)  # 원본 labels 사용
         self._full_memory_dataset = None  # 캐시 무효화
-        print(f"Memory buffer size: {len(self.memory_buffer)}")
+        print(f"Memory buffer size after update: {len(self.memory_buffer)}")
+        
+        # 🌈 Step 2: NCM 업데이트 (버퍼 업데이트 후!)
+        self._update_ncm()
+        
+        # 🌈 디버깅: NCM과 버퍼 동기화 확인
+        all_paths, all_labels = self.memory_buffer.get_all_data()
+        buffer_classes = set(int(label) for label in all_labels)
+        ncm_classes = set(self.ncm.class_means_dict.keys())
+        missing = buffer_classes - ncm_classes
+        
+        if missing:
+            print(f"⚠️  NCM missing classes: {sorted(list(missing))}")
+        else:
+            print(f"✅ NCM synchronized: {len(ncm_classes)} classes")
+        
+        # print(f"Memory buffer size: {len(self.memory_buffer)}") 😶‍🌫️
         
         # 7. Experience 카운터 증가
         self.experience_count += 1
@@ -339,12 +353,29 @@ class SCRTrainer:
                 class_means[label] = mean_feature
         
         # NCM 업데이트
-        self.ncm.update_class_means_dict(
-            class_means, 
-            momentum=self.config.training.ncm_momentum
-        )
+        # 🌈 momentum 수정: 완전 교체 방식으로 변경
+        # self.ncm.update_class_means_dict( 😶‍🌫️
+        #     class_means,  😶‍🌫️
+        #     momentum=self.config.training.ncm_momentum 😶‍🌫️
+        # ) 😶‍🌫️
         
-        print(f"Updated NCM with {len(class_means)} classes")
+        # 🌈 방법 1: 완전 교체 (추천)
+        self.ncm.replace_class_means_dict(class_means)
+        print(f"Updated NCM with {len(class_means)} classes (full replacement)")
+        
+        # 🌈 방법 2: 선택적 momentum (옵션 - 필요시 주석 해제)
+        # for label, new_mean in class_means.items():
+        #     if label not in self.ncm.class_means_dict:
+        #         # 새 클래스: momentum 0
+        #         self.ncm.update_class_means_dict({label: new_mean}, momentum=0.0)
+        #     else:
+        #         # 기존 클래스: config momentum 적용
+        #         self.ncm.update_class_means_dict(
+        #             {label: new_mean}, 
+        #             momentum=self.config.training.ncm_momentum
+        #         )
+        
+        # print(f"Updated NCM with {len(class_means)} classes") 😶‍🌫️
         
         self.model.train()
     
