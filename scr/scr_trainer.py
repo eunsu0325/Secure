@@ -14,8 +14,17 @@ from utils.util import AverageMeter
 from utils.pretrained_loader import PretrainedLoader
 
 
+# 🌈 헬퍼 함수 추가
+def _ensure_single_view(data):
+    """데이터가 2뷰 형식이면 첫 번째 뷰만 반환"""
+    if isinstance(data, (list, tuple)) and len(data) == 2:
+        return data[0]
+    return data
+
+
 class MemoryDataset(Dataset):
-    def __init__(self, paths: List[str], labels: List[int], transform, train=True):
+    # 🌈 dual_views 파라미터 추가
+    def __init__(self, paths: List[str], labels: List[int], transform, train=True, dual_views=None):
         self.paths = paths
         
         # 텐서인 경우 CPU로 이동 후 numpy 변환
@@ -26,6 +35,8 @@ class MemoryDataset(Dataset):
             
         self.transform = transform
         self.train = train
+        # 🌈 dual_views 설정: 명시적 지정 없으면 train 값 따라감
+        self.dual_views = dual_views if dual_views is not None else train
         
     def __len__(self):
         return len(self.paths)
@@ -37,11 +48,16 @@ class MemoryDataset(Dataset):
         # 이미지 로드
         img = Image.open(path).convert('L')
         
-        # 같은 이미지에 다른 augmentation 적용
-        data1 = self.transform(img)
-        data2 = self.transform(img)
-        
-        return [data1, data2], label
+        # 🌈 조건부 뷰 생성
+        if self.dual_views:
+            # 학습용: 2뷰 생성
+            data1 = self.transform(img)
+            data2 = self.transform(img)
+            return [data1, data2], label
+        else:
+            # 평가용: 1뷰만 생성
+            data = self.transform(img)
+            return data, label  # 🌈 리스트가 아닌 단일 텐서 반환
 
 
 class SCRTrainer:
@@ -120,6 +136,12 @@ class SCRTrainer:
         # Statistics
         self.experience_count = 0
         
+        # 🌈 CuDNN 최적화 (고정 크기 입력)
+        if torch.backends.cudnn.is_available():
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.deterministic = False  # 🌈 속도 우선 명시
+            print("🚀 CuDNN benchmark enabled for fixed-size inputs")
+        
         # 사전훈련 사용 여부 로그
         if hasattr(config.model, 'use_pretrained') and config.model.use_pretrained:
             print(f"🔥 SCRTrainer initialized with pretrained model")
@@ -139,7 +161,7 @@ class SCRTrainer:
             paths=image_paths,
             labels=labels,
             transform=self.train_transform,
-            train=True
+            train=True  # 🌈 자동으로 dual_views=True (2뷰 생성)
         )
         
         # 학습 통계
@@ -161,7 +183,7 @@ class SCRTrainer:
                 )
                 current_subset = Subset(current_dataset, current_indices)
                 
-                # 2. 메모리에서 B_M 샘플링
+                # 2. 메모리에서 B_M 샘플링 (SCR 논문: 매 iteration 샘플링)
                 if len(self.memory_buffer) > 0:
                     # 메모리에서 샘플링
                     memory_paths, memory_labels = self.memory_buffer.sample(
@@ -176,7 +198,7 @@ class SCRTrainer:
                         paths=memory_paths,
                         labels=memory_labels,
                         transform=self.train_transform,
-                        train=True
+                        train=True  # 🌈 학습용이므로 2뷰 유지
                     )
                     
                     # 3. ConcatDataset으로 결합
@@ -184,12 +206,14 @@ class SCRTrainer:
                 else:
                     combined_dataset = current_subset
                 
-                # 4. DataLoader로 배치 생성
+                # 4. DataLoader로 배치 생성 (🌈 최적화)
                 batch_loader = DataLoader(
                     combined_dataset,
                     batch_size=len(combined_dataset),
                     shuffle=False,  # 순서 유지 중요!
-                    num_workers=0
+                    num_workers=0,  # 🌈 매번 생성이므로 0 유지
+                    pin_memory=True,  # 🌈 GPU 전송 최적화
+                    persistent_workers=False  # 🌈 명시적 False
                 )
                 
                 # 5. 학습
@@ -200,9 +224,9 @@ class SCRTrainer:
                     view1 = data[0]  # 첫 번째 증강들
                     view2 = data[1]  # 두 번째 증강들
                     
-                    # 올바른 순서로 연결
-                    x = torch.cat([view1, view2], dim=0).to(self.device)
-                    batch_labels = batch_labels.to(self.device)
+                    # 올바른 순서로 연결 (🌈 non_blocking 추가)
+                    x = torch.cat([view1, view2], dim=0).to(self.device, non_blocking=True)
+                    batch_labels = batch_labels.to(self.device, non_blocking=True)
                     
                     # Forward
                     self.optimizer.zero_grad()
@@ -251,27 +275,20 @@ class SCRTrainer:
                 avg_loss = epoch_loss / self.config.training.iterations_per_epoch
                 print(f"  Epoch [{epoch+1}/{self.config.training.scr_epochs}] Loss: {avg_loss:.4f}")
         
-        # 5. NCM 업데이트 (메모리 버퍼 데이터만 사용) 😶‍🌫️
-        # self._update_ncm() 😶‍🌫️
-        
-        # 6. 메모리 버퍼 업데이트 😶‍🌫️
         # 🌈 올바른 순서: 버퍼 먼저, NCM 나중!
         print(f"\n=== Before buffer update ===")
         print(f"Buffer size: {len(self.memory_buffer)}")
         print(f"Buffer seen classes: {self.memory_buffer.seen_classes if hasattr(self.memory_buffer, 'seen_classes') else 'N/A'}")
-        print(f"image_paths: {type(image_paths)}, len: {len(image_paths)}")
-        print(f"original_labels: {type(original_labels)}, len: {len(original_labels)}")
-        print(f"original_labels content: {original_labels}")
         
-        # 🌈 Step 1: 메모리 버퍼 업데이트 (먼저!)
-        self.memory_buffer.update_from_dataset(image_paths, original_labels)  # 원본 labels 사용
+        # Step 1: 메모리 버퍼 업데이트 (먼저!)
+        self.memory_buffer.update_from_dataset(image_paths, original_labels)
         self._full_memory_dataset = None  # 캐시 무효화
         print(f"Memory buffer size after update: {len(self.memory_buffer)}")
         
-        # 🌈 Step 2: NCM 업데이트 (버퍼 업데이트 후!)
+        # Step 2: NCM 업데이트 (버퍼 업데이트 후!)
         self._update_ncm()
         
-        # 🌈 디버깅: NCM과 버퍼 동기화 확인
+        # 디버깅: NCM과 버퍼 동기화 확인
         all_paths, all_labels = self.memory_buffer.get_all_data()
         buffer_classes = set(int(label) for label in all_labels)
         ncm_classes = set(self.ncm.class_means_dict.keys())
@@ -281,8 +298,6 @@ class SCRTrainer:
             print(f"⚠️  NCM missing classes: {sorted(list(missing))}")
         else:
             print(f"✅ NCM synchronized: {len(ncm_classes)} classes")
-        
-        # print(f"Memory buffer size: {len(self.memory_buffer)}") 😶‍🌫️
         
         # 7. Experience 카운터 증가
         self.experience_count += 1
@@ -311,28 +326,31 @@ class SCRTrainer:
         # 메모리 버퍼에서 모든 데이터 가져오기
         all_paths, all_labels = self.memory_buffer.get_all_data()
         
-        # 데이터셋 생성
+        # 🌈 데이터셋 생성 (1뷰만!)
         dataset = MemoryDataset(
             paths=all_paths,
             labels=all_labels,
             transform=self.test_transform,
-            train=False
+            train=False  # 🌈 자동으로 dual_views=False (1뷰만 생성)
         )
         
+        # 🌈 DataLoader 최적화
         dataloader = DataLoader(
             dataset,
             batch_size=128,
             shuffle=False,
-            num_workers=self.config.training.num_workers
+            num_workers=self.config.training.num_workers,
+            pin_memory=True,  # 🌈 GPU 전송 최적화
+            persistent_workers=False  # 🌈 단순화
         )
         
         # 클래스별로 features 수집
         class_features = {}
         
         for data, labels in dataloader:
-            # data1만 사용 (테스트 시)
-            data = data[0].to(self.device)
-            labels = labels.to(self.device)
+            # 🌈 안전장치 + non_blocking
+            data = _ensure_single_view(data).to(self.device, non_blocking=True)
+            labels = labels.to(self.device, non_blocking=True)
             
             # Feature extraction
             features = self.model.getFeatureCode(data)
@@ -349,33 +367,13 @@ class SCRTrainer:
         for label, features_list in class_features.items():
             if len(features_list) > 0:
                 mean_feature = torch.stack(features_list).mean(dim=0)
-                mean_feature = mean_feature / mean_feature.norm()
+                # 🌈 eps 추가 (NaN 방지)
+                mean_feature = mean_feature / (mean_feature.norm(p=2) + 1e-12)
                 class_means[label] = mean_feature
         
-        # NCM 업데이트
-        # 🌈 momentum 수정: 완전 교체 방식으로 변경
-        # self.ncm.update_class_means_dict( 😶‍🌫️
-        #     class_means,  😶‍🌫️
-        #     momentum=self.config.training.ncm_momentum 😶‍🌫️
-        # ) 😶‍🌫️
-        
-        # 🌈 방법 1: 완전 교체 (추천)
+        # NCM 업데이트 (완전 교체 방식)
         self.ncm.replace_class_means_dict(class_means)
         print(f"Updated NCM with {len(class_means)} classes (full replacement)")
-        
-        # 🌈 방법 2: 선택적 momentum (옵션 - 필요시 주석 해제)
-        # for label, new_mean in class_means.items():
-        #     if label not in self.ncm.class_means_dict:
-        #         # 새 클래스: momentum 0
-        #         self.ncm.update_class_means_dict({label: new_mean}, momentum=0.0)
-        #     else:
-        #         # 기존 클래스: config momentum 적용
-        #         self.ncm.update_class_means_dict(
-        #             {label: new_mean}, 
-        #             momentum=self.config.training.ncm_momentum
-        #         )
-        
-        # print(f"Updated NCM with {len(class_means)} classes") 😶‍🌫️
         
         self.model.train()
     
@@ -385,11 +383,14 @@ class SCRTrainer:
         """
         self.model.eval()
         
+        # 🌈 DataLoader 최적화
         dataloader = DataLoader(
             test_dataset,
             batch_size=128,
             shuffle=False,
-            num_workers=self.config.training.num_workers
+            num_workers=self.config.training.num_workers,
+            pin_memory=True,  # 🌈 GPU 전송 최적화
+            persistent_workers=False  # 🌈 단순화
         )
         
         correct = 0
@@ -397,9 +398,9 @@ class SCRTrainer:
         
         with torch.no_grad():
             for data, labels in dataloader:
-                # data1만 사용 (테스트 시)
-                data = data[0].to(self.device)
-                labels = labels.to(self.device)
+                # 🌈 안전장치 + non_blocking
+                data = _ensure_single_view(data).to(self.device, non_blocking=True)
+                labels = labels.to(self.device, non_blocking=True)
                 
                 # Feature extraction
                 features = self.model.getFeatureCode(data)
