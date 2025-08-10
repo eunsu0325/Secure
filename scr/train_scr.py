@@ -148,7 +148,7 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
             if len(known_indices) > 500:
                 known_indices = np.random.choice(known_indices, 500, replace=False)
             
-            known_paths = [test_dataset.images[i] for i in known_indices]
+            known_paths = [test_dataset.images_path[i] for i in known_indices] 
             known_labels = [int(test_dataset.images_label[i]) for i in known_indices]
             
             preds = predict_batch(
@@ -170,7 +170,7 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
             if len(unknown_indices) > 500:
                 unknown_indices = np.random.choice(unknown_indices, 500, replace=False)
             
-            unknown_paths = [test_dataset.images[i] for i in unknown_indices]
+            unknown_paths = [test_dataset.images_path[i] for i in unknown_indices]  # 🐋
             
             preds = predict_batch(
                 trainer.model, trainer.ncm,
@@ -415,18 +415,19 @@ def main(args):
     print(f"Initial buffer size: {len(memory_buffer)}")
     
     # NCM 초기화 🐣
-    initialize_ncm_with_negatives(trainer, neg_paths, neg_labels)
+    # 🍄‍🟫  initialize_ncm_with_negatives(trainer, neg_paths, neg_labels)
+    print("🍄 NCM starts empty - no fake class contamination")  # 🍄
     
-    # 👻 초기 성능 확인 (사전훈련 효과 검증)
-    if config.model.use_pretrained:  # 👻
-        print("\n🔍 Checking initial performance with pretrained model...")  # 👻
-        # 🌪️ initial_acc = evaluate_on_test_set(trainer, config_obj)
-        initial_acc, _ = evaluate_on_test_set(trainer, config_obj, openset_mode=False)  # 🐋
-        print(f"Initial accuracy (pretrained): {initial_acc:.2f}%")  # 👻
-        if initial_acc > 5:  # 👻
-            print("✅ Pretrained model is working well!")  # 👻
-        else:  # 👻
-            print("⚠️  Low initial accuracy. Check learning rate and pretrained weights.")  # 👻
+# 🍄‍🟫    # 👻 초기 성능 확인 (사전훈련 효과 검증)
+# 🍄‍🟫    if config.model.use_pretrained:  # 👻
+# 🍄‍🟫        print("\n🔍 Checking initial performance with pretrained model...")  # 👻
+# 🍄‍🟫        # 🌪️ initial_acc = evaluate_on_test_set(trainer, config_obj)
+# 🍄‍🟫        initial_acc, _ = evaluate_on_test_set(trainer, config_obj, openset_mode=False)  # 🐋
+# 🍄‍🟫        print(f"Initial accuracy (pretrained): {initial_acc:.2f}%")  # 👻
+# 🍄‍🟫        if initial_acc > 5:  # 👻
+# 🍄‍🟫            print("✅ Pretrained model is working well!")  # 👻
+# 🍄‍🟫        else:  # 👻
+# 🍄‍🟫            print("⚠️  Low initial accuracy. Check learning rate and pretrained weights.")  # 👻
     
     # 6. 평가자 초기화
     evaluator = ContinualLearningEvaluator(num_experiences=config.training.num_experiences)

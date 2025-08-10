@@ -16,13 +16,16 @@ Model:
   pretrained_path: /content/drive/MyDrive/rladmstn/net_params_best.pth  # 사전학습 모델 경로
 
 Training:
-  scr_batch_size: 10         # 새 사용자의 샘플 배치 크기
-  memory_batch_size: 118     # 메모리 버퍼에서 가져올 샘플 수 (리플레이)
+  scr_batch_size: 10         # 새 사용자의 샘플 배치 크기 (유지)
+  # 🍄‍🟫 memory_batch_size: 118     # 메모리 버퍼에서 가져올 샘플 수 (리플레이)
+  memory_batch_size: 16      # 🍄 메모리 버퍼에서 가져올 샘플 수 (1:2 비율로 조정)
   num_experiences: 100       # 학습할 총 사용자(experience) 수
   memory_size: 1000          # 메모리 버퍼 최대 크기 (샘플 수)
   min_samples_per_class: 10 # 클래스당 최소 유지 샘플 수
-  scr_epochs: 20             # 각 사용자당 학습 에폭 수
-  iterations_per_epoch: 30  # 에폭당 반복 횟수 (SCR 특화)
+  # 🍄‍🟫 scr_epochs: 5             # 각 사용자당 학습 에폭 수
+  scr_epochs: 2              # 🍄 각 사용자당 학습 에폭 수 (과적합 방지)
+  # 🍄‍🟫 iterations_per_epoch: 10  # 에폭당 반복 횟수 (SCR 특화)
+  iterations_per_epoch: 15   # 🍄 에폭당 반복 횟수 (배치 작아져서 증가)
   num_epochs: 3000           # 전체 학습 에폭 (사용 안 함)
   num_workers: 2             # 데이터 로더 워커 프로세스 수
   learning_rate: 0.0001      # 학습률 (Adam optimizer)
@@ -34,7 +37,8 @@ Training:
   checkpoint_path: /content/drive/MyDrive/scr_test  # 체크포인트 저장 경로
   results_path: /content/drive/MyDrive/scr_test     # 결과 파일 저장 경로
   gpu_ids: "0"               # 사용할 GPU ID
-  ncm_momentum: 0            # NCM 프로토타입 업데이트 모멘텀 (0=완전 교체)
+  # 🍄‍🟫 ncm_momentum: 0            # NCM 프로토타입 업데이트 모멘텀 (0=완전 교체)
+  ncm_momentum: 0.9          # 🍄 NCM 프로토타입 업데이트 모멘텀 (0.9=EMA 적용)
 
 # 🐋 새로 추가 - 오픈셋 인식 설정
 Openset:

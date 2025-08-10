@@ -572,7 +572,7 @@ class SCRTrainer:
     def _update_ncm(self):
         """
         NCM classifier의 class means를 업데이트합니다.
-        메모리 버퍼의 데이터만 사용합니다.
+        🍄 메모리 버퍼의 데이터 중 실제 유저만 사용합니다 (가짜 클래스 제외).
         """
         if len(self.memory_buffer) == 0:
             return
@@ -582,15 +582,46 @@ class SCRTrainer:
         # 메모리 버퍼에서 모든 데이터 가져오기
         all_paths, all_labels = self.memory_buffer.get_all_data()
         
-        # 🌈 데이터셋 생성 (1뷰만!)
-        dataset = MemoryDataset(
-            paths=all_paths,
-            labels=all_labels,
-            transform=self.test_transform,
-            train=False  # 🌈 자동으로 dual_views=False (1뷰만 생성)
-        )
+        # 🍄 가짜 클래스 필터링 (10000 이상은 가짜)
+        NEGREF_BASE = 10000  # 🍄
+        real_paths = []  # 🍄
+        real_labels = []  # 🍄
+        fake_count = 0  # 🍄
         
-        # 🌈 DataLoader 최적화
+        for path, label in zip(all_paths, all_labels):  # 🍄
+            label_int = int(label) if not isinstance(label, int) else label  # 🍄
+            if label_int < NEGREF_BASE:  # 🍄 진짜 유저만!
+                real_paths.append(path)  # 🍄
+                real_labels.append(label)  # 🍄
+            else:  # 🍄
+                fake_count += 1  # 🍄
+        
+        # 🍄 실제 유저가 없으면 NCM 비워둠
+        if not real_paths:  # 🍄
+            print("⚠️ No real users for NCM update (NCM remains empty)")  # 🍄
+            return  # 🍄
+        
+        # 🍄 필터링 결과 출력
+        if fake_count > 0:  # 🍄
+            print(f"🍄 NCM update: {len(real_paths)} real samples ({fake_count} fake samples filtered out)")  # 🍄
+        
+        # 🍄‍🟫 # 🌈 데이터셋 생성 (1뷰만!)
+        # 🍄‍🟫 dataset = MemoryDataset(
+        # 🍄‍🟫     paths=all_paths,
+        # 🍄‍🟫     labels=all_labels,
+        # 🍄‍🟫     transform=self.test_transform,
+        # 🍄‍🟫     train=False  # 🌈 자동으로 dual_views=False (1뷰만 생성)
+        # 🍄‍🟫 )
+        
+        # 🍄 실제 유저 데이터로만 데이터셋 생성
+        dataset = MemoryDataset(  # 🍄
+            paths=real_paths,  # 🍄 가짜 제외된 경로
+            labels=real_labels,  # 🍄 가짜 제외된 라벨
+            transform=self.test_transform,  # 🍄
+            train=False  # 🍄 자동으로 dual_views=False (1뷰만 생성)
+        )  # 🍄
+        
+        # 🌈 DataLoader 최적화 (변경 없음)
         dataloader = DataLoader(
             dataset,
             batch_size=128,
@@ -629,7 +660,11 @@ class SCRTrainer:
         
         # NCM 업데이트 (완전 교체 방식)
         self.ncm.replace_class_means_dict(class_means)
-        print(f"Updated NCM with {len(class_means)} classes (full replacement)")
+        # 🍄‍🟫 print(f"Updated NCM with {len(class_means)} classes (full replacement)")
+        
+        # 🍄 실제 클래스만 확인
+        real_classes = [k for k in class_means.keys() if k < NEGREF_BASE]  # 🍄
+        print(f"🍄 Updated NCM with {len(real_classes)} real classes (no fake contamination)")  # 🍄
         
         self.model.train()
     

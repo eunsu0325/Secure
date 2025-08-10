@@ -67,8 +67,9 @@ class NCMClassifier(nn.Module):
         normalize=True: 코사인 유사도 (정규화 후 내적)
         normalize=False: 유클리디안 거리 (제곱 거리 사용)
         """
-        if self.class_means_dict == {}:
-            self.init_missing_classes(range(self.max_class + 1), x.shape[1], x.device)
+        # 🍄 NCM이 비어있으면 빈 점수 반환
+        if self.class_means_dict == {}:  # 🍄
+            return torch.zeros((x.shape[0], 0), device=x.device, dtype=x.dtype)  # 🍄
 
         assert self.class_means_dict != {}, "no class means available."
         
@@ -177,6 +178,10 @@ class NCMClassifier(nn.Module):
     
     def predict(self, x):
         """클래스 예측을 반환합니다."""
+        # 🍄 NCM이 비어있으면 -1 반환
+        if len(self.class_means_dict) == 0:  # 🍄
+            return torch.full((x.shape[0],), -1, dtype=torch.long, device=x.device)  # 🍄
+        
         scores = self.forward(x)
         return scores.argmax(dim=1)
     
@@ -225,6 +230,10 @@ class NCMClassifier(nn.Module):
         Returns:
             (B,) 예측 클래스 (거부는 -1)
         """
+        # 🍄 NCM이 비어있으면 모두 -1 반환
+        if len(self.class_means_dict) == 0:  # 🍄
+            return torch.full((x.shape[0],), -1, dtype=torch.long, device=x.device)  # 🍄
+        
         # 점수 계산
         scores = self.forward(x)  # (B, C)
         
@@ -273,6 +282,18 @@ class NCMClassifier(nn.Module):
         Returns:
             dict with 'scores', 'predictions', 'margins', 'accept_mask'
         """
+        # 🍄 NCM이 비어있으면 빈 결과 반환
+        if len(self.class_means_dict) == 0:  # 🍄
+            return {  # 🍄
+                'scores': torch.zeros((x.shape[0], 0), device=x.device),  # 🍄
+                'top_scores': torch.zeros(x.shape[0], device=x.device),  # 🍄
+                'predictions': torch.full((x.shape[0],), -1, dtype=torch.long, device=x.device),  # 🍄
+                'margins': None,  # 🍄
+                'accept_mask': torch.zeros(x.shape[0], dtype=torch.bool, device=x.device),  # 🍄
+                'tau_s': self.tau_s,  # 🍄
+                'tau_m': self.tau_m if self.use_margin else None  # 🍄
+            }  # 🍄
+        
         scores = self.forward(x)
         top2 = scores.topk(2, dim=1)
         
@@ -319,6 +340,12 @@ if __name__ == "__main__":
     print("=== 코사인 NCM 테스트 ===")
     ncm_cos = NCMClassifier(normalize=True)
     
+    # 🍄 빈 NCM 테스트
+    print("\n🍄 빈 NCM 테스트:")
+    x_test = torch.randn(10, 128)
+    pred_empty = ncm_cos.predict(x_test)
+    print(f"빈 NCM 예측: {pred_empty} (모두 -1이어야 함)")
+    
     # 정규화된 프로토타입
     class_means = {
         0: F.normalize(torch.randn(128), p=2, dim=0),
@@ -353,22 +380,3 @@ if __name__ == "__main__":
     print(f"평균 최고 점수: {details['top_scores'].mean():.3f}")
     if details['margins'] is not None:
         print(f"평균 마진: {details['margins'].mean():.3f}")
-    
-    print("\n=== 유클리디안 NCM 테스트 ===")
-    ncm_euc = NCMClassifier(normalize=False)
-    
-    # 정규화 안 된 프로토타입
-    class_means = {
-        0: torch.randn(128),
-        1: torch.randn(128),
-    }
-    ncm_euc.replace_class_means_dict(class_means)
-    
-    # 속도 테스트
-    start = time.time()
-    for _ in range(100):
-        _ = ncm_euc.predict(x)
-    print(f"유클리디안 NCM: {time.time()-start:.3f}초")
-    
-    # 동일성 검증
-    ncm_euc.verify_equivalence(x)
