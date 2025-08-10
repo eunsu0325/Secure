@@ -1,49 +1,49 @@
 # 🐋 config/config.yaml에 추가
 Dataset:
-  train_set_file: /content/drive/MyDrive/Data/GPDSmanosASM_txt/train_palma.txt
-  test_set_file: /content/drive/MyDrive/Data/GPDSmanosASM_txt/test_palma.txt
-  height: 128
-  width: 128
-  channels: 1
-  augmentation: true
-  negative_samples_file: /content/drive/MyDrive/CCNet_OKD_CD/data/train_Tongji.txt
-  num_negative_classes: 10
+  train_set_file: /content/drive/MyDrive/Data/GPDSmanosASM_txt/train_palma.txt  # 학습용 데이터셋 경로 (등록할 사용자들)
+  test_set_file: /content/drive/MyDrive/Data/GPDSmanosASM_txt/test_palma.txt    # 평가용 데이터셋 경로 (성능 측정)
+  height: 128        # 입력 이미지 높이 (픽셀)
+  width: 128         # 입력 이미지 너비 (픽셀)
+  channels: 1        # 이미지 채널 수 (1=흑백, 3=컬러)
+  augmentation: true # 데이터 증강 사용 여부 (학습 시 랜덤 변환)
+  negative_samples_file: /content/drive/MyDrive/CCNet_OKD_CD/data/train_Tongji.txt  # NegRef용 네거티브 샘플 (impostor 분포 참조)
+  num_negative_classes: 10  # 초기 학습에 사용할 네거티브 클래스 수
 
 Model:
-  architecture: ccnet
-  competition_weight: 0.8
-  use_pretrained: true
-  pretrained_path: /content/drive/MyDrive/rladmstn/net_params_best.pth
+  architecture: ccnet        # 모델 아키텍처 이름
+  competition_weight: 0.8    # CCNet의 competition 가중치 (특징 추출 강도)
+  use_pretrained: true       # 사전학습 가중치 사용 여부
+  pretrained_path: /content/drive/MyDrive/rladmstn/net_params_best.pth  # 사전학습 모델 경로
 
 Training:
-  scr_batch_size: 10
-  memory_batch_size: 118
-  num_experiences: 100
-  memory_size: 1000
-  min_samples_per_class: 10
-  scr_epochs: 20
-  iterations_per_epoch: 30
-  num_epochs: 3000
-  num_workers: 2
-  learning_rate: 0.0001
-  scheduler_step_size: 50
-  scheduler_gamma: 0.8
-  temperature: 0.07
-  save_interval: 1000
-  test_interval: 10  # 🐋 10명마다 평가 및 캘리브레이션 (통합)
-  checkpoint_path: /content/drive/MyDrive/rladmstn
-  results_path: /content/drive/MyDrive/rladmstn
-  gpu_ids: "0"
-  ncm_momentum: 0.5
+  scr_batch_size: 10         # 새 사용자의 샘플 배치 크기
+  memory_batch_size: 118     # 메모리 버퍼에서 가져올 샘플 수 (리플레이)
+  num_experiences: 100       # 학습할 총 사용자(experience) 수
+  memory_size: 1000          # 메모리 버퍼 최대 크기 (샘플 수)
+  min_samples_per_class: 10 # 클래스당 최소 유지 샘플 수
+  scr_epochs: 20             # 각 사용자당 학습 에폭 수
+  iterations_per_epoch: 30  # 에폭당 반복 횟수 (SCR 특화)
+  num_epochs: 3000           # 전체 학습 에폭 (사용 안 함)
+  num_workers: 2             # 데이터 로더 워커 프로세스 수
+  learning_rate: 0.0001      # 학습률 (Adam optimizer)
+  scheduler_step_size: 50   # 학습률 감소 주기 (에폭)
+  scheduler_gamma: 0.8       # 학습률 감소 비율
+  temperature: 0.07          # SupConLoss 온도 파라미터 (대조 학습 민감도)
+  save_interval: 1000        # 체크포인트 저장 주기 (사용 안 함)
+  test_interval: 10          # 평가 및 캘리브레이션 주기 (N명마다)
+  checkpoint_path: /content/drive/MyDrive/scr_test  # 체크포인트 저장 경로
+  results_path: /content/drive/MyDrive/scr_test     # 결과 파일 저장 경로
+  gpu_ids: "0"               # 사용할 GPU ID
+  ncm_momentum: 0            # NCM 프로토타입 업데이트 모멘텀 (0=완전 교체)
 
-# 🐋 새로 추가
+# 🐋 새로 추가 - 오픈셋 인식 설정
 Openset:
-  enabled: true                  # 오픈셋 기능 활성화
-  warmup_users: 10               # 10명까지는 tau_s=0.7 고정
-  initial_tau: 0.7               # 초기 임계치
-  smoothing_alpha: 0.2           # EMA 스무딩 계수
-  max_delta: 0.03                # 최대 변화폭
-  use_margin: true               # 마진 규칙 사용
-  margin_tau: 0.05               # 마진 임계치
-  dev_ratio: 0.2                 # Dev 세트 비율 (20%)
-  negref_max_eval: 5000          # NegRef 최대 평가 샘플
+  enabled: true              # 오픈셋 기능 활성화 (false면 기존 closed-set 모드)
+  warmup_users: 10           # 워밍업 기간 (N명까지는 고정 임계치 사용)
+  initial_tau: 0.7           # 초기 임계치 값 (코사인 유사도 기준)
+  smoothing_alpha: 0.2       # EMA 스무딩 계수 (0~1, 클수록 빠른 적응)
+  max_delta: 0.03            # 임계치 최대 변화폭 (안정성 제한)
+  use_margin: true           # 마진 규칙 사용 여부 (1등-2등 점수 차이)
+  margin_tau: 0.05           # 마진 임계치 (최소 점수 차이 요구)
+  dev_ratio: 0.2             # Dev 세트 비율 (20% = 캘리브레이션용, 80% = 학습용)
+  negref_max_eval: 5000      # NegRef 평가 시 최대 샘플 수 (속도 제한)

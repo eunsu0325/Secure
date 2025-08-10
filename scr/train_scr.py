@@ -142,7 +142,7 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
         
         if known_indices and trainer.ncm.tau_s is not None:
             # Known에서 TAR/FRR 계산
-            from scr.utils_openset import predict_batch
+            from utils.utils_openset import predict_batch
             
             # 샘플링 (너무 많으면)
             if len(known_indices) > 500:
@@ -164,7 +164,7 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
         
         if unknown_indices and trainer.ncm.tau_s is not None:
             # Unknown에서 TRR/FAR 계산
-            from scr.utils_openset import predict_batch
+            from utils.utils_openset import predict_batch
             
             # 샘플링
             if len(unknown_indices) > 500:
