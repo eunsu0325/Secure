@@ -21,6 +21,16 @@ class NCMClassifier(nn.Module):
         self.class_means_dict = {}
         self.normalize = normalize
         self.max_class = -1
+        
+        # 🐋 === Open-set 관련 추가 ===
+        self.tau_s = None            # 전역 임계치 (코사인 기준 권장)
+        self.use_margin = False     # 마진 규칙 사용 여부
+        self.tau_m = 0.05           # 마진 임계치
+        self.unknown_id = -1        # Unknown 클래스 ID
+        
+        # 🐋 (선택) Z-norm
+        self.use_znorm = False
+        self.impostor_stats = {}    # {class_id: {'mean':..., 'std':...}}
 
     def load_state_dict(self, state_dict, strict: bool = True):
         """체크포인트에서 상태를 로드합니다."""
@@ -178,6 +188,111 @@ class NCMClassifier(nn.Module):
         """현재 저장된 클래스 평균들을 반환합니다."""
         return self.class_means_dict.copy()
     
+    # 🐋 === Open-set 관련 메서드 추가 ===
+    
+    def set_thresholds(self, tau_s: float, use_margin: bool = False, tau_m: float = 0.05):
+        """
+        🐋 오픈셋 임계치 설정
+        
+        Args:
+            tau_s: 전역 임계치 (코사인 유사도 기준)
+            use_margin: 마진 규칙 사용 여부
+            tau_m: 마진 임계치 (1st-2nd 차이)
+        """
+        self.tau_s = float(tau_s)
+        self.use_margin = bool(use_margin)
+        self.tau_m = float(tau_m)
+        
+    def enable_znorm(self, enabled: bool):
+        """🐋 Z-norm 활성화/비활성화"""
+        self.use_znorm = bool(enabled)
+        
+    def update_impostor_stats(self, class_id: int, mean: float, std: float):
+        """🐋 Z-norm용 클래스별 impostor 통계 업데이트"""
+        self.impostor_stats[class_id] = {
+            'mean': float(mean),
+            'std': float(std)
+        }
+    
+    @torch.no_grad()
+    def predict_openset(self, x):
+        """
+        🐋 오픈셋 예측 (전역 임계치 + 선택적 마진)
+        
+        Args:
+            x: (B, D) 임베딩 (코사인 버전이면 L2 정규화 가정)
+            
+        Returns:
+            (B,) 예측 클래스 (거부는 -1)
+        """
+        # 점수 계산
+        scores = self.forward(x)  # (B, C)
+        
+        # Top-2 추출
+        top2 = scores.topk(2, dim=1)  # values: (B,2), indices: (B,2)
+        max_score = top2.values[:, 0]
+        second_score = top2.values[:, 1] if scores.shape[1] > 1 else torch.zeros_like(max_score)
+        pred = top2.indices[:, 0]
+        
+        # 🐋 (선택) Z-norm: 클래스별 impostor 통계로 정규화
+        if self.use_znorm and len(self.impostor_stats) > 0:
+            z_scores = []
+            for i in range(len(pred)):
+                k = int(pred[i].item())
+                if k in self.impostor_stats:
+                    mu = self.impostor_stats[k]['mean']
+                    sd = self.impostor_stats[k]['std'] + 1e-6
+                    z_scores.append((max_score[i].item() - mu) / sd)
+                else:
+                    z_scores.append(max_score[i].item())  # fallback
+            max_score = torch.tensor(z_scores, device=max_score.device, dtype=max_score.dtype)
+        
+        # 🐋 전역 임계치 적용
+        if self.tau_s is not None:
+            accept = max_score >= self.tau_s
+        else:
+            # 임계치 없으면 모두 수용 (closed-set fallback)
+            accept = torch.ones_like(max_score, dtype=torch.bool)
+        
+        # 🐋 마진 규칙 적용
+        if self.use_margin and scores.shape[1] > 1:
+            margin = top2.values[:, 0] - top2.values[:, 1]
+            margin_ok = margin >= self.tau_m
+            accept = accept & margin_ok
+        
+        # 🐋 거부된 샘플은 unknown_id로 설정
+        pred[~accept] = self.unknown_id
+        
+        return pred
+    
+    @torch.no_grad()
+    def get_openset_scores(self, x):
+        """
+        🐋 오픈셋 점수 상세 정보 반환 (디버깅용)
+        
+        Returns:
+            dict with 'scores', 'predictions', 'margins', 'accept_mask'
+        """
+        scores = self.forward(x)
+        top2 = scores.topk(2, dim=1)
+        
+        margin = None
+        if scores.shape[1] > 1:
+            margin = top2.values[:, 0] - top2.values[:, 1]
+        
+        pred = self.predict_openset(x)
+        accept_mask = pred != self.unknown_id
+        
+        return {
+            'scores': scores,
+            'top_scores': top2.values[:, 0],
+            'predictions': pred,
+            'margins': margin,
+            'accept_mask': accept_mask,
+            'tau_s': self.tau_s,
+            'tau_m': self.tau_m if self.use_margin else None
+        }
+    
     @torch.no_grad()
     def verify_equivalence(self, x, tolerance=1e-5):
         """
@@ -221,6 +336,23 @@ if __name__ == "__main__":
     
     # 동일성 검증
     ncm_cos.verify_equivalence(x)
+    
+    # 🐋 === 오픈셋 테스트 추가 ===
+    print("\n=== 오픈셋 테스트 ===")
+    
+    # 임계치 설정
+    ncm_cos.set_thresholds(tau_s=0.7, use_margin=True, tau_m=0.05)
+    
+    # 오픈셋 예측
+    pred_openset = ncm_cos.predict_openset(x)
+    rejected = (pred_openset == -1).sum().item()
+    print(f"오픈셋 예측: {rejected}/{len(x)} 샘플 거부됨")
+    
+    # 상세 정보
+    details = ncm_cos.get_openset_scores(x)
+    print(f"평균 최고 점수: {details['top_scores'].mean():.3f}")
+    if details['margins'] is not None:
+        print(f"평균 마진: {details['margins'].mean():.3f}")
     
     print("\n=== 유클리디안 NCM 테스트 ===")
     ncm_euc = NCMClassifier(normalize=False)

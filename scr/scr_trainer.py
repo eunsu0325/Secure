@@ -4,7 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset, Subset, ConcatDataset
 from torch.optim import lr_scheduler
 import numpy as np
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set  # 🐋 Set 추가
 from tqdm import tqdm
 from PIL import Image
 
@@ -12,6 +12,19 @@ from loss import SupConLoss
 from models import get_scr_transforms
 from utils.util import AverageMeter
 from utils.pretrained_loader import PretrainedLoader
+
+# 🐋 오픈셋 관련 import 추가
+from scr.threshold_calculator import ThresholdCalibrator
+from utils.utils_openset import (  # 🐋 경로 수정 (utils → scr)
+    split_user_data,
+    extract_scores_genuine,
+    extract_scores_impostor_between,
+    extract_scores_impostor_unknown,
+    extract_scores_impostor_negref,
+    balance_impostor_scores,
+    predict_batch,
+    load_paths_labels_from_txt
+)
 
 
 # 🌈 헬퍼 함수 추가
@@ -62,7 +75,7 @@ class MemoryDataset(Dataset):
 
 class SCRTrainer:
     """
-    Supervised Contrastive Replay Trainer.
+    Supervised Contrastive Replay Trainer with Open-set Support.  # 🐋 설명 수정
     """
     
     def __init__(self, 
@@ -133,6 +146,45 @@ class SCRTrainer:
         self._full_memory_dataset = None
         self._memory_size_at_last_update = 0
         
+        # 🐋 === 오픈셋 관련 추가 초기화 ===
+        self.openset_enabled = hasattr(config, 'openset') and config.openset.enabled
+        
+        if self.openset_enabled:
+            self.openset_config = config.openset
+            
+            # Threshold calibrator
+            self.threshold_calibrator = ThresholdCalibrator(
+                mode="cosine",
+                alpha=config.openset.smoothing_alpha,
+                max_delta=config.openset.max_delta,
+                clip_range=(-1.0, 1.0),
+                use_auto_margin=False,
+                margin_init=config.openset.margin_tau,
+                min_samples=10
+            )
+            
+            # Dev/Train 데이터 관리
+            self.dev_data = {}    # {user_id: (paths, labels)}
+            self.train_data = {}  # {user_id: (paths, labels)}
+            self.registered_users = set()
+            
+            # 평가 히스토리
+            self.evaluation_history = []
+            
+            # 초기 임계치 설정
+            self.ncm.set_thresholds(
+                tau_s=config.openset.initial_tau,
+                use_margin=config.openset.use_margin,
+                tau_m=config.openset.margin_tau
+            )
+            
+            print("🐋 Open-set mode enabled")
+            print(f"   Initial τ_s: {config.openset.initial_tau}")
+            print(f"   Margin: {config.openset.use_margin} (τ_m={config.openset.margin_tau})")
+        else:
+            self.registered_users = set()
+            print("📌 Open-set mode disabled")
+        
         # Statistics
         self.experience_count = 0
         
@@ -149,17 +201,36 @@ class SCRTrainer:
             print(f"🎲 SCRTrainer initialized with random weights")
     
     def train_experience(self, user_id: int, image_paths: List[str], labels: List[int]) -> Dict:
-        """하나의 experience (한 명의 사용자) 학습."""
+        """하나의 experience (한 명의 사용자) 학습 - 오픈셋 지원."""  # 🐋 설명 수정
         
         print(f"\n=== Training Experience {self.experience_count}: User {user_id} ===")
         
         # 원본 labels를 보존 (중요!)
         original_labels = labels.copy()
         
-        # 현재 사용자 데이터셋 생성
+        # 🐋 Step 1: Dev/Train 분리 (오픈셋 모드인 경우)
+        if self.openset_enabled:
+            train_paths, train_labels, dev_paths, dev_labels = split_user_data(
+                image_paths, original_labels, 
+                dev_ratio=self.openset_config.dev_ratio,
+                min_dev=2
+            )
+            
+            # 저장
+            self.dev_data[user_id] = (dev_paths, dev_labels)
+            self.train_data[user_id] = (train_paths, train_labels)
+            
+            print(f"🐋 Data split: Train={len(train_paths)}, Dev={len(dev_paths)}")
+        else:
+            train_paths = image_paths
+            train_labels = original_labels
+        
+        self.registered_users.add(user_id)
+        
+        # 현재 사용자 데이터셋 생성 (Train 데이터만)  # 🐋 수정
         current_dataset = MemoryDataset(
-            paths=image_paths,
-            labels=labels,
+            paths=train_paths,  # 🐋 image_paths → train_paths
+            labels=train_labels,  # 🐋 labels → train_labels
             transform=self.train_transform,
             train=True  # 🌈 자동으로 dual_views=True (2뷰 생성)
         )
@@ -280,8 +351,9 @@ class SCRTrainer:
         print(f"Buffer size: {len(self.memory_buffer)}")
         print(f"Buffer seen classes: {self.memory_buffer.seen_classes if hasattr(self.memory_buffer, 'seen_classes') else 'N/A'}")
         
-        # Step 1: 메모리 버퍼 업데이트 (먼저!)
-        self.memory_buffer.update_from_dataset(image_paths, original_labels)
+        # Step 1: 메모리 버퍼 업데이트 (Train 데이터만!)  # 🐋 수정
+        # 🌪️ self.memory_buffer.update_from_dataset(image_paths, original_labels)
+        self.memory_buffer.update_from_dataset(train_paths, train_labels)  # 🐋 Train 데이터만 사용
         self._full_memory_dataset = None  # 캐시 무효화
         print(f"Memory buffer size after update: {len(self.memory_buffer)}")
         
@@ -299,6 +371,33 @@ class SCRTrainer:
         else:
             print(f"✅ NCM synchronized: {len(ncm_classes)} classes")
         
+        # 🐋 Step 3: 주기적 캘리브레이션 및 평가 (오픈셋 모드)
+        if self.openset_enabled and len(self.registered_users) % self.config.training.test_interval == 0:
+            
+            # Warmup 체크
+            if len(self.registered_users) >= self.openset_config.warmup_users:
+                print("\n" + "="*60)
+                print("🔄 THRESHOLD CALIBRATION & EVALUATION")
+                print("="*60)
+                
+                # 캘리브레이션
+                self._calibrate_threshold()
+                
+                # 평가
+                metrics = self._evaluate_openset()
+                
+                # 결과 저장
+                self.evaluation_history.append({
+                    'num_users': len(self.registered_users),
+                    'tau_s': self.ncm.tau_s,
+                    'tau_m': self.ncm.tau_m if self.ncm.use_margin else None,
+                    'metrics': metrics
+                })
+                
+                print("="*60 + "\n")
+            else:
+                print(f"📌 Warmup phase: {len(self.registered_users)}/{self.openset_config.warmup_users}")
+        
         # 7. Experience 카운터 증가
         self.experience_count += 1
         
@@ -309,7 +408,164 @@ class SCRTrainer:
             'experience': self.experience_count - 1,
             'user_id': user_id,
             'loss': loss_avg.avg,
-            'memory_size': len(self.memory_buffer)
+            'memory_size': len(self.memory_buffer),
+            'num_registered': len(self.registered_users)  # 🐋 추가
+        }
+    
+    # 🐋 === 오픈셋 관련 새 메서드들 추가 ===
+    @torch.no_grad()
+    def _calibrate_threshold(self):
+        """🐋 EER 기반 임계치 캘리브레이션"""
+        
+        # Dev 데이터 수집
+        all_dev_paths = []
+        all_dev_labels = []
+        for uid, (paths, labels) in self.dev_data.items():
+            all_dev_paths.extend(paths)
+            all_dev_labels.extend([uid] * len(paths))
+        
+        # 점수 추출
+        print("📊 Extracting scores...")
+        
+        # Genuine scores
+        s_genuine = extract_scores_genuine(
+            self.model, self.ncm,
+            all_dev_paths, all_dev_labels,
+            self.test_transform, self.device
+        )
+        
+        # Impostor scores - 3가지 소스
+        # 1) 등록 클래스 간
+        s_imp_between = extract_scores_impostor_between(
+            self.model, self.ncm,
+            all_dev_paths, all_dev_labels,
+            self.test_transform, self.device,
+            max_pairs=2000
+        )
+        
+        # 2) Unknown (미등록 사용자)
+        s_imp_unknown = extract_scores_impostor_unknown(
+            self.model, self.ncm,
+            self.config.dataset.train_set_file,
+            self.registered_users,
+            self.test_transform, self.device,
+            max_eval=3000
+        )
+        
+        # 3) NegRef
+        s_imp_negref = extract_scores_impostor_negref(
+            self.model, self.ncm,
+            self.config.dataset.negative_samples_file,
+            self.test_transform, self.device,
+            max_eval=self.openset_config.negref_max_eval
+        )
+        
+        # 균형 맞추기
+        s_impostor = balance_impostor_scores(
+            s_imp_between, s_imp_unknown, s_imp_negref,
+            ratio=(0.2, 0.3, 0.5)
+        )
+        
+        print(f"   Genuine: {len(s_genuine)} pairs")
+        print(f"   Impostor: {len(s_impostor)} pairs")
+        
+        # 캘리브레이션
+        if len(s_genuine) >= 10 and len(s_impostor) >= 10:
+            result = self.threshold_calibrator.calibrate(
+                s_genuine, s_impostor,
+                old_tau=self.ncm.tau_s
+            )
+            
+            # NCM에 적용
+            self.ncm.set_thresholds(
+                tau_s=result['tau_smoothed'],
+                use_margin=self.openset_config.use_margin,
+                tau_m=self.openset_config.margin_tau
+            )
+        else:
+            print("⚠️ Not enough samples for calibration")
+    
+    @torch.no_grad()
+    def _evaluate_openset(self):
+        """🐋 오픈셋 평가"""
+        
+        print("\n📈 Open-set Evaluation:")
+        
+        # 1. Known-Dev (TAR/FRR)
+        all_dev_paths = []
+        all_dev_labels = []
+        for uid, (paths, labels) in self.dev_data.items():
+            all_dev_paths.extend(paths)
+            all_dev_labels.extend([uid] * len(paths))
+        
+        if all_dev_paths:
+            preds = predict_batch(
+                self.model, self.ncm,
+                all_dev_paths, self.test_transform, self.device
+            )
+            
+            correct = sum(1 for p, l in zip(preds, all_dev_labels) if p == l)
+            rejected = sum(1 for p in preds if p == -1)
+            
+            TAR = correct / max(1, len(preds))
+            FRR = rejected / max(1, len(preds))
+        else:
+            TAR = FRR = 0.0
+        
+        # 2. Unknown (TRR/FAR)
+        unknown_paths, unknown_labels = load_paths_labels_from_txt(
+            self.config.dataset.train_set_file
+        )
+        
+        # 미등록 사용자만 필터링
+        unknown_filtered = []
+        for p, l in zip(unknown_paths, unknown_labels):
+            if l not in self.registered_users:
+                unknown_filtered.append(p)
+        
+        # 샘플링
+        if len(unknown_filtered) > 1000:
+            unknown_filtered = np.random.choice(unknown_filtered, 1000, replace=False).tolist()
+        
+        if unknown_filtered:
+            preds_unk = predict_batch(
+                self.model, self.ncm,
+                unknown_filtered, self.test_transform, self.device
+            )
+            TRR_u = sum(1 for p in preds_unk if p == -1) / len(preds_unk)
+            FAR_u = 1 - TRR_u
+        else:
+            TRR_u = FAR_u = 0.0
+        
+        # 3. NegRef (선택)
+        negref_paths, _ = load_paths_labels_from_txt(
+            self.config.dataset.negative_samples_file
+        )
+        
+        if len(negref_paths) > 1000:
+            negref_paths = np.random.choice(negref_paths, 1000, replace=False).tolist()
+        
+        if negref_paths:
+            preds_neg = predict_batch(
+                self.model, self.ncm,
+                negref_paths, self.test_transform, self.device
+            )
+            TRR_n = sum(1 for p in preds_neg if p == -1) / len(preds_neg)
+            FAR_n = 1 - TRR_n
+        else:
+            TRR_n = FAR_n = None
+        
+        # 결과 출력
+        print(f"   Known-Dev: TAR={TAR:.3f}, FRR={FRR:.3f}")
+        print(f"   Unknown: TRR={TRR_u:.3f}, FAR={FAR_u:.3f}")
+        if TRR_n is not None:
+            print(f"   NegRef: TRR={TRR_n:.3f}, FAR={FAR_n:.3f}")
+        print(f"   Threshold: τ_s={self.ncm.tau_s:.4f}")
+        
+        return {
+            'TAR': TAR, 'FRR': FRR,
+            'TRR_unknown': TRR_u, 'FAR_unknown': FAR_u,
+            'TRR_negref': TRR_n, 'FAR_negref': FAR_n
         }
     
     @torch.no_grad()
@@ -416,14 +672,26 @@ class SCRTrainer:
     
     def save_checkpoint(self, path: str):
         """체크포인트 저장"""
-        torch.save({
+        # 🐋 오픈셋 관련 데이터도 저장
+        checkpoint_dict = {
             'model_state_dict': self.model.state_dict(),
             'ncm_state_dict': self.ncm.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
             'experience_count': self.experience_count,
             'memory_buffer_size': len(self.memory_buffer)
-        }, path)
+        }
+        
+        # 🐋 오픈셋 관련 추가 저장
+        if self.openset_enabled:
+            checkpoint_dict['openset_data'] = {
+                'tau_s': self.ncm.tau_s,
+                'tau_m': self.ncm.tau_m,
+                'registered_users': list(self.registered_users),
+                'evaluation_history': self.evaluation_history
+            }
+        
+        torch.save(checkpoint_dict, path)
     
     def load_checkpoint(self, path: str):
         """체크포인트 로드"""
@@ -433,3 +701,11 @@ class SCRTrainer:
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         self.experience_count = checkpoint['experience_count']
+        
+        # 🐋 오픈셋 관련 복원
+        if 'openset_data' in checkpoint and self.openset_enabled:
+            openset_data = checkpoint['openset_data']
+            self.ncm.tau_s = openset_data.get('tau_s')
+            self.ncm.tau_m = openset_data.get('tau_m')
+            self.registered_users = set(openset_data.get('registered_users', []))
+            self.evaluation_history = openset_data.get('evaluation_history', [])

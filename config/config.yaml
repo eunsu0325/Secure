@@ -1,3 +1,4 @@
+# 🐋 config/config.yaml에 추가
 Dataset:
   train_set_file: /content/drive/MyDrive/Data/GPDSmanosASM_txt/train_palma.txt
   test_set_file: /content/drive/MyDrive/Data/GPDSmanosASM_txt/test_palma.txt
@@ -5,9 +6,8 @@ Dataset:
   width: 128
   channels: 1
   augmentation: true
-  # SCR 추가 🐣
-  negative_samples_file: /content/drive/MyDrive/CCNet_OKD_CD/data/train_Tongji.txt  # 🐣
-  num_negative_classes: 10  # 🐣
+  negative_samples_file: /content/drive/MyDrive/CCNet_OKD_CD/data/train_Tongji.txt
+  num_negative_classes: 10
 
 Model:
   architecture: ccnet
@@ -16,18 +16,13 @@ Model:
   pretrained_path: /content/drive/MyDrive/rladmstn/net_params_best.pth
 
 Training:
-  # batch_size: 1024  # 🪦 기존 배치 사이즈 제거
-  scr_batch_size: 10  # 🐣 새 사용자 샘플 수
-  memory_batch_size: 118  # 🐣
-  # scr_batch_size + memory_batch_size = 학습 배치 사이즈
-  
-  # SCR 특화 설정 🐣
-  num_experiences: 100  # 🐣
-  memory_size: 1000  # 🐣
-  min_samples_per_class: 10  # 🐣
-  scr_epochs: 20  # 🐣 각 experience당 epoch 수
-  iterations_per_epoch: 30  # 🐣 추가
-
+  scr_batch_size: 10
+  memory_batch_size: 118
+  num_experiences: 100
+  memory_size: 1000
+  min_samples_per_class: 10
+  scr_epochs: 20
+  iterations_per_epoch: 30
   num_epochs: 3000
   num_workers: 2
   learning_rate: 0.0001
@@ -35,9 +30,20 @@ Training:
   scheduler_gamma: 0.8
   temperature: 0.07
   save_interval: 1000
-  test_interval: 5  # 🐣 5명마다 평가
+  test_interval: 10  # 🐋 10명마다 평가 및 캘리브레이션 (통합)
   checkpoint_path: /content/drive/MyDrive/rladmstn
   results_path: /content/drive/MyDrive/rladmstn
   gpu_ids: "0"
-  ncm_momentum: 0.5  # 🐣 추가 (Avalanche 기본값)
-  
+  ncm_momentum: 0.5
+
+# 🐋 새로 추가
+Openset:
+  enabled: true                  # 오픈셋 기능 활성화
+  warmup_users: 10               # 10명까지는 tau_s=0.7 고정
+  initial_tau: 0.7               # 초기 임계치
+  smoothing_alpha: 0.2           # EMA 스무딩 계수
+  max_delta: 0.03                # 최대 변화폭
+  use_margin: true               # 마진 규칙 사용
+  margin_tau: 0.05               # 마진 임계치
+  dev_ratio: 0.2                 # Dev 세트 비율 (20%)
+  negref_max_eval: 5000          # NegRef 최대 평가 샘플

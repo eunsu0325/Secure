@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Supervised Contrastive Replay (SCR) Training Script
+Supervised Contrastive Replay (SCR) Training Script with Open-set Support  # 🐋 설명 수정
 CCNet + SCR for Continual Learning
 """
 
@@ -45,14 +45,20 @@ class ContinualLearningEvaluator:
     Continual Learning 평가 메트릭 계산
     - Average Accuracy
     - Forgetting Measure
+    🐋 - Open-set metrics (TAR, TRR, FAR)
     """
     def __init__(self, num_experiences: int):
         self.num_experiences = num_experiences
         self.accuracy_history = defaultdict(list)  # {exp_id: [acc1, acc2, ...]}
+        self.openset_history = []  # 🐋 오픈셋 메트릭 히스토리
         
     def update(self, experience_id: int, accuracy: float):
         """experience_id 학습 후 정확도 업데이트"""
         self.accuracy_history[experience_id].append(accuracy)
+    
+    def update_openset(self, metrics: dict):  # 🐋 새 메서드
+        """오픈셋 메트릭 업데이트"""
+        self.openset_history.append(metrics)
     
     def get_average_accuracy(self) -> float:
         """현재까지의 평균 정확도"""
@@ -75,12 +81,22 @@ class ContinualLearningEvaluator:
                 forgetting.append(max_acc - curr_acc)
         
         return np.mean(forgetting) if forgetting else 0.0
+    
+    def get_latest_openset_metrics(self) -> dict:  # 🐋 새 메서드
+        """최신 오픈셋 메트릭 반환"""
+        if self.openset_history:
+            return self.openset_history[-1]
+        return {}
 
 
-def evaluate_on_test_set(trainer: SCRTrainer, config) -> float:
+# 🌪️ def evaluate_on_test_set(trainer: SCRTrainer, config) -> float:
+def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tuple:  # 🐋 수정
     """
-    test_Tongji.txt를 사용한 전체 평가
-    현재까지 학습한 클래스만 평가
+    test_set_file을 사용한 전체 평가
+    🐋 openset_mode=True면 오픈셋 평가도 수행
+    
+    Returns:
+        (accuracy, openset_metrics) if openset_mode else (accuracy, None)
     """
     # 전체 테스트셋 로드
     test_dataset = MyDataset(
@@ -99,25 +115,100 @@ def evaluate_on_test_set(trainer: SCRTrainer, config) -> float:
     known_classes = set(trainer.ncm.class_means_dict.keys())
     
     if not known_classes:
-        return 0.0
+        # 🌪️ return 0.0
+        return (0.0, {}) if openset_mode else (0.0, None)  # 🐋
     
-    # 필터링된 인덱스 찾기
-    filtered_indices = []
-    for i in range(len(test_dataset)):
-        label = int(test_dataset.images_label[i])
-        if label in known_classes:
-            filtered_indices.append(i)
+    # 🐋 오픈셋 모드: Known과 Unknown 분리
+    if openset_mode and trainer.openset_enabled:
+        known_indices = []
+        unknown_indices = []
+        
+        for i in range(len(test_dataset)):
+            label = int(test_dataset.images_label[i])
+            if label in known_classes:
+                known_indices.append(i)
+            else:
+                unknown_indices.append(i)
+        
+        # Known 평가 (Closed-set accuracy)
+        if known_indices:
+            known_subset = Subset(test_dataset, known_indices)
+            accuracy = trainer.evaluate(known_subset)
+        else:
+            accuracy = 0.0
+        
+        # 🐋 오픈셋 메트릭 계산
+        openset_metrics = {}
+        
+        if known_indices and trainer.ncm.tau_s is not None:
+            # Known에서 TAR/FRR 계산
+            from scr.utils_openset import predict_batch
+            
+            # 샘플링 (너무 많으면)
+            if len(known_indices) > 500:
+                known_indices = np.random.choice(known_indices, 500, replace=False)
+            
+            known_paths = [test_dataset.images[i] for i in known_indices]
+            known_labels = [int(test_dataset.images_label[i]) for i in known_indices]
+            
+            preds = predict_batch(
+                trainer.model, trainer.ncm,
+                known_paths, trainer.test_transform, trainer.device
+            )
+            
+            correct = sum(1 for p, l in zip(preds, known_labels) if p == l)
+            rejected = sum(1 for p in preds if p == -1)
+            
+            openset_metrics['TAR'] = correct / max(1, len(preds))
+            openset_metrics['FRR'] = rejected / max(1, len(preds))
+        
+        if unknown_indices and trainer.ncm.tau_s is not None:
+            # Unknown에서 TRR/FAR 계산
+            from scr.utils_openset import predict_batch
+            
+            # 샘플링
+            if len(unknown_indices) > 500:
+                unknown_indices = np.random.choice(unknown_indices, 500, replace=False)
+            
+            unknown_paths = [test_dataset.images[i] for i in unknown_indices]
+            
+            preds = predict_batch(
+                trainer.model, trainer.ncm,
+                unknown_paths, trainer.test_transform, trainer.device
+            )
+            
+            openset_metrics['TRR_unknown'] = sum(1 for p in preds if p == -1) / len(preds)
+            openset_metrics['FAR_unknown'] = 1 - openset_metrics['TRR_unknown']
+        
+        openset_metrics['tau_s'] = trainer.ncm.tau_s
+        openset_metrics['tau_m'] = trainer.ncm.tau_m if trainer.ncm.use_margin else None
+        
+        print(f"Evaluating on {len(known_indices)} known + {len(unknown_indices)} unknown samples")
+        
+        return accuracy, openset_metrics
     
-    if not filtered_indices:
-        return 0.0
-    
-    # Subset 생성
-    filtered_test = Subset(test_dataset, filtered_indices)
-    
-    print(f"Evaluating on {len(filtered_indices)} test samples from {len(known_classes)} classes")
-    
-    # 평가
-    return trainer.evaluate(filtered_test)
+    else:
+        # 🐋 기존 방식 (Closed-set만)
+        # 필터링된 인덱스 찾기
+        filtered_indices = []
+        for i in range(len(test_dataset)):
+            label = int(test_dataset.images_label[i])
+            if label in known_classes:
+                filtered_indices.append(i)
+        
+        if not filtered_indices:
+            # 🌪️ return 0.0
+            return (0.0, None)  # 🐋
+        
+        # Subset 생성
+        filtered_test = Subset(test_dataset, filtered_indices)
+        
+        print(f"Evaluating on {len(filtered_indices)} test samples from {len(known_classes)} classes")
+        
+        # 평가
+        # 🌪️ return trainer.evaluate(filtered_test)
+        accuracy = trainer.evaluate(filtered_test)  # 🐋
+        return accuracy, None  # 🐋
 
 
 def remove_negative_samples_gradually(memory_buffer: ClassBalancedBuffer, 
@@ -215,6 +306,15 @@ def main(args):
     print(f"Using config: {args.config}")
     print(config)
     
+    # 🐋 오픈셋 모드 확인
+    openset_enabled = hasattr(config_obj, 'openset') and config_obj.openset.enabled
+    if openset_enabled:
+        print("\n🐋 ========== OPEN-SET MODE ENABLED ==========")
+        print(f"   Warmup users: {config_obj.openset.warmup_users}")
+        print(f"   Initial tau: {config_obj.openset.initial_tau}")
+        print(f"   Margin: {config_obj.openset.use_margin} (tau={config_obj.openset.margin_tau})")
+        print("🐋 =========================================\n")
+    
     # GPU 설정
     device = torch.device(
         f"cuda:{config.training.gpu_ids}" 
@@ -229,6 +329,8 @@ def main(args):
     
     # 2. 결과 저장 디렉토리 생성
     results_dir = os.path.join(config.training.results_path, 'scr_results')
+    if openset_enabled:  # 🐋
+        results_dir = os.path.join(config.training.results_path, 'scr_openset_results')
     os.makedirs(results_dir, exist_ok=True)
     
     # 3. 데이터 스트림 초기화
@@ -248,7 +350,6 @@ def main(args):
     print("\n=== Initializing Model and Components ===")
     
     # CCNet 모델
-    # 💀 model = ccnet(weight=config.model.competition_weight).to(device)
     model = ccnet(weight=config.model.competition_weight)  # 👻 device 이동 전에 생성
     
     # 👻 사전훈련 가중치 로드 (device 이동 전에!)
@@ -276,7 +377,8 @@ def main(args):
     model = model.to(device)  # 👻
     
     # NCM Classifier
-    ncm_classifier = NCMClassifier(normalize=False).to(device)
+    # 🌪️ ncm_classifier = NCMClassifier(normalize=False).to(device)
+    ncm_classifier = NCMClassifier(normalize=True).to(device)  # 🐋 코사인 모드로 변경
     
     # Memory Buffer
     memory_buffer = ClassBalancedBuffer(
@@ -318,7 +420,8 @@ def main(args):
     # 👻 초기 성능 확인 (사전훈련 효과 검증)
     if config.model.use_pretrained:  # 👻
         print("\n🔍 Checking initial performance with pretrained model...")  # 👻
-        initial_acc = evaluate_on_test_set(trainer, config_obj)  # 👻 config → config_obj
+        # 🌪️ initial_acc = evaluate_on_test_set(trainer, config_obj)
+        initial_acc, _ = evaluate_on_test_set(trainer, config_obj, openset_mode=False)  # 🐋
         print(f"Initial accuracy (pretrained): {initial_acc:.2f}%")  # 👻
         if initial_acc > 5:  # 👻
             print("✅ Pretrained model is working well!")  # 👻
@@ -335,9 +438,11 @@ def main(args):
         'forgetting_measures': [],
         'memory_sizes': [],
         'negative_removal_history': [],
+        'openset_metrics': [],  # 🐋 추가
         # 👻 사전훈련 정보 추가
         'pretrained_used': config.model.use_pretrained,  # 👻
-        'pretrained_path': str(config.model.pretrained_path) if config.model.pretrained_path else None  # 👻
+        'pretrained_path': str(config.model.pretrained_path) if config.model.pretrained_path else None,  # 👻
+        'openset_enabled': openset_enabled  # 🐋 추가
     }
     
     # 8. Continual Learning 시작
@@ -382,27 +487,53 @@ def main(args):
             print(f"\n=== Evaluation at Experience {exp_id + 1} ===")
             
             # 테스트셋으로 평가
-            # 💀 accuracy = evaluate_on_test_set(trainer, config)
-            accuracy = evaluate_on_test_set(trainer, config_obj)  # 👻 config → config_obj
+            # 🌪️ accuracy = evaluate_on_test_set(trainer, config_obj)
+            accuracy, openset_metrics = evaluate_on_test_set(  # 🐋
+                trainer, config_obj, 
+                openset_mode=openset_enabled
+            )
             
             # 메트릭 업데이트
             evaluator.update(exp_id, accuracy)
+            if openset_metrics:  # 🐋
+                evaluator.update_openset(openset_metrics)
             
             # 평균 정확도와 Forgetting 계산
             avg_acc = evaluator.get_average_accuracy()
             forgetting = evaluator.get_forgetting_measure()
             
-            training_history['accuracies'].append({
+            # 🐋 기록 저장
+            accuracy_record = {
                 'experience': exp_id + 1,
                 'accuracy': accuracy,
                 'average_accuracy': avg_acc,
                 'forgetting': forgetting
-            })
+            }
+            
+            # 🐋 오픈셋 메트릭 추가
+            if openset_metrics:
+                accuracy_record.update(openset_metrics)
+                training_history['openset_metrics'].append(openset_metrics)
+            
+            training_history['accuracies'].append(accuracy_record)
             
             print(f"Test Accuracy: {accuracy:.2f}%")
             print(f"Average Accuracy: {avg_acc:.2f}%")
             print(f"Forgetting Measure: {forgetting:.2f}%")
             print(f"Memory Buffer Size: {len(memory_buffer)}")
+            
+            # 🐋 오픈셋 메트릭 출력
+            if openset_metrics:
+                print(f"\n🐋 Open-set Metrics:")
+                if 'TAR' in openset_metrics:
+                    print(f"   TAR: {openset_metrics['TAR']:.3f}, FRR: {openset_metrics['FRR']:.3f}")
+                if 'TRR_unknown' in openset_metrics:
+                    print(f"   TRR_unknown: {openset_metrics['TRR_unknown']:.3f}, FAR_unknown: {openset_metrics['FAR_unknown']:.3f}")
+                print(f"   τ_s: {openset_metrics['tau_s']:.4f}")
+            
+            # 🐋 Trainer의 오픈셋 평가 히스토리도 저장
+            if hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
+                training_history['trainer_openset_history'] = trainer.evaluation_history
             
             # 체크포인트 저장
             checkpoint_path = os.path.join(
@@ -437,7 +568,16 @@ def main(args):
     print(f"Final Test Accuracy: {final_acc:.2f}%")
     print(f"Final Average Accuracy: {final_avg_acc:.2f}%")
     print(f"Final Forgetting Measure: {final_forget:.2f}%")
-    print(f"Total Training Time: {(time.time() - start_time)/60:.1f} minutes")
+    
+    # 🐋 최종 오픈셋 메트릭
+    if openset_enabled and 'TAR' in final_result:
+        print(f"\n🐋 Final Open-set Performance:")
+        print(f"   TAR: {final_result.get('TAR', 0):.3f}")
+        print(f"   TRR (Unknown): {final_result.get('TRR_unknown', 0):.3f}")
+        print(f"   FAR (Unknown): {final_result.get('FAR_unknown', 0):.3f}")
+        print(f"   Final τ_s: {final_result.get('tau_s', 0):.4f}")
+    
+    print(f"\nTotal Training Time: {(time.time() - start_time)/60:.1f} minutes")
     
     # 결과 요약 저장
     summary = {
@@ -448,8 +588,18 @@ def main(args):
         'final_average_accuracy': final_avg_acc,
         'final_forgetting': final_forget,
         'total_time_minutes': (time.time() - start_time) / 60,
-        'negative_removal_history': training_history['negative_removal_history']
+        'negative_removal_history': training_history['negative_removal_history'],
+        'openset_enabled': openset_enabled  # 🐋
     }
+    
+    # 🐋 오픈셋 요약 추가
+    if openset_enabled and final_result:
+        summary['final_openset'] = {
+            'TAR': final_result.get('TAR', 0),
+            'TRR_unknown': final_result.get('TRR_unknown', 0),
+            'FAR_unknown': final_result.get('FAR_unknown', 0),
+            'tau_s': final_result.get('tau_s', 0)
+        }
     
     summary_path = os.path.join(results_dir, 'summary.json')
     with open(summary_path, 'w') as f:
@@ -459,7 +609,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='SCR Training for CCNet')
+    parser = argparse.ArgumentParser(description='SCR Training for CCNet with Open-set Support')  # 🐋 설명 수정
     parser.add_argument('--config', type=str, default='config/config.yaml',
                         help='Path to config file')
     parser.add_argument('--seed', type=int, default=42,

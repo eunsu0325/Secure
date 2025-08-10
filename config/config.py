@@ -1,7 +1,8 @@
-# config/config.py
+# 🐋 config/config.py 수정
 import dataclasses
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional
+
 
 @dataclasses.dataclass
 class Dataset:
@@ -14,14 +15,14 @@ class Dataset:
     negative_samples_file: Path
     num_negative_classes: int
 
+
 @dataclasses.dataclass
 class Model:
     architecture: str
     competition_weight: float
-    # 🔥 사전훈련 관련 추가
     use_pretrained: bool = False
     pretrained_path: Optional[Path] = None
-    config_file: Optional[Path] = None
+
 
 @dataclasses.dataclass
 class Training:
@@ -44,10 +45,18 @@ class Training:
     results_path: Path
     gpu_ids: str
     ncm_momentum: float
-    batch_size : int
+    batch_size: int = 128  # 🐋 평가용 배치 사이즈 기본값
+
 
 @dataclasses.dataclass
-class Config:
-    dataset: Dataset
-    model: Model
-    training: Training
+class Openset:  # 🐋 신규 추가
+    """Open-set configuration"""
+    enabled: bool = True
+    warmup_users: int = 10
+    initial_tau: float = 0.7
+    smoothing_alpha: float = 0.2
+    max_delta: float = 0.03
+    use_margin: bool = True
+    margin_tau: float = 0.05
+    dev_ratio: float = 0.2
+    negref_max_eval: int = 5000
