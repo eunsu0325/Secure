@@ -89,10 +89,22 @@ class SupConLoss(nn.Module):
         log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True))
 
         # compute mean of log-likelihood over positive
-        mean_log_prob_pos = (mask * log_prob).sum(1) / mask.sum(1)
+        # mean_log_prob_pos = (mask * log_prob).sum(1) / mask.sum(1)  # 🪵 기존: 양성 0일 때 NaN 발생
+        
+        # 🌽 양성 0 앵커 안전 처리
+        pos_per_row = mask.sum(1)  # 🌽 [B_total]
+        valid = pos_per_row > 0    # 🌽 양성 있는 앵커만
+        num = (mask * log_prob).sum(1)  # 🌽
+        
+        mean_log_prob_pos = torch.zeros_like(pos_per_row)  # 🌽
+        mean_log_prob_pos[valid] = num[valid] / pos_per_row[valid].clamp_min(1)  # 🌽
 
         # loss
-        loss = - (self.temperature / self.base_temperature) * mean_log_prob_pos
-        loss = loss.view(anchor_count, batch_size).mean()
+        # loss = - (self.temperature / self.base_temperature) * mean_log_prob_pos  # 🪵
+        # loss = loss.view(anchor_count, batch_size).mean()  # 🪵 reshape 제거 (valid 인덱싱 때문)
+        
+        # 🌽 valid 앵커만 손실 계산
+        loss = -(self.temperature / self.base_temperature) * mean_log_prob_pos[valid]  # 🌽
+        loss = loss.mean() if valid.any() else torch.zeros([], device=device)  # 🌽
 
         return loss

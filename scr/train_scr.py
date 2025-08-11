@@ -40,6 +40,70 @@ def fix_random_seed(seed):
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
+# 🌽 BASE_ID 계산 함수 추가
+def compute_safe_base_id(*txt_files):
+    """모든 txt 파일에서 최대 user ID를 찾아 안전한 BASE_ID 계산"""
+    max_id = 0
+    for path in txt_files:
+        with open(path, 'r', encoding='utf-8') as fh:
+            for line in fh:
+                parts = line.strip().split()
+                if len(parts) != 2:
+                    continue
+                try:
+                    lab = int(parts[1])
+                except ValueError:
+                    continue
+                max_id = max(max_id, lab)
+    base = max_id + 1
+    print(f"[NEG-BASE] max_user_id={max_id}, BASE_ID={base}")
+    return base
+
+# 🌽 purge_negatives 함수 추가
+def purge_negatives(memory_buffer, base_id):
+    """메모리 버퍼에서 모든 네거티브 클래스 제거"""
+    to_del = [int(c) for c in list(memory_buffer.seen_classes) if int(c) >= base_id]
+    removed = 0
+    for c in to_del:
+        if c in memory_buffer.buffer_groups:
+            removed += len(memory_buffer.buffer_groups[c].buffer)
+            del memory_buffer.buffer_groups[c]
+        memory_buffer.seen_classes.discard(c)
+    print(f"🧹 Purged {len(to_del)} negative classes ({removed} samples)")
+
+# 🌽 remove_negative_samples_gradually 함수 수정 (버그 수정)
+def remove_negative_samples_gradually(memory_buffer: ClassBalancedBuffer, 
+                                    base_id: int,  # 🌽 base_id 파라미터 추가
+                                    removal_ratio: float = 0.2):
+    """
+    메모리 버퍼에서 negative 샘플을 점진적으로 제거
+    
+    :param removal_ratio: 제거할 비율 (0.2 = 20%)
+    """
+    # negative_classes = [c for c in memory_buffer.seen_classes if c < 0]  # 🪵 버그: 네거티브는 음수가 아님
+    negative_classes = [int(c) for c in memory_buffer.seen_classes if int(c) >= base_id]  # 🌽 수정
+    
+    if not negative_classes:
+        return 0
+    
+    # 제거할 클래스 수 계산
+    num_to_remove = max(1, int(len(negative_classes) * removal_ratio))
+    
+    # 랜덤하게 선택하여 제거
+    classes_to_remove = np.random.choice(negative_classes, size=num_to_remove, replace=False)
+    
+    removed_count = 0
+    for class_id in classes_to_remove:
+        if class_id in memory_buffer.buffer_groups:
+            # 해당 클래스의 샘플 수
+            removed_count += len(memory_buffer.buffer_groups[class_id].buffer)
+            # 버퍼에서 제거
+            del memory_buffer.buffer_groups[class_id]
+            memory_buffer.seen_classes.remove(class_id)
+    
+    print(f"Removed {num_to_remove} negative classes ({removed_count} samples)")
+    return removed_count
+
 class ContinualLearningEvaluator:
     """
     Continual Learning 평가 메트릭 계산
@@ -89,7 +153,6 @@ class ContinualLearningEvaluator:
         return {}
 
 
-# 🌪️ def evaluate_on_test_set(trainer: SCRTrainer, config) -> float:
 def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tuple:  # 🐋 수정
     """
     test_set_file을 사용한 전체 평가
@@ -115,7 +178,6 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
     known_classes = set(trainer.ncm.class_means_dict.keys())
     
     if not known_classes:
-        # 🌪️ return 0.0
         return (0.0, {}) if openset_mode else (0.0, None)  # 🐋
     
     # 🐋 오픈셋 모드: Known과 Unknown 분리
@@ -197,7 +259,6 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
                 filtered_indices.append(i)
         
         if not filtered_indices:
-            # 🌪️ return 0.0
             return (0.0, None)  # 🐋
         
         # Subset 생성
@@ -206,94 +267,8 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
         print(f"Evaluating on {len(filtered_indices)} test samples from {len(known_classes)} classes")
         
         # 평가
-        # 🌪️ return trainer.evaluate(filtered_test)
         accuracy = trainer.evaluate(filtered_test)  # 🐋
         return accuracy, None  # 🐋
-
-
-def remove_negative_samples_gradually(memory_buffer: ClassBalancedBuffer, 
-                                    removal_ratio: float = 0.2):
-    """
-    메모리 버퍼에서 negative 샘플을 점진적으로 제거
-    
-    :param removal_ratio: 제거할 비율 (0.2 = 20%)
-    """
-    # Negative 클래스 찾기 (음수 ID)
-    negative_classes = [c for c in memory_buffer.seen_classes if c < 0]
-    
-    if not negative_classes:
-        return 0
-    
-    # 제거할 클래스 수 계산
-    num_to_remove = max(1, int(len(negative_classes) * removal_ratio))
-    
-    # 랜덤하게 선택하여 제거
-    classes_to_remove = np.random.choice(negative_classes, size=num_to_remove, replace=False)
-    
-    removed_count = 0
-    for class_id in classes_to_remove:
-        if class_id in memory_buffer.buffer_groups:
-            # 해당 클래스의 샘플 수
-            removed_count += len(memory_buffer.buffer_groups[class_id].buffer)
-            # 버퍼에서 제거
-            del memory_buffer.buffer_groups[class_id]
-            memory_buffer.seen_classes.remove(class_id)
-    
-    print(f"Removed {num_to_remove} negative classes ({removed_count} samples)")
-    return removed_count
-
-
-def initialize_ncm_with_negatives(trainer: SCRTrainer, 
-                                negative_paths: List[str], 
-                                negative_labels: List[int]):
-    """Negative 샘플로 NCM 초기화"""
-    print("Initializing NCM with negative samples...")
-    
-    # 임시 데이터셋 생성
-    from scr.scr_trainer import MemoryDataset
-    neg_dataset = MemoryDataset(
-        paths=negative_paths,
-        labels=negative_labels,
-        transform=trainer.test_transform,
-        train=False
-    )
-    
-    # DataLoader
-    dataloader = DataLoader(
-        neg_dataset,
-        batch_size=128,
-        shuffle=False,
-        num_workers=0
-    )
-    
-    # Feature 추출 및 class mean 계산
-    trainer.model.eval()
-    class_features = defaultdict(list)
-    
-    with torch.no_grad():
-        for data, labels in dataloader:
-            data = data.to(trainer.device)   
-            labels = labels.to(trainer.device)
-            
-            features = trainer.model.getFeatureCode(data)
-            
-            for i, label in enumerate(labels):
-                label_item = label.item()
-                class_features[label_item].append(features[i].cpu())
-    
-    # Class means 계산
-    class_means = {}
-    for label, features_list in class_features.items():
-        if features_list:
-            mean_feature = torch.stack(features_list).mean(dim=0)
-            mean_feature = mean_feature / mean_feature.norm()
-            class_means[label] = mean_feature
-    
-    # NCM 초기화
-    trainer.ncm.replace_class_means_dict(class_means)
-    print(f"NCM initialized with {len(class_means)} negative classes")
-    
-    trainer.model.train()
 
 
 def main(args):
@@ -306,6 +281,12 @@ def main(args):
     print(f"Using config: {args.config}")
     print(config)
     
+    # 🌽 BASE_ID 계산 및 설정
+    config_obj.negative.base_id = compute_safe_base_id(
+        config_obj.dataset.train_set_file,
+        config_obj.dataset.test_set_file
+    )
+    
     # 🐋 오픈셋 모드 확인
     openset_enabled = hasattr(config_obj, 'openset') and config_obj.openset.enabled
     if openset_enabled:
@@ -317,7 +298,7 @@ def main(args):
     
     # GPU 설정
     device = torch.device(
-        f"cuda:{config.training.gpu_ids}" 
+        f"cuda:{config_obj.training.gpu_ids}" 
         if torch.cuda.is_available() and not args.no_cuda 
         else "cpu"
     )
@@ -328,17 +309,18 @@ def main(args):
         fix_random_seed(args.seed)
     
     # 2. 결과 저장 디렉토리 생성
-    results_dir = os.path.join(config.training.results_path, 'scr_results')
+    results_dir = os.path.join(config_obj.training.results_path, 'scr_results')
     if openset_enabled:  # 🐋
-        results_dir = os.path.join(config.training.results_path, 'scr_openset_results')
+        results_dir = os.path.join(config_obj.training.results_path, 'scr_openset_results')
     os.makedirs(results_dir, exist_ok=True)
     
     # 3. 데이터 스트림 초기화
     print("\n=== Initializing Data Stream ===")
     data_stream = ExperienceStream(
-        train_file=config.dataset.train_set_file,
-        negative_file=config.dataset.negative_samples_file,
-        num_negative_classes=config.dataset.num_negative_classes  
+        train_file=config_obj.dataset.train_set_file,
+        negative_file=config_obj.dataset.negative_samples_file,
+        num_negative_classes=config_obj.dataset.num_negative_classes,
+        base_id=config_obj.negative.base_id  # 🌽 base_id 전달
     )
     
     stats = data_stream.get_statistics()
@@ -350,17 +332,17 @@ def main(args):
     print("\n=== Initializing Model and Components ===")
     
     # CCNet 모델
-    model = ccnet(weight=config.model.competition_weight)  # 👻 device 이동 전에 생성
+    model = ccnet(weight=config_obj.model.competition_weight)  # 👻 device 이동 전에 생성
     
     # 👻 사전훈련 가중치 로드 (device 이동 전에!)
-    if hasattr(config.model, 'use_pretrained') and config.model.use_pretrained:  # 👻
-        if config.model.pretrained_path and config.model.pretrained_path.exists():  # 👻
+    if hasattr(config_obj.model, 'use_pretrained') and config_obj.model.use_pretrained:  # 👻
+        if config_obj.model.pretrained_path and config_obj.model.pretrained_path.exists():  # 👻
             print(f"\n📦 Loading pretrained weights from main script...")  # 👻
             loader = PretrainedLoader()  # 👻
             try:  # 👻
                 model = loader.load_ccnet_pretrained(  # 👻
                     model=model,  # 👻
-                    checkpoint_path=config.model.pretrained_path,  # 👻
+                    checkpoint_path=config_obj.model.pretrained_path,  # 👻
                     device=device,  # 👻
                     verbose=True  # 👻
                 )  # 👻
@@ -377,13 +359,12 @@ def main(args):
     model = model.to(device)  # 👻
     
     # NCM Classifier
-    # 🌪️ ncm_classifier = NCMClassifier(normalize=False).to(device)
     ncm_classifier = NCMClassifier(normalize=True).to(device)  # 🐋 코사인 모드로 변경
     
     # Memory Buffer
     memory_buffer = ClassBalancedBuffer(
-        max_size=config.training.memory_size,
-        min_samples_per_class=config.training.min_samples_per_class
+        max_size=config_obj.training.memory_size,
+        min_samples_per_class=config_obj.training.min_samples_per_class
     )
     
     # SCR Trainer
@@ -401,10 +382,10 @@ def main(args):
     neg_paths, neg_labels = data_stream.get_negative_samples()
     
     # memory_batch_size만큼만 선택
-    if len(neg_paths) > config.training.memory_batch_size:
+    if len(neg_paths) > config_obj.training.memory_batch_size:
         selected_indices = np.random.choice(
             len(neg_paths), 
-            size=config.training.memory_batch_size,
+            size=config_obj.training.memory_batch_size,
             replace=False
         )
         neg_paths = [neg_paths[i] for i in selected_indices]
@@ -415,22 +396,10 @@ def main(args):
     print(f"Initial buffer size: {len(memory_buffer)}")
     
     # NCM 초기화 🐣
-    # 🍄‍🟫  initialize_ncm_with_negatives(trainer, neg_paths, neg_labels)
     print("🍄 NCM starts empty - no fake class contamination")  # 🍄
     
-# 🍄‍🟫    # 👻 초기 성능 확인 (사전훈련 효과 검증)
-# 🍄‍🟫    if config.model.use_pretrained:  # 👻
-# 🍄‍🟫        print("\n🔍 Checking initial performance with pretrained model...")  # 👻
-# 🍄‍🟫        # 🌪️ initial_acc = evaluate_on_test_set(trainer, config_obj)
-# 🍄‍🟫        initial_acc, _ = evaluate_on_test_set(trainer, config_obj, openset_mode=False)  # 🐋
-# 🍄‍🟫        print(f"Initial accuracy (pretrained): {initial_acc:.2f}%")  # 👻
-# 🍄‍🟫        if initial_acc > 5:  # 👻
-# 🍄‍🟫            print("✅ Pretrained model is working well!")  # 👻
-# 🍄‍🟫        else:  # 👻
-# 🍄‍🟫            print("⚠️  Low initial accuracy. Check learning rate and pretrained weights.")  # 👻
-    
     # 6. 평가자 초기화
-    evaluator = ContinualLearningEvaluator(num_experiences=config.training.num_experiences)
+    evaluator = ContinualLearningEvaluator(num_experiences=config_obj.training.num_experiences)
     
     # 7. 학습 결과 저장용
     training_history = {
@@ -441,54 +410,53 @@ def main(args):
         'negative_removal_history': [],
         'openset_metrics': [],  # 🐋 추가
         # 👻 사전훈련 정보 추가
-        'pretrained_used': config.model.use_pretrained,  # 👻
-        'pretrained_path': str(config.model.pretrained_path) if config.model.pretrained_path else None,  # 👻
+        'pretrained_used': config_obj.model.use_pretrained,  # 👻
+        'pretrained_path': str(config_obj.model.pretrained_path) if config_obj.model.pretrained_path else None,  # 👻
         'openset_enabled': openset_enabled  # 🐋 추가
     }
     
     # 8. Continual Learning 시작
     print("\n=== Starting Continual Learning ===")
-    print(f"Total experiences: {config.training.num_experiences}")
-    print(f"Evaluation interval: every {config.training.test_interval} users")
+    print(f"Total experiences: {config_obj.training.num_experiences}")
+    print(f"Evaluation interval: every {config_obj.training.test_interval} users")
+    print(f"🔥 Negative warmup: exp0~{config_obj.negative.warmup_experiences-1}")  # 🌽
     # 👻 중요 파라미터 출력
-    print(f"Learning rate: {config.training.learning_rate}")  # 👻
-    print(f"Memory batch size: {config.training.memory_batch_size}")  # 👻
-    print(f"Temperature: {config.training.temperature}")  # 👻
+    print(f"Learning rate: {config_obj.training.learning_rate}")  # 👻
+    print(f"Memory batch size: {config_obj.training.memory_batch_size}")  # 👻
+    print(f"Temperature: {config_obj.training.temperature}")  # 👻
     
     start_time = time.time()
     
     for exp_id, (user_id, image_paths, labels) in enumerate(data_stream):
-        
-        print(f"\n=== Debug: Experience {exp_id} ===")
-        print(f"user_id: {user_id}")
-        print(f"image_paths type: {type(image_paths)}, len: {len(image_paths)}")
-        print(f"labels type: {type(labels)}, len: {len(labels)}")
-        print(f"labels content: {labels}")
-        print(f"unique labels in this batch: {set(labels)}")
         
         # Experience 학습
         stats = trainer.train_experience(user_id, image_paths, labels)
         training_history['losses'].append(stats['loss'])
         training_history['memory_sizes'].append(stats['memory_size'])
         
-        # Negative 샘플 점진적 제거 (50명마다 20%씩) 🐣
-        if (exp_id + 1) % 50 == 0 and exp_id > 0:
-            removed = remove_negative_samples_gradually(memory_buffer, removal_ratio=0.2)
-            training_history['negative_removal_history'].append({
-                'experience': exp_id + 1,
-                'removed_samples': removed
-            })
+        # 🌽 exp3→exp4 경계에서 네거티브 완전 제거
+        if exp_id + 1 == config_obj.negative.warmup_experiences:
+            print(f"\n🔥 === Warmup End (exp{exp_id}) → Post-warmup (exp{exp_id+1}) ===")
             
-            # NCM 업데이트 (negative 클래스 제거 반영)
+            # 평가 (purge 전)
+            acc_pre, _ = evaluate_on_test_set(trainer, config_obj, openset_mode=openset_enabled)
+            print(f"[Warmup-End] pre-purge ACC={acc_pre:.2f}%")
+            
+            # 네거티브 제거
+            purge_negatives(memory_buffer, config_obj.negative.base_id)
             trainer._update_ncm()
+            
+            # 평가 (purge 후)
+            acc_post, _ = evaluate_on_test_set(trainer, config_obj, openset_mode=openset_enabled)
+            print(f"[Warmup-End] post-purge ACC={acc_post:.2f}%")
+            print(f"🔥 ========================================\n")
         
         # 평가 주기 확인
-        if (exp_id + 1) % config.training.test_interval == 0 or exp_id == config.training.num_experiences - 1:
+        if (exp_id + 1) % config_obj.training.test_interval == 0 or exp_id == config_obj.training.num_experiences - 1:
             
             print(f"\n=== Evaluation at Experience {exp_id + 1} ===")
             
             # 테스트셋으로 평가
-            # 🌪️ accuracy = evaluate_on_test_set(trainer, config_obj)
             accuracy, openset_metrics = evaluate_on_test_set(  # 🐋
                 trainer, config_obj, 
                 openset_mode=openset_enabled
@@ -530,7 +498,7 @@ def main(args):
                     print(f"   TAR: {openset_metrics['TAR']:.3f}, FRR: {openset_metrics['FRR']:.3f}")
                 if 'TRR_unknown' in openset_metrics:
                     print(f"   TRR_unknown: {openset_metrics['TRR_unknown']:.3f}, FAR_unknown: {openset_metrics['FAR_unknown']:.3f}")
-                print(f"   τ_s: {openset_metrics['tau_s']:.4f}")
+                print(f"   τ_s: {openset_metrics.get('tau_s', 0):.4f}")
             
             # 🐋 Trainer의 오픈셋 평가 히스토리도 저장
             if hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
@@ -546,9 +514,9 @@ def main(args):
         # 진행 상황 출력
         if (exp_id + 1) % 10 == 0:
             elapsed = time.time() - start_time
-            eta = elapsed / (exp_id + 1) * (config.training.num_experiences - exp_id - 1)
-            print(f"Progress: {exp_id + 1}/{config.training.num_experiences} "
-                  f"({100 * (exp_id + 1) / config.training.num_experiences:.1f}%) "
+            eta = elapsed / (exp_id + 1) * (config_obj.training.num_experiences - exp_id - 1)
+            print(f"Progress: {exp_id + 1}/{config_obj.training.num_experiences} "
+                  f"({100 * (exp_id + 1) / config_obj.training.num_experiences:.1f}%) "
                   f"| Elapsed: {elapsed/60:.1f}m | ETA: {eta/60:.1f}m")
     
     # 9. 최종 결과 저장
@@ -583,8 +551,8 @@ def main(args):
     # 결과 요약 저장
     summary = {
         'config': args.config,
-        'num_experiences': config.training.num_experiences,
-        'memory_size': config.training.memory_size,
+        'num_experiences': config_obj.training.num_experiences,
+        'memory_size': config_obj.training.memory_size,
         'final_accuracy': final_acc,
         'final_average_accuracy': final_avg_acc,
         'final_forgetting': final_forget,

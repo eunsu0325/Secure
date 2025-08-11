@@ -10,10 +10,12 @@ class ExperienceStream:
     def __init__(self, 
                  train_file: str,
                  negative_file: str,
-                 num_negative_classes: int = 10):
+                 num_negative_classes: int = 10,
+                 base_id: int = 10000):  # 🌽 base_id 파라미터 추가
         self.train_file = train_file
         self.negative_file = negative_file
         self.num_negative_classes = num_negative_classes
+        self.base_id = int(base_id)  # 🌽 동적 base_id 저장
         
         # 데이터 로드
         try:
@@ -31,6 +33,7 @@ class ExperienceStream:
         
         print(f"Loaded {self.num_users} users (IDs: {user_ids[0]}-{user_ids[-1]})")
         print(f"Loaded {len(self.negative_data)} negative classes")
+        print(f"🔥 Using BASE_ID: {self.base_id}")  # 🌽 BASE_ID 출력
     
     def _load_data(self, txt_file: str) -> Dict[int, List[str]]:
         """txt 파일에서 데이터를 로드하고 사용자별로 정리합니다."""
@@ -59,31 +62,31 @@ class ExperienceStream:
         return dict(user_data)
     
     def _load_negative_data(self, txt_file: str) -> Dict[int, List[str]]:
-      """Negative 샘플을 로드합니다."""
-      negative_data = defaultdict(list)
-      
-      with open(txt_file, 'r') as f:
-          lines = f.readlines()
-          for i, line in enumerate(lines):
-              try:
-                  parts = line.strip().split(' ')
-                  if len(parts) != 2:
-                      continue
-                      
-                  path, label = parts
-                  class_id = int(label)
-                  
-                  # num_negative_classes가 -1이면 모든 클래스 사용
-                  if self.num_negative_classes == -1 or class_id < self.num_negative_classes:
-                      # 큰 숫자 offset 사용 (예: 10000번부터)
-                      negative_id = 10000 + class_id  # 10000, 10001, ...
-                      negative_data[negative_id].append(path)
-                      
-              except Exception as e:
-                  print(f"Error processing negative line {i}: {e}")
-                  continue
-      
-      return dict(negative_data)
+        """Negative 샘플을 로드합니다."""
+        negative_data = defaultdict(list)
+        
+        with open(txt_file, 'r') as f:
+            lines = f.readlines()
+            for i, line in enumerate(lines):
+                try:
+                    parts = line.strip().split(' ')
+                    if len(parts) != 2:
+                        continue
+                        
+                    path, label = parts
+                    class_id = int(label)
+                    
+                    # num_negative_classes가 -1이면 모든 클래스 사용
+                    if self.num_negative_classes == -1 or class_id < self.num_negative_classes:
+                        # negative_id = 10000 + class_id  # 10000, 10001, ...  # 🪵 하드코딩 제거
+                        negative_id = self.base_id + class_id  # 🌽 동적 base_id 사용
+                        negative_data[negative_id].append(path)
+                        
+                except Exception as e:
+                    print(f"Error processing negative line {i}: {e}")
+                    continue
+        
+        return dict(negative_data)
     
     def get_experience(self, exp_id: int) -> Tuple[int, List[str], List[int]]:
         """특정 experience의 데이터를 반환합니다."""
@@ -131,7 +134,8 @@ class ExperienceStream:
             'total_samples': 0,
             'negative_samples': sum(len(paths) for paths in self.negative_data.values()),
             'missing_user_ids': [],
-            'user_id_range': (min(self.user_data.keys()), max(self.user_data.keys()))
+            'user_id_range': (min(self.user_data.keys()), max(self.user_data.keys())),
+            'base_id': self.base_id  # 🌽 통계에 base_id 추가
         }
         
         # 빠진 사용자 ID 찾기

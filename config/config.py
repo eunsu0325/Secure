@@ -60,3 +60,12 @@ class Openset:  # 🐋 신규 추가
     margin_tau: float = 0.05
     dev_ratio: float = 0.2
     negref_max_eval: int = 5000
+
+
+@dataclasses.dataclass
+class Negative:  # 🔥 신규 추가
+    """Negative sample configuration"""
+    warmup_experiences: int = 4     # exp0~3까지 네거티브 사용
+    max_per_batch: int = 1          # 배치당 네거티브 클래스 최대 1장
+    r0: float = 0.5                 # 초기 메모리:현재유저 비율
+    base_id: int = 1                # 런타임에 동적 설정 (max_user_id + 1)

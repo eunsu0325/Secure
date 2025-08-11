@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 from typing import Union, List
 import yaml
-from config.config import Dataset, Model, Training, Openset  # 🐋 Openset 추가
+from config.config import Dataset, Model, Training, Openset, Negative  # 🔥 Negative 추가
 
 
 class ConfigParser:
@@ -15,6 +15,7 @@ class ConfigParser:
         self.model = None
         self.training = None
         self.openset = None  # 🐋 추가
+        self.negative = None  # 🔥 추가
         self.parse()
     
     def parse(self):
@@ -74,6 +75,20 @@ class ConfigParser:
             # 기본값으로 Openset 생성 (disabled)
             self.openset = Openset(enabled=False)
             print("📌 Open-set configuration not found, using defaults (disabled)")
+        
+        # 🔥 Negative 섹션 파싱 추가
+        if 'Negative' in self.config_dict:
+            negative_dict = self.config_dict['Negative'].copy()
+            negative_dict.pop('config_file', None)
+            # base_id가 없으면 기본값 1
+            if 'base_id' not in negative_dict:
+                negative_dict['base_id'] = 1
+            self.negative = Negative(**negative_dict)
+            print("🔥 Negative configuration loaded")
+        else:
+            # 기본값으로 Negative 생성
+            self.negative = Negative()
+            print("📌 Negative configuration not found, using defaults")
     
     def get_config(self):
         """Config 객체들을 포함한 namespace 반환"""
@@ -83,6 +98,7 @@ class ConfigParser:
         config.model = self.model
         config.training = self.training
         config.openset = self.openset  # 🐋 추가
+        config.negative = self.negative  # 🔥 추가
         # config 파일 경로도 추가 (필요시 접근 가능)
         config.config_file = self.filename
         return config
@@ -104,6 +120,14 @@ class ConfigParser:
                 value = getattr(self.openset, field.name)
                 string += f'{field.name:25} : {value}\n'
             string += f'----- Openset (Default) --- END -------\n'
+        
+        # 🔥 Negative가 파싱되었지만 config_dict에 없는 경우 (기본값 사용)
+        if self.negative and 'Negative' not in self.config_dict:
+            string += f'----- Negative (Default) --- START -----\n'
+            for field in dataclasses.fields(self.negative):
+                value = getattr(self.negative, field.name)
+                string += f'{field.name:25} : {value}\n'
+            string += f'----- Negative (Default) --- END -------\n'
         
         return string
     
