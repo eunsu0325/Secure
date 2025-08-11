@@ -1,590 +1,803 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-Supervised Contrastive Replay (SCR) Training Script with Open-set Support  # 🐋 설명 수정
-CCNet + SCR for Continual Learning
-"""
-
-import os
-import argparse
-import time
-import numpy as np
-from collections import defaultdict
-from typing import Dict, List
-import json
-import random
-
 import torch
-from torch.utils.data import DataLoader, Subset
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset, Subset, ConcatDataset
+from torch.optim import lr_scheduler
+import numpy as np
+from typing import Dict, List, Tuple, Optional, Set
+from tqdm import tqdm
+from PIL import Image
 
-# Project imports
-import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import ConfigParser
-# 👻 사전훈련 로더 import 추가
-from utils.pretrained_loader import PretrainedLoader  # 👻
+from loss import SupConLoss
+from models import get_scr_transforms
+from utils.util import AverageMeter
+from utils.pretrained_loader import PretrainedLoader
 
-from models import ccnet, MyDataset, get_scr_transforms
-from scr import (
-    ExperienceStream, 
-    ClassBalancedBuffer, 
-    NCMClassifier, 
-    SCRTrainer
+# 🐋 오픈셋 관련 import 추가
+from scr.threshold_calculator import ThresholdCalibrator
+from utils.utils_openset import (
+    split_user_data,
+    extract_scores_genuine,
+    extract_scores_impostor_between,
+    extract_scores_impostor_unknown,
+    extract_scores_impostor_negref,
+    balance_impostor_scores,
+    predict_batch,
+    load_paths_labels_from_txt
 )
 
-def fix_random_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
 
-# 🌽 BASE_ID 계산 함수 추가
-def compute_safe_base_id(*txt_files):
-    """모든 txt 파일에서 최대 user ID를 찾아 안전한 BASE_ID 계산"""
-    max_id = 0
-    for path in txt_files:
-        with open(path, 'r', encoding='utf-8') as fh:
-            for line in fh:
-                parts = line.strip().split()
-                if len(parts) != 2:
-                    continue
+# 🌈 헬퍼 함수 추가
+def _ensure_single_view(data):
+    """데이터가 2뷰 형식이면 첫 번째 뷰만 반환"""
+    if isinstance(data, (list, tuple)) and len(data) == 2:
+        return data[0]
+    return data
+
+
+class MemoryDataset(Dataset):
+    # 🌈 dual_views 파라미터 추가
+    def __init__(self, paths: List[str], labels: List[int], transform, train=True, dual_views=None):
+        self.paths = paths
+        
+        # 텐서인 경우 CPU로 이동 후 numpy 변환
+        if torch.is_tensor(labels):
+            self.labels = labels.cpu().numpy()
+        else:
+            self.labels = np.array(labels)
+            
+        self.transform = transform
+        self.train = train
+        # 🌈 dual_views 설정: 명시적 지정 없으면 train 값 따라감
+        self.dual_views = dual_views if dual_views is not None else train
+        
+    def __len__(self):
+        return len(self.paths)
+    
+    def __getitem__(self, index):
+        path = self.paths[index]
+        label = self.labels[index]
+        
+        # 이미지 로드
+        img = Image.open(path).convert('L')
+        
+        # 🌈 조건부 뷰 생성
+        if self.dual_views:
+            # 학습용: 2뷰 생성
+            data1 = self.transform(img)
+            data2 = self.transform(img)
+            return [data1, data2], label
+        else:
+            # 평가용: 1뷰만 생성
+            data = self.transform(img)
+            return data, label  # 🌈 리스트가 아닌 단일 텐서 반환
+
+
+class SCRTrainer:
+    """
+    Supervised Contrastive Replay Trainer with Open-set Support.
+    """
+    
+    def __init__(self, 
+                 model: nn.Module,
+                 ncm_classifier,
+                 memory_buffer,
+                 config,
+                 device='cuda'):
+        
+        # 사전훈련 로딩 (모델을 device로 옮기기 전에)
+        if hasattr(config.model, 'use_pretrained') and config.model.use_pretrained:
+            if config.model.pretrained_path and config.model.pretrained_path.exists():
+                print(f"\n📦 Loading pretrained weights in SCRTrainer...")
+                loader = PretrainedLoader()
                 try:
-                    lab = int(parts[1])
-                except ValueError:
-                    continue
-                max_id = max(max_id, lab)
-    base = max_id + 1
-    print(f"[NEG-BASE] max_user_id={max_id}, BASE_ID={base}")
-    return base
-
-# 🌽 purge_negatives 함수 추가
-def purge_negatives(memory_buffer, base_id):
-    """메모리 버퍼에서 모든 네거티브 클래스 제거"""
-    to_del = [int(c) for c in list(memory_buffer.seen_classes) if int(c) >= base_id]
-    removed = 0
-    for c in to_del:
-        if c in memory_buffer.buffer_groups:
-            removed += len(memory_buffer.buffer_groups[c].buffer)
-            del memory_buffer.buffer_groups[c]
-        memory_buffer.seen_classes.discard(c)
-    print(f"🧹 Purged {len(to_del)} negative classes ({removed} samples)")
-
-# 🌽 remove_negative_samples_gradually 함수 수정 (버그 수정)
-def remove_negative_samples_gradually(memory_buffer: ClassBalancedBuffer, 
-                                    base_id: int,  # 🌽 base_id 파라미터 추가
-                                    removal_ratio: float = 0.2):
-    """
-    메모리 버퍼에서 negative 샘플을 점진적으로 제거
-    
-    :param removal_ratio: 제거할 비율 (0.2 = 20%)
-    """
-    # negative_classes = [c for c in memory_buffer.seen_classes if c < 0]  # 🪵 버그: 네거티브는 음수가 아님
-    negative_classes = [int(c) for c in memory_buffer.seen_classes if int(c) >= base_id]  # 🌽 수정
-    
-    if not negative_classes:
-        return 0
-    
-    # 제거할 클래스 수 계산
-    num_to_remove = max(1, int(len(negative_classes) * removal_ratio))
-    
-    # 랜덤하게 선택하여 제거
-    classes_to_remove = np.random.choice(negative_classes, size=num_to_remove, replace=False)
-    
-    removed_count = 0
-    for class_id in classes_to_remove:
-        if class_id in memory_buffer.buffer_groups:
-            # 해당 클래스의 샘플 수
-            removed_count += len(memory_buffer.buffer_groups[class_id].buffer)
-            # 버퍼에서 제거
-            del memory_buffer.buffer_groups[class_id]
-            memory_buffer.seen_classes.remove(class_id)
-    
-    print(f"Removed {num_to_remove} negative classes ({removed_count} samples)")
-    return removed_count
-
-class ContinualLearningEvaluator:
-    """
-    Continual Learning 평가 메트릭 계산
-    - Average Accuracy
-    - Forgetting Measure
-    🐋 - Open-set metrics (TAR, TRR, FAR)
-    """
-    def __init__(self, num_experiences: int):
-        self.num_experiences = num_experiences
-        self.accuracy_history = defaultdict(list)  # {exp_id: [acc1, acc2, ...]}
-        self.openset_history = []  # 🐋 오픈셋 메트릭 히스토리
+                    model = loader.load_ccnet_pretrained(
+                        model=model,
+                        checkpoint_path=config.model.pretrained_path,
+                        device=device,
+                        verbose=True
+                    )
+                    print("✅ Pretrained weights loaded successfully in trainer!")
+                except Exception as e:
+                    print(f"⚠️  Failed to load pretrained: {e}")
+                    print("Continuing with current weights...")
+            else:
+                print(f"⚠️  Pretrained path not found: {config.model.pretrained_path}")
         
-    def update(self, experience_id: int, accuracy: float):
-        """experience_id 학습 후 정확도 업데이트"""
-        self.accuracy_history[experience_id].append(accuracy)
-    
-    def update_openset(self, metrics: dict):  # 🐋 새 메서드
-        """오픈셋 메트릭 업데이트"""
-        self.openset_history.append(metrics)
-    
-    def get_average_accuracy(self) -> float:
-        """현재까지의 평균 정확도"""
-        all_accs = []
-        for accs in self.accuracy_history.values():
-            if accs:
-                all_accs.append(accs[-1])  # 각 experience의 최신 정확도
-        return np.mean(all_accs) if all_accs else 0.0
-    
-    def get_forgetting_measure(self) -> float:
-        """
-        Forgetting Measure 계산
-        각 experience에 대해: max(이전 정확도) - 현재 정확도
-        """
-        forgetting = []
-        for exp_id, accs in self.accuracy_history.items():
-            if len(accs) > 1:
-                max_acc = max(accs[:-1])
-                curr_acc = accs[-1]
-                forgetting.append(max_acc - curr_acc)
+        self.model = model
+        self.ncm = ncm_classifier
+        self.memory_buffer = memory_buffer
+        self.config = config
+        self.device = device
         
-        return np.mean(forgetting) if forgetting else 0.0
-    
-    def get_latest_openset_metrics(self) -> dict:  # 🐋 새 메서드
-        """최신 오픈셋 메트릭 반환"""
-        if self.openset_history:
-            return self.openset_history[-1]
-        return {}
-
-
-def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tuple:  # 🐋 수정
-    """
-    test_set_file을 사용한 전체 평가
-    🐋 openset_mode=True면 오픈셋 평가도 수행
-    
-    Returns:
-        (accuracy, openset_metrics) if openset_mode else (accuracy, None)
-    """
-    # 전체 테스트셋 로드
-    test_dataset = MyDataset(
-        txt=config.dataset.test_set_file,
-        transforms=get_scr_transforms(
+        # Loss function
+        self.criterion = SupConLoss(
+            temperature=config.training.temperature,
+            base_temperature=config.training.temperature
+        )
+        
+        # Optimizer
+        self.optimizer = optim.Adam(
+            model.parameters(), 
+            lr=config.training.learning_rate
+        )
+        
+        # Scheduler
+        self.scheduler = lr_scheduler.StepLR(
+            self.optimizer,
+            step_size=config.training.scheduler_step_size,
+            gamma=config.training.scheduler_gamma
+        )
+        
+        # Transform
+        self.train_transform = get_scr_transforms(
+            train=True,
+            imside=config.dataset.height,
+            channels=config.dataset.channels
+        )
+        
+        self.test_transform = get_scr_transforms(
             train=False,
             imside=config.dataset.height,
             channels=config.dataset.channels
-        ),
-        train=False,
-        imside=config.dataset.height,
-        outchannels=config.dataset.channels
-    )
-    
-    # 현재까지 학습한 클래스만 필터링
-    known_classes = set(trainer.ncm.class_means_dict.keys())
-    
-    if not known_classes:
-        return (0.0, {}) if openset_mode else (0.0, None)  # 🐋
-    
-    # 🐋 오픈셋 모드: Known과 Unknown 분리
-    if openset_mode and trainer.openset_enabled:
-        known_indices = []
-        unknown_indices = []
-        
-        for i in range(len(test_dataset)):
-            label = int(test_dataset.images_label[i])
-            if label in known_classes:
-                known_indices.append(i)
-            else:
-                unknown_indices.append(i)
-        
-        # Known 평가 (Closed-set accuracy)
-        if known_indices:
-            known_subset = Subset(test_dataset, known_indices)
-            accuracy = trainer.evaluate(known_subset)
-        else:
-            accuracy = 0.0
-        
-        # 🐋 오픈셋 메트릭 계산
-        openset_metrics = {}
-        
-        if known_indices and trainer.ncm.tau_s is not None:
-            # Known에서 TAR/FRR 계산
-            from utils.utils_openset import predict_batch
-            
-            # 샘플링 (너무 많으면)
-            if len(known_indices) > 500:
-                known_indices = np.random.choice(known_indices, 500, replace=False)
-            
-            known_paths = [test_dataset.images_path[i] for i in known_indices] 
-            known_labels = [int(test_dataset.images_label[i]) for i in known_indices]
-            
-            preds = predict_batch(
-                trainer.model, trainer.ncm,
-                known_paths, trainer.test_transform, trainer.device
-            )
-            
-            correct = sum(1 for p, l in zip(preds, known_labels) if p == l)
-            rejected = sum(1 for p in preds if p == -1)
-            
-            openset_metrics['TAR'] = correct / max(1, len(preds))
-            openset_metrics['FRR'] = rejected / max(1, len(preds))
-        
-        if unknown_indices and trainer.ncm.tau_s is not None:
-            # Unknown에서 TRR/FAR 계산
-            from utils.utils_openset import predict_batch
-            
-            # 샘플링
-            if len(unknown_indices) > 500:
-                unknown_indices = np.random.choice(unknown_indices, 500, replace=False)
-            
-            unknown_paths = [test_dataset.images_path[i] for i in unknown_indices]  # 🐋
-            
-            preds = predict_batch(
-                trainer.model, trainer.ncm,
-                unknown_paths, trainer.test_transform, trainer.device
-            )
-            
-            openset_metrics['TRR_unknown'] = sum(1 for p in preds if p == -1) / len(preds)
-            openset_metrics['FAR_unknown'] = 1 - openset_metrics['TRR_unknown']
-        
-        openset_metrics['tau_s'] = trainer.ncm.tau_s
-        openset_metrics['tau_m'] = trainer.ncm.tau_m if trainer.ncm.use_margin else None
-        
-        print(f"Evaluating on {len(known_indices)} known + {len(unknown_indices)} unknown samples")
-        
-        return accuracy, openset_metrics
-    
-    else:
-        # 🐋 기존 방식 (Closed-set만)
-        # 필터링된 인덱스 찾기
-        filtered_indices = []
-        for i in range(len(test_dataset)):
-            label = int(test_dataset.images_label[i])
-            if label in known_classes:
-                filtered_indices.append(i)
-        
-        if not filtered_indices:
-            return (0.0, None)  # 🐋
-        
-        # Subset 생성
-        filtered_test = Subset(test_dataset, filtered_indices)
-        
-        print(f"Evaluating on {len(filtered_indices)} test samples from {len(known_classes)} classes")
-        
-        # 평가
-        accuracy = trainer.evaluate(filtered_test)  # 🐋
-        return accuracy, None  # 🐋
-
-
-def main(args):
-    """메인 실행 함수"""
-    
-    # 1. Configuration 로드
-    config = ConfigParser(args.config)
-    # 👻 config 객체 가져오기
-    config_obj = config.get_config()  # 👻
-    print(f"Using config: {args.config}")
-    print(config)
-    
-    # 🌽 BASE_ID 계산 및 설정
-    config_obj.negative.base_id = compute_safe_base_id(
-        config_obj.dataset.train_set_file,
-        config_obj.dataset.test_set_file
-    )
-    
-    # 🐋 오픈셋 모드 확인
-    openset_enabled = hasattr(config_obj, 'openset') and config_obj.openset.enabled
-    if openset_enabled:
-        print("\n🐋 ========== OPEN-SET MODE ENABLED ==========")
-        print(f"   Warmup users: {config_obj.openset.warmup_users}")
-        print(f"   Initial tau: {config_obj.openset.initial_tau}")
-        print(f"   Margin: {config_obj.openset.use_margin} (tau={config_obj.openset.margin_tau})")
-        print("🐋 =========================================\n")
-    
-    # GPU 설정
-    device = torch.device(
-        f"cuda:{config_obj.training.gpu_ids}" 
-        if torch.cuda.is_available() and not args.no_cuda 
-        else "cpu"
-    )
-    print(f'Device: {device}')
-    
-    # Random seed 고정
-    if args.seed is not None:
-        fix_random_seed(args.seed)
-    
-    # 2. 결과 저장 디렉토리 생성
-    results_dir = os.path.join(config_obj.training.results_path, 'scr_results')
-    if openset_enabled:  # 🐋
-        results_dir = os.path.join(config_obj.training.results_path, 'scr_openset_results')
-    os.makedirs(results_dir, exist_ok=True)
-    
-    # 3. 데이터 스트림 초기화
-    print("\n=== Initializing Data Stream ===")
-    data_stream = ExperienceStream(
-        train_file=config_obj.dataset.train_set_file,
-        negative_file=config_obj.dataset.negative_samples_file,
-        num_negative_classes=config_obj.dataset.num_negative_classes,
-        base_id=config_obj.negative.base_id  # 🌽 base_id 전달
-    )
-    
-    stats = data_stream.get_statistics()
-    print(f"Total users: {stats['num_users']}")
-    print(f"Samples per user: {stats['samples_per_user']}")
-    print(f"Negative samples: {stats['negative_samples']}")
-    
-    # 4. 모델 및 컴포넌트 초기화
-    print("\n=== Initializing Model and Components ===")
-    
-    # CCNet 모델
-    model = ccnet(weight=config_obj.model.competition_weight)  # 👻 device 이동 전에 생성
-    
-    # 👻 사전훈련 가중치 로드 (device 이동 전에!)
-    if hasattr(config_obj.model, 'use_pretrained') and config_obj.model.use_pretrained:  # 👻
-        if config_obj.model.pretrained_path and config_obj.model.pretrained_path.exists():  # 👻
-            print(f"\n📦 Loading pretrained weights from main script...")  # 👻
-            loader = PretrainedLoader()  # 👻
-            try:  # 👻
-                model = loader.load_ccnet_pretrained(  # 👻
-                    model=model,  # 👻
-                    checkpoint_path=config_obj.model.pretrained_path,  # 👻
-                    device=device,  # 👻
-                    verbose=True  # 👻
-                )  # 👻
-                print("✅ Pretrained weights loaded successfully!")  # 👻
-            except Exception as e:  # 👻
-                print(f"⚠️  Failed to load pretrained model: {e}")  # 👻
-                print("Continuing with random initialization...")  # 👻
-        else:  # 👻
-            print(f"⚠️  Pretrained path not found or not set")  # 👻
-    else:  # 👻
-        print("🎲 Starting from random initialization")  # 👻
-    
-    # 👻 모델을 device로 이동
-    model = model.to(device)  # 👻
-    
-    # NCM Classifier
-    ncm_classifier = NCMClassifier(normalize=True).to(device)  # 🐋 코사인 모드로 변경
-    
-    # Memory Buffer
-    memory_buffer = ClassBalancedBuffer(
-        max_size=config_obj.training.memory_size,
-        min_samples_per_class=config_obj.training.min_samples_per_class
-    )
-    
-    # SCR Trainer
-    # 👻 config_obj 전달
-    trainer = SCRTrainer(
-        model=model,
-        ncm_classifier=ncm_classifier,
-        memory_buffer=memory_buffer,
-        config=config_obj,  # 👻 config → config_obj
-        device=device
-    )
-    
-    # 5. Negative 샘플로 초기화 🐣
-    print("\n=== Initializing with Negative Samples ===")
-    neg_paths, neg_labels = data_stream.get_negative_samples()
-    
-    # memory_batch_size만큼만 선택
-    if len(neg_paths) > config_obj.training.memory_batch_size:
-        selected_indices = np.random.choice(
-            len(neg_paths), 
-            size=config_obj.training.memory_batch_size,
-            replace=False
         )
-        neg_paths = [neg_paths[i] for i in selected_indices]
-        neg_labels = [neg_labels[i] for i in selected_indices]
-    
-    # 메모리 버퍼 초기화
-    memory_buffer.update_from_dataset(neg_paths, neg_labels)
-    print(f"Initial buffer size: {len(memory_buffer)}")
-    
-    # NCM 초기화 🐣
-    print("🍄 NCM starts empty - no fake class contamination")  # 🍄
-    
-    # 6. 평가자 초기화
-    evaluator = ContinualLearningEvaluator(num_experiences=config_obj.training.num_experiences)
-    
-    # 7. 학습 결과 저장용
-    training_history = {
-        'losses': [],
-        'accuracies': [],
-        'forgetting_measures': [],
-        'memory_sizes': [],
-        'negative_removal_history': [],
-        'openset_metrics': [],  # 🐋 추가
-        # 👻 사전훈련 정보 추가
-        'pretrained_used': config_obj.model.use_pretrained,  # 👻
-        'pretrained_path': str(config_obj.model.pretrained_path) if config_obj.model.pretrained_path else None,  # 👻
-        'openset_enabled': openset_enabled  # 🐋 추가
-    }
-    
-    # 8. Continual Learning 시작
-    print("\n=== Starting Continual Learning ===")
-    print(f"Total experiences: {config_obj.training.num_experiences}")
-    print(f"Evaluation interval: every {config_obj.training.test_interval} users")
-    print(f"🔥 Negative warmup: exp0~{config_obj.negative.warmup_experiences-1}")  # 🌽
-    # 👻 중요 파라미터 출력
-    print(f"Learning rate: {config_obj.training.learning_rate}")  # 👻
-    print(f"Memory batch size: {config_obj.training.memory_batch_size}")  # 👻
-    print(f"Temperature: {config_obj.training.temperature}")  # 👻
-    
-    start_time = time.time()
-    
-    for exp_id, (user_id, image_paths, labels) in enumerate(data_stream):
         
-        # Experience 학습
-        stats = trainer.train_experience(user_id, image_paths, labels)
-        training_history['losses'].append(stats['loss'])
-        training_history['memory_sizes'].append(stats['memory_size'])
+        # 전체 메모리 데이터셋 캐시 (효율성 개선)
+        self._full_memory_dataset = None
+        self._memory_size_at_last_update = 0
         
-        # 🌽 exp3→exp4 경계에서 네거티브 완전 제거
-        if exp_id + 1 == config_obj.negative.warmup_experiences:
-            print(f"\n🔥 === Warmup End (exp{exp_id}) → Post-warmup (exp{exp_id+1}) ===")
-            
-            # 평가 (purge 전)
-            acc_pre, _ = evaluate_on_test_set(trainer, config_obj, openset_mode=openset_enabled)
-            print(f"[Warmup-End] pre-purge ACC={acc_pre:.2f}%")
-            
-            # 네거티브 제거
-            purge_negatives(memory_buffer, config_obj.negative.base_id)
-            trainer._update_ncm()
-            
-            # 평가 (purge 후)
-            acc_post, _ = evaluate_on_test_set(trainer, config_obj, openset_mode=openset_enabled)
-            print(f"[Warmup-End] post-purge ACC={acc_post:.2f}%")
-            print(f"🔥 ========================================\n")
+        # 🐋 === 오픈셋 관련 추가 초기화 ===
+        self.openset_enabled = hasattr(config, 'openset') and config.openset.enabled
         
-        # 평가 주기 확인
-        if (exp_id + 1) % config_obj.training.test_interval == 0 or exp_id == config_obj.training.num_experiences - 1:
+        if self.openset_enabled:
+            self.openset_config = config.openset
             
-            print(f"\n=== Evaluation at Experience {exp_id + 1} ===")
-            
-            # 테스트셋으로 평가
-            accuracy, openset_metrics = evaluate_on_test_set(  # 🐋
-                trainer, config_obj, 
-                openset_mode=openset_enabled
+            # Threshold calibrator
+            self.threshold_calibrator = ThresholdCalibrator(
+                mode="cosine",
+                alpha=config.openset.smoothing_alpha,
+                max_delta=config.openset.max_delta,
+                clip_range=(-1.0, 1.0),
+                use_auto_margin=False,
+                margin_init=config.openset.margin_tau,
+                min_samples=10
             )
             
-            # 메트릭 업데이트
-            evaluator.update(exp_id, accuracy)
-            if openset_metrics:  # 🐋
-                evaluator.update_openset(openset_metrics)
+            # Dev/Train 데이터 관리
+            self.dev_data = {}    # {user_id: (paths, labels)}
+            self.train_data = {}  # {user_id: (paths, labels)}
+            self.registered_users = set()
             
-            # 평균 정확도와 Forgetting 계산
-            avg_acc = evaluator.get_average_accuracy()
-            forgetting = evaluator.get_forgetting_measure()
+            # 평가 히스토리
+            self.evaluation_history = []
             
-            # 🐋 기록 저장
-            accuracy_record = {
-                'experience': exp_id + 1,
-                'accuracy': accuracy,
-                'average_accuracy': avg_acc,
-                'forgetting': forgetting
-            }
-            
-            # 🐋 오픈셋 메트릭 추가
-            if openset_metrics:
-                accuracy_record.update(openset_metrics)
-                training_history['openset_metrics'].append(openset_metrics)
-            
-            training_history['accuracies'].append(accuracy_record)
-            
-            print(f"Test Accuracy: {accuracy:.2f}%")
-            print(f"Average Accuracy: {avg_acc:.2f}%")
-            print(f"Forgetting Measure: {forgetting:.2f}%")
-            print(f"Memory Buffer Size: {len(memory_buffer)}")
-            
-            # 🐋 오픈셋 메트릭 출력
-            if openset_metrics:
-                print(f"\n🐋 Open-set Metrics:")
-                if 'TAR' in openset_metrics:
-                    print(f"   TAR: {openset_metrics['TAR']:.3f}, FRR: {openset_metrics['FRR']:.3f}")
-                if 'TRR_unknown' in openset_metrics:
-                    print(f"   TRR_unknown: {openset_metrics['TRR_unknown']:.3f}, FAR_unknown: {openset_metrics['FAR_unknown']:.3f}")
-                print(f"   τ_s: {openset_metrics.get('tau_s', 0):.4f}")
-            
-            # 🐋 Trainer의 오픈셋 평가 히스토리도 저장
-            if hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
-                training_history['trainer_openset_history'] = trainer.evaluation_history
-            
-            # 체크포인트 저장
-            checkpoint_path = os.path.join(
-                results_dir, 
-                f'checkpoint_exp_{exp_id + 1}.pth'
+            # 초기 임계치 설정
+            self.ncm.set_thresholds(
+                tau_s=config.openset.initial_tau,
+                use_margin=config.openset.use_margin,
+                tau_m=config.openset.margin_tau
             )
-            trainer.save_checkpoint(checkpoint_path)
             
-        # 진행 상황 출력
-        if (exp_id + 1) % 10 == 0:
-            elapsed = time.time() - start_time
-            eta = elapsed / (exp_id + 1) * (config_obj.training.num_experiences - exp_id - 1)
-            print(f"Progress: {exp_id + 1}/{config_obj.training.num_experiences} "
-                  f"({100 * (exp_id + 1) / config_obj.training.num_experiences:.1f}%) "
-                  f"| Elapsed: {elapsed/60:.1f}m | ETA: {eta/60:.1f}m")
+            print("🐋 Open-set mode enabled")
+            print(f"   Initial τ_s: {config.openset.initial_tau}")
+            print(f"   Margin: {config.openset.use_margin} (τ_m={config.openset.margin_tau})")
+        else:
+            self.registered_users = set()
+            print("📌 Open-set mode disabled")
+        
+        # Statistics
+        self.experience_count = 0
+        
+        # 🌽 BASE_ID 저장 (네거티브 필터링용)
+        self.base_id = int(config.negative.base_id) if hasattr(config, 'negative') else 10000
+        print(f"🌽 SCRTrainer using BASE_ID: {self.base_id}")
+        
+        # 🌽 워밍업 관련 파라미터 캐싱
+        self.warmup_T = int(config.negative.warmup_experiences) if hasattr(config, 'negative') else 4
+        self.r0 = float(config.negative.r0) if hasattr(config, 'negative') else 0.5
+        self.max_neg_per_class = int(config.negative.max_per_batch) if hasattr(config, 'negative') else 1
+        
+        # 🌈 CuDNN 최적화 (고정 크기 입력)
+        if torch.backends.cudnn.is_available():
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.deterministic = False  # 🌈 속도 우선 명시
+            print("🚀 CuDNN benchmark enabled for fixed-size inputs")
+        
+        # 사전훈련 사용 여부 로그
+        if hasattr(config.model, 'use_pretrained') and config.model.use_pretrained:
+            print(f"🔥 SCRTrainer initialized with pretrained model")
+        else:
+            print(f"🎲 SCRTrainer initialized with random weights")
     
-    # 9. 최종 결과 저장
-    print("\n=== Saving Final Results ===")
+    # 🌽 헬퍼 메서드 추가
+    def _dedup_negative_classes(self, paths, labels, max_per_class=1):
+        """네거티브 클래스 중복 제거"""
+        out_p, out_l, seen = [], [], set()
+        for p, l in zip(paths, labels):
+            li = int(l)
+            if li >= self.base_id:
+                if (li in seen) and (max_per_class == 1):
+                    continue
+                seen.add(li)
+            out_p.append(p)
+            out_l.append(li)
+        return out_p, out_l
     
-    # 학습 기록 저장
-    history_path = os.path.join(results_dir, 'training_history.json')
-    with open(history_path, 'w') as f:
-        json.dump(training_history, f, indent=4)
+    def _memory_cap_for_ratio(self, num_current, r):
+        """r0 비율 제한 계산"""
+        if r <= 0:
+            return 0
+        return int((r / max(1e-8, 1.0 - r)) * num_current)
     
-    # 최종 통계
-    final_result = training_history['accuracies'][-1] if training_history['accuracies'] else {}
-    final_acc = final_result.get('accuracy', 0)
-    final_avg_acc = final_result.get('average_accuracy', 0)
-    final_forget = final_result.get('forgetting', 0)
-    
-    print(f"\n=== Final Results ===")
-    print(f"Final Test Accuracy: {final_acc:.2f}%")
-    print(f"Final Average Accuracy: {final_avg_acc:.2f}%")
-    print(f"Final Forgetting Measure: {final_forget:.2f}%")
-    
-    # 🐋 최종 오픈셋 메트릭
-    if openset_enabled and 'TAR' in final_result:
-        print(f"\n🐋 Final Open-set Performance:")
-        print(f"   TAR: {final_result.get('TAR', 0):.3f}")
-        print(f"   TRR (Unknown): {final_result.get('TRR_unknown', 0):.3f}")
-        print(f"   FAR (Unknown): {final_result.get('FAR_unknown', 0):.3f}")
-        print(f"   Final τ_s: {final_result.get('tau_s', 0):.4f}")
-    
-    print(f"\nTotal Training Time: {(time.time() - start_time)/60:.1f} minutes")
-    
-    # 결과 요약 저장
-    summary = {
-        'config': args.config,
-        'num_experiences': config_obj.training.num_experiences,
-        'memory_size': config_obj.training.memory_size,
-        'final_accuracy': final_acc,
-        'final_average_accuracy': final_avg_acc,
-        'final_forgetting': final_forget,
-        'total_time_minutes': (time.time() - start_time) / 60,
-        'negative_removal_history': training_history['negative_removal_history'],
-        'openset_enabled': openset_enabled  # 🐋
-    }
-    
-    # 🐋 오픈셋 요약 추가
-    if openset_enabled and final_result:
-        summary['final_openset'] = {
-            'TAR': final_result.get('TAR', 0),
-            'TRR_unknown': final_result.get('TRR_unknown', 0),
-            'FAR_unknown': final_result.get('FAR_unknown', 0),
-            'tau_s': final_result.get('tau_s', 0)
+    def train_experience(self, user_id: int, image_paths: List[str], labels: List[int]) -> Dict:
+        """하나의 experience (한 명의 사용자) 학습 - 오픈셋 지원."""
+        
+        print(f"\n=== Training Experience {self.experience_count}: User {user_id} ===")
+        
+        # 원본 labels를 보존 (중요!)
+        original_labels = labels.copy()
+        
+        # 🐋 Step 1: Dev/Train 분리 (오픈셋 모드인 경우)
+        if self.openset_enabled:
+            train_paths, train_labels, dev_paths, dev_labels = split_user_data(
+                image_paths, original_labels, 
+                dev_ratio=self.openset_config.dev_ratio,
+                min_dev=2
+            )
+            
+            # 저장
+            self.dev_data[user_id] = (dev_paths, dev_labels)
+            self.train_data[user_id] = (train_paths, train_labels)
+            
+            print(f"🐋 Data split: Train={len(train_paths)}, Dev={len(dev_paths)}")
+        else:
+            train_paths = image_paths
+            train_labels = original_labels
+        
+        self.registered_users.add(user_id)
+        
+        # 현재 사용자 데이터셋 생성 (Train 데이터만)
+        current_dataset = MemoryDataset(
+            paths=train_paths,
+            labels=train_labels,
+            transform=self.train_transform,
+            train=True  # 🌈 자동으로 dual_views=True (2뷰 생성)
+        )
+        
+        # 학습 통계
+        loss_avg = AverageMeter('Loss')
+        
+        # SCR 논문 방식: epoch당 여러 iteration
+        self.model.train()
+        
+        for epoch in range(self.config.training.scr_epochs):
+            epoch_loss = 0
+            
+            for iteration in range(self.config.training.iterations_per_epoch):
+                
+                # 1. 현재 데이터에서 B_n 샘플링 (중복 제거 + 안전한 크기)
+                current_indices = np.random.choice(
+                    len(current_dataset), 
+                    size=min(len(current_dataset), self.config.training.scr_batch_size),
+                    replace=False  # 중복 제거!
+                )
+                current_subset = Subset(current_dataset, current_indices)
+                
+                # 2. 메모리에서 B_M 샘플링 (SCR 논문: 매 iteration 샘플링)
+                if len(self.memory_buffer) > 0:
+                    # 메모리에서 샘플링
+                    memory_paths, memory_labels = self.memory_buffer.sample(
+                        self.config.training.memory_batch_size
+                    )
+                    
+                    if torch.is_tensor(memory_labels):
+                        memory_labels = memory_labels.cpu().tolist()
+                    
+                    # 🌽 === 워밍업 규칙 적용 시작 ===
+                    if self.experience_count < self.warmup_T:
+                        # (1) 네거티브 중복 금지 (동일 neg-class 2장 금지)
+                        memory_paths, memory_labels = self._dedup_negative_classes(
+                            memory_paths, memory_labels, max_per_class=self.max_neg_per_class
+                        )
+                        
+                        # (2) r0 비율 제한: mem ≤ floor(r0/(1-r0) * len(current_subset))
+                        cap = self._memory_cap_for_ratio(len(current_indices), self.r0)
+                        if cap >= 0 and len(memory_paths) > cap:
+                            idx = np.random.choice(len(memory_paths), size=cap, replace=False)
+                            memory_paths = [memory_paths[i] for i in idx]
+                            memory_labels = [memory_labels[i] for i in idx]
+                    else:
+                        # 워밍업 종료 이후: 네거티브 완전 제외 (purge 안전장치)
+                        kept = [(p, l) for p, l in zip(memory_paths, memory_labels) if int(l) < self.base_id]
+                        memory_paths, memory_labels = (list(map(list, zip(*kept))) if kept else ([], []))
+                    # 🌽 === 워밍업 규칙 적용 끝 ===
+                    
+                    # 🌽 (디버그) 현재 메모리 배치 안 네거티브 개수
+                    neg_in_mem = sum(1 for l in memory_labels if int(l) >= self.base_id)
+                    if iteration == 0 and epoch == 0:
+                        print(f"[DEBUG][exp{self.experience_count}] cur={len(current_indices)}, mem={len(memory_paths)}, neg_in_mem={neg_in_mem}, r0={self.r0}")
+                    
+                    # 🌽 메모리가 있을 때만 결합
+                    if memory_paths:
+                        # 메모리 데이터셋 생성
+                        memory_dataset = MemoryDataset(
+                            paths=memory_paths,
+                            labels=memory_labels,
+                            transform=self.train_transform,
+                            train=True  # 🌈 학습용이므로 2뷰 유지
+                        )
+                        
+                        # 3. ConcatDataset으로 결합
+                        combined_dataset = ConcatDataset([current_subset, memory_dataset])
+                    else:
+                        combined_dataset = current_subset
+                        if self.experience_count == self.warmup_T:
+                            print("📌 First post-warmup experience: memory empty, using current only")
+                else:
+                    combined_dataset = current_subset
+                
+                # 4. DataLoader로 배치 생성 (🌈 최적화)
+                batch_loader = DataLoader(
+                    combined_dataset,
+                    batch_size=len(combined_dataset),
+                    shuffle=False,  # 순서 유지 중요!
+                    num_workers=0,  # 🌈 매번 생성이므로 0 유지
+                    pin_memory=True,  # 🌈 GPU 전송 최적화
+                    persistent_workers=False  # 🌈 명시적 False
+                )
+                
+                # 5. 학습
+                for data, batch_labels in batch_loader:
+                    batch_size = len(batch_labels)
+                    
+                    # 올바른 view 배치
+                    view1 = data[0]  # 첫 번째 증강들
+                    view2 = data[1]  # 두 번째 증강들
+                    
+                    # 올바른 순서로 연결 (🌈 non_blocking 추가)
+                    x = torch.cat([view1, view2], dim=0).to(self.device, non_blocking=True)
+                    batch_labels = batch_labels.to(self.device, non_blocking=True)
+                    
+                    # Forward
+                    self.optimizer.zero_grad()
+                    features = self.model(x)  # [2*batch_size, feature_dim]
+                    
+                    # 올바른 페어링
+                    f1 = features[:batch_size]
+                    f2 = features[batch_size:]
+                    
+                    # 🌽 첫 배치 디버그 출력
+                    if iteration == 0 and epoch == 0:
+                        neg_in_batch = int((batch_labels >= self.base_id).sum().item())
+                        real_in_batch = int(len(batch_labels) - neg_in_batch)
+                        print(f"[DEBUG][exp{self.experience_count}] batch real={real_in_batch}, neg={neg_in_batch}")
+                        
+                        with torch.no_grad():
+                            # Positive pairs: f1[i]와 f2[i]
+                            pos_sim = torch.nn.functional.cosine_similarity(f1, f2, dim=1).mean()
+                            # Negative pairs: f1[i]와 f2[i+1]
+                            neg_sim = torch.nn.functional.cosine_similarity(
+                                f1, f2.roll(shifts=1, dims=0), dim=1
+                            ).mean()
+                            print(f"  📊 Similarity check:")
+                            print(f"     Positive pairs: {pos_sim:.4f} (should be high)")
+                            print(f"     Negative pairs: {neg_sim:.4f} (should be low)")
+                            if pos_sim <= neg_sim:
+                                print("  ⚠️  WARNING: Positive pairs not more similar! Check pairing!")
+                    
+                    # SupConLoss 형식으로 reshape: [batch_size, 2, feature_dim]
+                    features = torch.stack([f1, f2], dim=1)
+                    
+                    # 차원 확인
+                    assert features.shape[0] == batch_labels.shape[0], \
+                        f"Batch size mismatch: features {features.shape[0]} vs labels {batch_labels.shape[0]}"
+                    assert features.shape[1] == 2, \
+                        f"Must have 2 views, got {features.shape[1]}"
+                    
+                    # Calculate loss
+                    loss = self.criterion(features, batch_labels)
+                    loss_avg.update(loss.item(), batch_size)
+                    
+                    # Backward with gradient clipping
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    self.optimizer.step()
+                    
+                    epoch_loss += loss.item()
+            
+            if (epoch + 1) % 5 == 0:
+                avg_loss = epoch_loss / self.config.training.iterations_per_epoch
+                print(f"  Epoch [{epoch+1}/{self.config.training.scr_epochs}] Loss: {avg_loss:.4f}")
+        
+        # 🌈 올바른 순서: 버퍼 먼저, NCM 나중!
+        print(f"\n=== Before buffer update ===")
+        print(f"Buffer size: {len(self.memory_buffer)}")
+        print(f"Buffer seen classes: {self.memory_buffer.seen_classes if hasattr(self.memory_buffer, 'seen_classes') else 'N/A'}")
+        
+        # Step 1: 메모리 버퍼 업데이트 (Train 데이터만!)
+        self.memory_buffer.update_from_dataset(train_paths, train_labels)
+        self._full_memory_dataset = None  # 캐시 무효화
+        print(f"Memory buffer size after update: {len(self.memory_buffer)}")
+        
+        # Step 2: NCM 업데이트 (버퍼 업데이트 후!)
+        self._update_ncm()
+        
+        # 디버깅: NCM과 버퍼 동기화 확인
+        all_paths, all_labels = self.memory_buffer.get_all_data()
+        buffer_classes = set(int(label) for label in all_labels)
+        ncm_classes = set(self.ncm.class_means_dict.keys())
+        missing = buffer_classes - ncm_classes
+        
+        if missing:
+            print(f"⚠️  NCM missing classes: {sorted(list(missing))}")
+        else:
+            print(f"✅ NCM synchronized: {len(ncm_classes)} classes")
+        
+        # 🐋 Step 3: 주기적 캘리브레이션 및 평가 (오픈셋 모드)
+        if self.openset_enabled and len(self.registered_users) % self.config.training.test_interval == 0:
+            
+            # Warmup 체크
+            if len(self.registered_users) >= self.openset_config.warmup_users:
+                print("\n" + "="*60)
+                print("🔄 THRESHOLD CALIBRATION & EVALUATION")
+                print("="*60)
+                
+                # 캘리브레이션
+                self._calibrate_threshold()
+                
+                # 평가
+                metrics = self._evaluate_openset()
+                
+                # 결과 저장
+                self.evaluation_history.append({
+                    'num_users': len(self.registered_users),
+                    'tau_s': self.ncm.tau_s,
+                    'tau_m': self.ncm.tau_m if self.ncm.use_margin else None,
+                    'metrics': metrics
+                })
+                
+                print("="*60 + "\n")
+            else:
+                print(f"📌 Warmup phase: {len(self.registered_users)}/{self.openset_config.warmup_users}")
+        
+        # 7. Experience 카운터 증가
+        self.experience_count += 1
+        
+        # 8. Scheduler step
+        self.scheduler.step()
+        
+        # 🌽 반환값에 neg_in_batch 추가
+        return {
+            'experience': self.experience_count - 1,
+            'user_id': user_id,
+            'loss': loss_avg.avg,
+            'memory_size': len(self.memory_buffer),
+            'num_registered': len(self.registered_users),
+            'neg_in_batch': neg_in_mem if 'neg_in_mem' in locals() else 0  # 🌽
         }
     
-    summary_path = os.path.join(results_dir, 'summary.json')
-    with open(summary_path, 'w') as f:
-        json.dump(summary, f, indent=4)
+    # 🐋 === 오픈셋 관련 새 메서드들 추가 ===
+    @torch.no_grad()
+    def _calibrate_threshold(self):
+        """🐋 EER 기반 임계치 캘리브레이션"""
+        
+        # Dev 데이터 수집
+        all_dev_paths = []
+        all_dev_labels = []
+        for uid, (paths, labels) in self.dev_data.items():
+            all_dev_paths.extend(paths)
+            all_dev_labels.extend([uid] * len(paths))
+        
+        # 점수 추출
+        print("📊 Extracting scores...")
+        
+        # Genuine scores
+        s_genuine = extract_scores_genuine(
+            self.model, self.ncm,
+            all_dev_paths, all_dev_labels,
+            self.test_transform, self.device
+        )
+        
+        # Impostor scores - 3가지 소스
+        # 1) 등록 클래스 간
+        s_imp_between = extract_scores_impostor_between(
+            self.model, self.ncm,
+            all_dev_paths, all_dev_labels,
+            self.test_transform, self.device,
+            max_pairs=2000
+        )
+        
+        # 2) Unknown (미등록 사용자)
+        s_imp_unknown = extract_scores_impostor_unknown(
+            self.model, self.ncm,
+            self.config.dataset.train_set_file,
+            self.registered_users,
+            self.test_transform, self.device,
+            max_eval=3000
+        )
+        
+        # 3) NegRef
+        s_imp_negref = extract_scores_impostor_negref(
+            self.model, self.ncm,
+            self.config.dataset.negative_samples_file,
+            self.test_transform, self.device,
+            max_eval=self.openset_config.negref_max_eval
+        )
+        
+        # 균형 맞추기
+        s_impostor = balance_impostor_scores(
+            s_imp_between, s_imp_unknown, s_imp_negref,
+            ratio=(0.2, 0.3, 0.5)
+        )
+        
+        print(f"   Genuine: {len(s_genuine)} pairs")
+        print(f"   Impostor: {len(s_impostor)} pairs")
+        
+        # 캘리브레이션
+        if len(s_genuine) >= 10 and len(s_impostor) >= 10:
+            result = self.threshold_calibrator.calibrate(
+                s_genuine, s_impostor,
+                old_tau=self.ncm.tau_s
+            )
+            
+            # NCM에 적용
+            self.ncm.set_thresholds(
+                tau_s=result['tau_smoothed'],
+                use_margin=self.openset_config.use_margin,
+                tau_m=self.openset_config.margin_tau
+            )
+        else:
+            print("⚠️ Not enough samples for calibration")
     
-    print(f"\nResults saved to: {results_dir}")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='SCR Training for CCNet with Open-set Support')  # 🐋 설명 수정
-    parser.add_argument('--config', type=str, default='config/config.yaml',
-                        help='Path to config file')
-    parser.add_argument('--seed', type=int, default=42,
-                        help='Random seed')
-    parser.add_argument('--no-cuda', action='store_true',
-                        help='Disable CUDA')
+    @torch.no_grad()
+    def _evaluate_openset(self):
+        """🐋 오픈셋 평가"""
+        
+        print("\n📈 Open-set Evaluation:")
+        
+        # 1. Known-Dev (TAR/FRR)
+        all_dev_paths = []
+        all_dev_labels = []
+        for uid, (paths, labels) in self.dev_data.items():
+            all_dev_paths.extend(paths)
+            all_dev_labels.extend([uid] * len(paths))
+        
+        if all_dev_paths:
+            preds = predict_batch(
+                self.model, self.ncm,
+                all_dev_paths, self.test_transform, self.device
+            )
+            
+            correct = sum(1 for p, l in zip(preds, all_dev_labels) if p == l)
+            rejected = sum(1 for p in preds if p == -1)
+            
+            TAR = correct / max(1, len(preds))
+            FRR = rejected / max(1, len(preds))
+        else:
+            TAR = FRR = 0.0
+        
+        # 2. Unknown (TRR/FAR)
+        unknown_paths, unknown_labels = load_paths_labels_from_txt(
+            self.config.dataset.train_set_file
+        )
+        
+        # 미등록 사용자만 필터링
+        unknown_filtered = []
+        for p, l in zip(unknown_paths, unknown_labels):
+            if l not in self.registered_users:
+                unknown_filtered.append(p)
+        
+        # 샘플링
+        if len(unknown_filtered) > 1000:
+            unknown_filtered = np.random.choice(unknown_filtered, 1000, replace=False).tolist()
+        
+        if unknown_filtered:
+            preds_unk = predict_batch(
+                self.model, self.ncm,
+                unknown_filtered, self.test_transform, self.device
+            )
+            TRR_u = sum(1 for p in preds_unk if p == -1) / len(preds_unk)
+            FAR_u = 1 - TRR_u
+        else:
+            TRR_u = FAR_u = 0.0
+        
+        # 3. NegRef (선택)
+        negref_paths, _ = load_paths_labels_from_txt(
+            self.config.dataset.negative_samples_file
+        )
+        
+        if len(negref_paths) > 1000:
+            negref_paths = np.random.choice(negref_paths, 1000, replace=False).tolist()
+        
+        if negref_paths:
+            preds_neg = predict_batch(
+                self.model, self.ncm,
+                negref_paths, self.test_transform, self.device
+            )
+            TRR_n = sum(1 for p in preds_neg if p == -1) / len(preds_neg)
+            FAR_n = 1 - TRR_n
+        else:
+            TRR_n = FAR_n = None
+        
+        # 결과 출력
+        print(f"   Known-Dev: TAR={TAR:.3f}, FRR={FRR:.3f}")
+        print(f"   Unknown: TRR={TRR_u:.3f}, FAR={FAR_u:.3f}")
+        if TRR_n is not None:
+            print(f"   NegRef: TRR={TRR_n:.3f}, FAR={FAR_n:.3f}")
+        print(f"   Threshold: τ_s={self.ncm.tau_s:.4f}")
+        
+        return {
+            'TAR': TAR, 'FRR': FRR,
+            'TRR_unknown': TRR_u, 'FAR_unknown': FAR_u,
+            'TRR_negref': TRR_n, 'FAR_negref': FAR_n
+        }
     
-    args = parser.parse_args()
-    main(args)
+    @torch.no_grad()
+    def _update_ncm(self):
+        """
+        NCM classifier의 class means를 업데이트합니다.
+        🍄 메모리 버퍼의 데이터 중 실제 유저만 사용합니다 (가짜 클래스 제외).
+        """
+        if len(self.memory_buffer) == 0:
+            return
+            
+        self.model.eval()
+        
+        # 메모리 버퍼에서 모든 데이터 가져오기
+        all_paths, all_labels = self.memory_buffer.get_all_data()
+        
+        # 🍄 가짜 클래스 필터링
+        # NEGREF_BASE = 10000  # 🪵 하드코딩 제거!!!
+        real_paths = []
+        real_labels = []
+        fake_count = 0
+        
+        for path, label in zip(all_paths, all_labels):
+            label_int = int(label) if not isinstance(label, int) else label
+            # if label_int < NEGREF_BASE:  # 🪵 하드코딩된 10000 사용 - 버그!
+            if label_int < self.base_id:  # 🌽 동적 base_id 사용 - 정답!
+                real_paths.append(path)
+                real_labels.append(label)
+            else:
+                fake_count += 1
+        
+        # 🍄 실제 유저가 없으면 NCM 비워둠
+        if not real_paths:
+            print("⚠️ No real users for NCM update (NCM remains empty)")
+            return
+        
+        # 🍄 필터링 결과 출력
+        if fake_count > 0:
+            print(f"🍄 NCM update: {len(real_paths)} real samples ({fake_count} fake samples filtered out)")
+        
+        # 🍄 실제 유저 데이터로만 데이터셋 생성
+        dataset = MemoryDataset(
+            paths=real_paths,  # 가짜 제외된 경로
+            labels=real_labels,  # 가짜 제외된 라벨
+            transform=self.test_transform,
+            train=False  # 자동으로 dual_views=False (1뷰만 생성)
+        )
+        
+        # 🌈 DataLoader 최적화
+        dataloader = DataLoader(
+            dataset,
+            batch_size=128,
+            shuffle=False,
+            num_workers=self.config.training.num_workers,
+            pin_memory=True,  # 🌈 GPU 전송 최적화
+            persistent_workers=False  # 🌈 단순화
+        )
+        
+        # 클래스별로 features 수집
+        class_features = {}
+        
+        for data, labels in dataloader:
+            # 🌈 안전장치 + non_blocking
+            data = _ensure_single_view(data).to(self.device, non_blocking=True)
+            labels = labels.to(self.device, non_blocking=True)
+            
+            # Feature extraction
+            features = self.model.getFeatureCode(data)
+            
+            # 클래스별로 분류
+            for i, label in enumerate(labels):
+                label_item = label.item()
+                if label_item not in class_features:
+                    class_features[label_item] = []
+                class_features[label_item].append(features[i].cpu())
+        
+        # 클래스별 평균 계산
+        class_means = {}
+        for label, features_list in class_features.items():
+            if len(features_list) > 0:
+                mean_feature = torch.stack(features_list).mean(dim=0)
+                # 🌈 eps 추가 (NaN 방지)
+                mean_feature = mean_feature / (mean_feature.norm(p=2) + 1e-12)
+                class_means[label] = mean_feature
+        
+        # NCM 업데이트 (완전 교체 방식)
+        self.ncm.replace_class_means_dict(class_means)
+        
+        # 🍄 실제 클래스만 확인
+        # real_classes = [k for k in class_means.keys() if k < NEGREF_BASE]  # 🪵 하드코딩
+        real_classes = [k for k in class_means.keys() if k < self.base_id]  # 🌽 동적 base_id
+        print(f"🍄 Updated NCM with {len(real_classes)} real classes (no fake contamination)")
+        
+        self.model.train()
+    
+    def evaluate(self, test_dataset: Dataset) -> float:
+        """
+        NCM을 사용하여 정확도를 평가합니다.
+        """
+        self.model.eval()
+        
+        # 🌈 DataLoader 최적화
+        dataloader = DataLoader(
+            test_dataset,
+            batch_size=128,
+            shuffle=False,
+            num_workers=self.config.training.num_workers,
+            pin_memory=True,  # 🌈 GPU 전송 최적화
+            persistent_workers=False  # 🌈 단순화
+        )
+        
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            for data, labels in dataloader:
+                # 🌈 안전장치 + non_blocking
+                data = _ensure_single_view(data).to(self.device, non_blocking=True)
+                labels = labels.to(self.device, non_blocking=True)
+                
+                # Feature extraction
+                features = self.model.getFeatureCode(data)
+                
+                # NCM prediction
+                predictions = self.ncm.predict(features)
+                
+                correct += (predictions == labels).sum().item()
+                total += labels.size(0)
+        
+        accuracy = 100.0 * correct / total
+        return accuracy
+    
+    def save_checkpoint(self, path: str):
+        """체크포인트 저장"""
+        # 🐋 오픈셋 관련 데이터도 저장
+        checkpoint_dict = {
+            'model_state_dict': self.model.state_dict(),
+            'ncm_state_dict': self.ncm.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'experience_count': self.experience_count,
+            'memory_buffer_size': len(self.memory_buffer)
+        }
+        
+        # 🐋 오픈셋 관련 추가 저장
+        if self.openset_enabled:
+            checkpoint_dict['openset_data'] = {
+                'tau_s': self.ncm.tau_s,
+                'tau_m': self.ncm.tau_m,
+                'registered_users': list(self.registered_users),
+                'evaluation_history': self.evaluation_history
+            }
+        
+        torch.save(checkpoint_dict, path)
+    
+    def load_checkpoint(self, path: str):
+        """체크포인트 로드"""
+        checkpoint = torch.load(path)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.ncm.load_state_dict(checkpoint['ncm_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        self.experience_count = checkpoint['experience_count']
+        
+        # 🐋 오픈셋 관련 복원
+        if 'openset_data' in checkpoint and self.openset_enabled:
+            openset_data = checkpoint['openset_data']
+            self.ncm.tau_s = openset_data.get('tau_s')
+            self.ncm.tau_m = openset_data.get('tau_m')
+            self.registered_users = set(openset_data.get('registered_users', []))
+            self.evaluation_history = openset_data.get('evaluation_history', [])

@@ -20,12 +20,17 @@ class ConfigParser:
     
     def parse(self):
         with open(self.filename, 'r', encoding='utf-8') as file:
-            self.config_dict = yaml.safe_load(file)
+            self.config_dict = yaml.safe_load(file) or {}  # 🌽 빈 YAML 방어
+        
+        # 🌽 비정상 YAML 포맷 체크
+        if not isinstance(self.config_dict, dict):
+            raise ValueError(f"Invalid config format in {self.filename}")
         
         # Convert lists to tuples
         for config_type in self.config_dict.values():
             for key, value in config_type.items():
-                if isinstance(value, List):
+                # if isinstance(value, List):  # 🪵 typing.List는 isinstance 체크 불가
+                if isinstance(value, list):  # 🌽 내장 list 타입 사용
                     config_type[key] = tuple(value)
         
         # Convert paths to absolute paths

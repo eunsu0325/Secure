@@ -42,7 +42,7 @@ class ReservoirSamplingBuffer:  # 🌕 Avalanche storage_policy.py 라인 88-128
         combined_buffer = self.buffer + new_buffer
         
         # 기존 weights와 새 weights 결합
-        cat_weights = torch.cat([self._buffer_weights, new_weights])
+        cat_weights = torch.cat([self._buffer_weights, new_weights])  # 🌽 순서 통일!
         # weight 기준으로 내림차순 정렬
         sorted_weights, sorted_idxs = cat_weights.sort(descending=True)
 
