@@ -4,7 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset, Subset, ConcatDataset
 from torch.optim import lr_scheduler
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Set  # 🐋 Set 추가
+from typing import Dict, List, Tuple, Optional, Set
 from tqdm import tqdm
 from PIL import Image
 
@@ -15,7 +15,7 @@ from utils.pretrained_loader import PretrainedLoader
 
 # 🐋 오픈셋 관련 import 추가
 from scr.threshold_calculator import ThresholdCalibrator
-from utils.utils_openset import (  # 🐋 경로 수정 (utils → scr)
+from utils.utils_openset import (
     split_user_data,
     extract_scores_genuine,
     extract_scores_impostor_between,
@@ -75,7 +75,7 @@ class MemoryDataset(Dataset):
 
 class SCRTrainer:
     """
-    Supervised Contrastive Replay Trainer with Open-set Support.  # 🐋 설명 수정
+    Supervised Contrastive Replay Trainer with Open-set Support.
     """
     
     def __init__(self, 
@@ -188,6 +188,15 @@ class SCRTrainer:
         # Statistics
         self.experience_count = 0
         
+        # 🌽 BASE_ID 저장 (네거티브 필터링용)
+        self.base_id = int(config.negative.base_id) if hasattr(config, 'negative') else 10000
+        print(f"🌽 SCRTrainer using BASE_ID: {self.base_id}")
+        
+        # 🌽 워밍업 관련 파라미터 캐싱
+        self.warmup_T = int(config.negative.warmup_experiences) if hasattr(config, 'negative') else 4
+        self.r0 = float(config.negative.r0) if hasattr(config, 'negative') else 0.5
+        self.max_neg_per_class = int(config.negative.max_per_batch) if hasattr(config, 'negative') else 1
+        
         # 🌈 CuDNN 최적화 (고정 크기 입력)
         if torch.backends.cudnn.is_available():
             torch.backends.cudnn.benchmark = True
@@ -200,8 +209,28 @@ class SCRTrainer:
         else:
             print(f"🎲 SCRTrainer initialized with random weights")
     
+    # 🌽 헬퍼 메서드 추가
+    def _dedup_negative_classes(self, paths, labels, max_per_class=1):
+        """네거티브 클래스 중복 제거"""
+        out_p, out_l, seen = [], [], set()
+        for p, l in zip(paths, labels):
+            li = int(l)
+            if li >= self.base_id:
+                if (li in seen) and (max_per_class == 1):
+                    continue
+                seen.add(li)
+            out_p.append(p)
+            out_l.append(li)
+        return out_p, out_l
+    
+    def _memory_cap_for_ratio(self, num_current, r):
+        """r0 비율 제한 계산"""
+        if r <= 0:
+            return 0
+        return int((r / max(1e-8, 1.0 - r)) * num_current)
+    
     def train_experience(self, user_id: int, image_paths: List[str], labels: List[int]) -> Dict:
-        """하나의 experience (한 명의 사용자) 학습 - 오픈셋 지원."""  # 🐋 설명 수정
+        """하나의 experience (한 명의 사용자) 학습 - 오픈셋 지원."""
         
         print(f"\n=== Training Experience {self.experience_count}: User {user_id} ===")
         
@@ -227,10 +256,10 @@ class SCRTrainer:
         
         self.registered_users.add(user_id)
         
-        # 현재 사용자 데이터셋 생성 (Train 데이터만)  # 🐋 수정
+        # 현재 사용자 데이터셋 생성 (Train 데이터만)
         current_dataset = MemoryDataset(
-            paths=train_paths,  # 🐋 image_paths → train_paths
-            labels=train_labels,  # 🐋 labels → train_labels
+            paths=train_paths,
+            labels=train_labels,
             transform=self.train_transform,
             train=True  # 🌈 자동으로 dual_views=True (2뷰 생성)
         )
@@ -263,17 +292,47 @@ class SCRTrainer:
                     
                     if torch.is_tensor(memory_labels):
                         memory_labels = memory_labels.cpu().tolist()
-
-                    # 메모리 데이터셋 생성
-                    memory_dataset = MemoryDataset(
-                        paths=memory_paths,
-                        labels=memory_labels,
-                        transform=self.train_transform,
-                        train=True  # 🌈 학습용이므로 2뷰 유지
-                    )
                     
-                    # 3. ConcatDataset으로 결합
-                    combined_dataset = ConcatDataset([current_subset, memory_dataset])
+                    # 🌽 === 워밍업 규칙 적용 시작 ===
+                    if self.experience_count < self.warmup_T:
+                        # (1) 네거티브 중복 금지 (동일 neg-class 2장 금지)
+                        memory_paths, memory_labels = self._dedup_negative_classes(
+                            memory_paths, memory_labels, max_per_class=self.max_neg_per_class
+                        )
+                        
+                        # (2) r0 비율 제한: mem ≤ floor(r0/(1-r0) * len(current_subset))
+                        cap = self._memory_cap_for_ratio(len(current_indices), self.r0)
+                        if cap >= 0 and len(memory_paths) > cap:
+                            idx = np.random.choice(len(memory_paths), size=cap, replace=False)
+                            memory_paths = [memory_paths[i] for i in idx]
+                            memory_labels = [memory_labels[i] for i in idx]
+                    else:
+                        # 워밍업 종료 이후: 네거티브 완전 제외 (purge 안전장치)
+                        kept = [(p, l) for p, l in zip(memory_paths, memory_labels) if int(l) < self.base_id]
+                        memory_paths, memory_labels = (list(map(list, zip(*kept))) if kept else ([], []))
+                    # 🌽 === 워밍업 규칙 적용 끝 ===
+                    
+                    # 🌽 (디버그) 현재 메모리 배치 안 네거티브 개수
+                    neg_in_mem = sum(1 for l in memory_labels if int(l) >= self.base_id)
+                    if iteration == 0 and epoch == 0:
+                        print(f"[DEBUG][exp{self.experience_count}] cur={len(current_indices)}, mem={len(memory_paths)}, neg_in_mem={neg_in_mem}, r0={self.r0}")
+                    
+                    # 🌽 메모리가 있을 때만 결합
+                    if memory_paths:
+                        # 메모리 데이터셋 생성
+                        memory_dataset = MemoryDataset(
+                            paths=memory_paths,
+                            labels=memory_labels,
+                            transform=self.train_transform,
+                            train=True  # 🌈 학습용이므로 2뷰 유지
+                        )
+                        
+                        # 3. ConcatDataset으로 결합
+                        combined_dataset = ConcatDataset([current_subset, memory_dataset])
+                    else:
+                        combined_dataset = current_subset
+                        if self.experience_count == self.warmup_T:
+                            print("📌 First post-warmup experience: memory empty, using current only")
                 else:
                     combined_dataset = current_subset
                 
@@ -307,8 +366,12 @@ class SCRTrainer:
                     f1 = features[:batch_size]
                     f2 = features[batch_size:]
                     
-                    # 검증: 첫 번째 iteration에서 positive similarity 확인
+                    # 🌽 첫 배치 디버그 출력
                     if iteration == 0 and epoch == 0:
+                        neg_in_batch = int((batch_labels >= self.base_id).sum().item())
+                        real_in_batch = int(len(batch_labels) - neg_in_batch)
+                        print(f"[DEBUG][exp{self.experience_count}] batch real={real_in_batch}, neg={neg_in_batch}")
+                        
                         with torch.no_grad():
                             # Positive pairs: f1[i]와 f2[i]
                             pos_sim = torch.nn.functional.cosine_similarity(f1, f2, dim=1).mean()
@@ -351,9 +414,8 @@ class SCRTrainer:
         print(f"Buffer size: {len(self.memory_buffer)}")
         print(f"Buffer seen classes: {self.memory_buffer.seen_classes if hasattr(self.memory_buffer, 'seen_classes') else 'N/A'}")
         
-        # Step 1: 메모리 버퍼 업데이트 (Train 데이터만!)  # 🐋 수정
-        # 🌪️ self.memory_buffer.update_from_dataset(image_paths, original_labels)
-        self.memory_buffer.update_from_dataset(train_paths, train_labels)  # 🐋 Train 데이터만 사용
+        # Step 1: 메모리 버퍼 업데이트 (Train 데이터만!)
+        self.memory_buffer.update_from_dataset(train_paths, train_labels)
         self._full_memory_dataset = None  # 캐시 무효화
         print(f"Memory buffer size after update: {len(self.memory_buffer)}")
         
@@ -404,12 +466,14 @@ class SCRTrainer:
         # 8. Scheduler step
         self.scheduler.step()
         
+        # 🌽 반환값에 neg_in_batch 추가
         return {
             'experience': self.experience_count - 1,
             'user_id': user_id,
             'loss': loss_avg.avg,
             'memory_size': len(self.memory_buffer),
-            'num_registered': len(self.registered_users)  # 🐋 추가
+            'num_registered': len(self.registered_users),
+            'neg_in_batch': neg_in_mem if 'neg_in_mem' in locals() else 0  # 🌽
         }
     
     # 🐋 === 오픈셋 관련 새 메서드들 추가 ===
@@ -582,46 +646,39 @@ class SCRTrainer:
         # 메모리 버퍼에서 모든 데이터 가져오기
         all_paths, all_labels = self.memory_buffer.get_all_data()
         
-        # 🍄 가짜 클래스 필터링 (10000 이상은 가짜)
-        NEGREF_BASE = 10000  # 🍄
-        real_paths = []  # 🍄
-        real_labels = []  # 🍄
-        fake_count = 0  # 🍄
+        # 🍄 가짜 클래스 필터링
+        # NEGREF_BASE = 10000  # 🪵 하드코딩 제거!!!
+        real_paths = []
+        real_labels = []
+        fake_count = 0
         
-        for path, label in zip(all_paths, all_labels):  # 🍄
-            label_int = int(label) if not isinstance(label, int) else label  # 🍄
-            if label_int < NEGREF_BASE:  # 🍄 진짜 유저만!
-                real_paths.append(path)  # 🍄
-                real_labels.append(label)  # 🍄
-            else:  # 🍄
-                fake_count += 1  # 🍄
+        for path, label in zip(all_paths, all_labels):
+            label_int = int(label) if not isinstance(label, int) else label
+            # if label_int < NEGREF_BASE:  # 🪵 하드코딩된 10000 사용 - 버그!
+            if label_int < self.base_id:  # 🌽 동적 base_id 사용 - 정답!
+                real_paths.append(path)
+                real_labels.append(label)
+            else:
+                fake_count += 1
         
         # 🍄 실제 유저가 없으면 NCM 비워둠
-        if not real_paths:  # 🍄
-            print("⚠️ No real users for NCM update (NCM remains empty)")  # 🍄
-            return  # 🍄
+        if not real_paths:
+            print("⚠️ No real users for NCM update (NCM remains empty)")
+            return
         
         # 🍄 필터링 결과 출력
-        if fake_count > 0:  # 🍄
-            print(f"🍄 NCM update: {len(real_paths)} real samples ({fake_count} fake samples filtered out)")  # 🍄
-        
-        # 🍄‍🟫 # 🌈 데이터셋 생성 (1뷰만!)
-        # 🍄‍🟫 dataset = MemoryDataset(
-        # 🍄‍🟫     paths=all_paths,
-        # 🍄‍🟫     labels=all_labels,
-        # 🍄‍🟫     transform=self.test_transform,
-        # 🍄‍🟫     train=False  # 🌈 자동으로 dual_views=False (1뷰만 생성)
-        # 🍄‍🟫 )
+        if fake_count > 0:
+            print(f"🍄 NCM update: {len(real_paths)} real samples ({fake_count} fake samples filtered out)")
         
         # 🍄 실제 유저 데이터로만 데이터셋 생성
-        dataset = MemoryDataset(  # 🍄
-            paths=real_paths,  # 🍄 가짜 제외된 경로
-            labels=real_labels,  # 🍄 가짜 제외된 라벨
-            transform=self.test_transform,  # 🍄
-            train=False  # 🍄 자동으로 dual_views=False (1뷰만 생성)
-        )  # 🍄
+        dataset = MemoryDataset(
+            paths=real_paths,  # 가짜 제외된 경로
+            labels=real_labels,  # 가짜 제외된 라벨
+            transform=self.test_transform,
+            train=False  # 자동으로 dual_views=False (1뷰만 생성)
+        )
         
-        # 🌈 DataLoader 최적화 (변경 없음)
+        # 🌈 DataLoader 최적화
         dataloader = DataLoader(
             dataset,
             batch_size=128,
@@ -660,11 +717,11 @@ class SCRTrainer:
         
         # NCM 업데이트 (완전 교체 방식)
         self.ncm.replace_class_means_dict(class_means)
-        # 🍄‍🟫 print(f"Updated NCM with {len(class_means)} classes (full replacement)")
         
         # 🍄 실제 클래스만 확인
-        real_classes = [k for k in class_means.keys() if k < NEGREF_BASE]  # 🍄
-        print(f"🍄 Updated NCM with {len(real_classes)} real classes (no fake contamination)")  # 🍄
+        # real_classes = [k for k in class_means.keys() if k < NEGREF_BASE]  # 🪵 하드코딩
+        real_classes = [k for k in class_means.keys() if k < self.base_id]  # 🌽 동적 base_id
+        print(f"🍄 Updated NCM with {len(real_classes)} real classes (no fake contamination)")
         
         self.model.train()
     
