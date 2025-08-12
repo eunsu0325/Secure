@@ -1,5 +1,5 @@
 # 🌕 Avalanche의 ncm_classifier.py 기반 (최적화 + 버그 수정)
-
+#scr/ncm_classifier.py
 from typing import Dict
 import torch
 from torch import Tensor, nn

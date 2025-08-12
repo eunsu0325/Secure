@@ -1,3 +1,5 @@
+#data/genText.py
+
 import os
 import numpy as np
 
