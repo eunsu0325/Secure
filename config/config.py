@@ -1,4 +1,4 @@
-# 🐋 config/config.py 수정
+# config/config.py
 import dataclasses
 from pathlib import Path
 from typing import Optional
@@ -22,6 +22,9 @@ class Model:
     competition_weight: float
     use_pretrained: bool = False
     pretrained_path: Optional[Path] = None
+    # 🧀 프로젝션 헤드 설정 추가
+    use_projection: bool = True
+    projection_dim: int = 128  # 출력 차원만 조절 가능
 
 
 @dataclasses.dataclass
@@ -45,12 +48,11 @@ class Training:
     results_path: Path
     gpu_ids: str
     ncm_momentum: float
-    batch_size: int = 128  # 🐋 평가용 배치 사이즈 기본값
+    batch_size: int = 128
 
 
 @dataclasses.dataclass
-class Openset:  # 🐋 신규 추가
-    """Open-set configuration"""
+class Openset:
     enabled: bool = True
     warmup_users: int = 10
     initial_tau: float = 0.7
@@ -63,9 +65,8 @@ class Openset:  # 🐋 신규 추가
 
 
 @dataclasses.dataclass
-class Negative:  # 🔥 신규 추가
-    """Negative sample configuration"""
-    warmup_experiences: int = 4     # exp0~3까지 네거티브 사용
-    max_per_batch: int = 1          # 배치당 네거티브 클래스 최대 1장
-    r0: float = 0.5                 # 초기 메모리:현재유저 비율
-    base_id: int = 1                # 런타임에 동적 설정 (max_user_id + 1)
+class Negative:
+    warmup_experiences: int = 4
+    max_per_batch: int = 1
+    r0: float = 0.5
+    base_id: int = 1

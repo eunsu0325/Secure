@@ -333,8 +333,27 @@ def main(args):
     print("\n=== Initializing Model and Components ===")
     
     # CCNet 모델
-    model = ccnet(weight=config_obj.model.competition_weight)  # 👻 device 이동 전에 생성
+    # 🦴 model = ccnet(weight=config_obj.model.competition_weight)
     
+    # 🧀 프로젝션 헤드 설정 포함하여 모델 생성
+    model = ccnet(
+        weight=config_obj.model.competition_weight,
+        use_projection=config_obj.model.use_projection,
+        projection_dim=config_obj.model.projection_dim
+    )
+
+    # 🧀 프로젝션 헤드 설정 출력
+    if config_obj.model.use_projection:
+        print(f"🧀 Projection Head Configuration:")
+        print(f"   Enabled: True")
+        print(f"   Dimension: 6144 -> 2048 -> {config_obj.model.projection_dim}")
+        print(f"   Structure: 2 layers with LayerNorm")
+        print(f"   Training: Uses projection ({config_obj.model.projection_dim}D)")
+        print(f"   NCM/Eval: Uses original features (6144D)")
+    else:
+        print(f"📌 Projection Head: Disabled (using raw 6144D features)")
+    
+
     # 👻 사전훈련 가중치 로드 (device 이동 전에!)
     if hasattr(config_obj.model, 'use_pretrained') and config_obj.model.use_pretrained:  # 👻
         if config_obj.model.pretrained_path and config_obj.model.pretrained_path.exists():  # 👻

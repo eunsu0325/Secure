@@ -14,6 +14,10 @@ Model:
   competition_weight: 0.8    # CCNet의 competition 가중치 (특징 추출 강도)
   use_pretrained: true       # 사전학습 가중치 사용 여부
   pretrained_path: /content/drive/MyDrive/net_params1.pth   # 사전학습 모델 경로
+  # 🧀 프로젝션 헤드 설정 추가
+  use_projection: true        # 프로젝션 헤드 사용 여부
+  projection_dim: 128         # 최종 출력 차원 (64, 128, 256 등 조절 가능)
+
 
 Training:
   scr_batch_size: 10         # 새 사용자의 샘플 배치 크기 (유지)

@@ -244,7 +244,29 @@ class ArcMarginProduct(nn.Module):
 
         return output
 
-
+# 🧀 프로젝션 헤드 클래스 추가
+class ProjectionHead(nn.Module):
+    """
+    🧀 논문 기본 구조: 2층 + LayerNorm
+    6144 -> 2048 (LayerNorm) -> ReLU -> projection_dim (LayerNorm)
+    """
+    def __init__(self, input_dim: int = 6144, projection_dim: int = 128):
+        super().__init__()
+        
+        # 2층 구조 고정
+        self.fc1 = nn.Linear(input_dim, 2048)
+        self.ln1 = nn.LayerNorm(2048)
+        self.relu = nn.ReLU(inplace=True)
+        self.fc2 = nn.Linear(2048, projection_dim)
+        self.ln2 = nn.LayerNorm(projection_dim)
+    
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.ln1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        x = self.ln2(x)
+        return x
 
 class ccnet(torch.nn.Module):
     '''
@@ -252,7 +274,7 @@ class ccnet(torch.nn.Module):
     https://ieeexplore.ieee.org/document/9512475
     '''
 
-    def __init__(self, weight):
+    def __init__(self, weight, use_projection: bool = True, projection_dim: int = 128):  # 🧀
         super(ccnet, self).__init__()
 
         #self.num_classes = num_classes
@@ -266,6 +288,14 @@ class ccnet(torch.nn.Module):
         self.drop = torch.nn.Dropout(p=0.5)
         # self.arclayer = torch.nn.Linear(1024,num_classes) 🔥
         # self.arclayer_ = ArcMarginProduct(2048, num_classes, s=30, m=0.5, easy_margin=False)
+
+        # 🧀 프로젝션 헤드 추가
+        self.use_projection = use_projection
+        if use_projection:
+            self.projection_head = ProjectionHead(input_dim=6144, projection_dim=projection_dim)
+            print(f"🧀 Projection Head enabled: 6144 -> 2048 -> {projection_dim}D")
+            print(f"   Structure: 2 layers with LayerNorm (논문 기본)")
+
 
     def forward(self, x, y=None):
         x1 = self.cb1(x)
@@ -305,5 +335,6 @@ class ccnet(torch.nn.Module):
 
 if __name__== "__main__" :
     inp = torch.randn(256,1,128,128)
-    net = ccnet(weight=0.8)
+    net = ccnet(weight=0.8, use_projection=True, projection_dim=128)  # 🧀
     out = net(inp)
+    print(f"🧀 Output shape: {out.shape}") 

@@ -1,10 +1,10 @@
-# 🐋 config/config_parser.py 수정
+# config/config_parser.py
 import dataclasses
 import sys
 from pathlib import Path
 from typing import Union, List
 import yaml
-from config.config import Dataset, Model, Training, Openset, Negative  # 🔥 Negative 추가
+from config.config import Dataset, Model, Training, Openset, Negative
 
 
 class ConfigParser:
@@ -14,30 +14,27 @@ class ConfigParser:
         self.dataset = None
         self.model = None
         self.training = None
-        self.openset = None  # 🐋 추가
-        self.negative = None  # 🔥 추가
+        self.openset = None
+        self.negative = None
         self.parse()
     
     def parse(self):
         with open(self.filename, 'r', encoding='utf-8') as file:
-            self.config_dict = yaml.safe_load(file) or {}  # 🌽 빈 YAML 방어
+            self.config_dict = yaml.safe_load(file) or {}
         
-        # 🌽 비정상 YAML 포맷 체크
         if not isinstance(self.config_dict, dict):
             raise ValueError(f"Invalid config format in {self.filename}")
         
         # Convert lists to tuples
         for config_type in self.config_dict.values():
             for key, value in config_type.items():
-                # if isinstance(value, List):  # 🪵 typing.List는 isinstance 체크 불가
-                if isinstance(value, list):  # 🌽 내장 list 타입 사용
+                if isinstance(value, list):
                     config_type[key] = tuple(value)
         
         # Convert paths to absolute paths
         for config_type in self.config_dict.values():
             for key, value in config_type.items():
                 if key.endswith('_path') or key.endswith('_file'):
-                    # None 체크 추가 (pretrained_path가 없을 수 있음)
                     if value is not None:
                         config_type[key] = Path(value).absolute()
                     else:
@@ -45,53 +42,48 @@ class ConfigParser:
         
         # Parse sections
         if 'Dataset' in self.config_dict:
-            # 안전하게 복사 후 config_file 제거 (혹시 있다면)
             dataset_dict = self.config_dict['Dataset'].copy()
             dataset_dict.pop('config_file', None)
             self.dataset = Dataset(**dataset_dict)
         
         if 'Model' in self.config_dict:
-            # 안전하게 복사 후 config_file 제거 (혹시 있다면)
             model_dict = self.config_dict['Model'].copy()
             model_dict.pop('config_file', None)
-            # 사전훈련 관련 기본값 설정
             if 'use_pretrained' not in model_dict:
                 model_dict['use_pretrained'] = False
             if 'pretrained_path' not in model_dict:
                 model_dict['pretrained_path'] = None
+            # 🧀 프로젝션 헤드 기본값 설정
+            if 'use_projection' not in model_dict:
+                model_dict['use_projection'] = True
+            if 'projection_dim' not in model_dict:
+                model_dict['projection_dim'] = 128
             self.model = Model(**model_dict)
         
         if 'Training' in self.config_dict:
-            # 안전하게 복사 후 config_file 제거 (혹시 있다면)
             training_dict = self.config_dict['Training'].copy()
             training_dict.pop('config_file', None)
-            # 🐋 batch_size 기본값 추가
             if 'batch_size' not in training_dict:
                 training_dict['batch_size'] = 128
             self.training = Training(**training_dict)
         
-        # 🐋 Openset 섹션 파싱 추가
         if 'Openset' in self.config_dict:
             openset_dict = self.config_dict['Openset'].copy()
             openset_dict.pop('config_file', None)
             self.openset = Openset(**openset_dict)
             print("🐋 Open-set configuration loaded")
         else:
-            # 기본값으로 Openset 생성 (disabled)
             self.openset = Openset(enabled=False)
             print("📌 Open-set configuration not found, using defaults (disabled)")
         
-        # 🔥 Negative 섹션 파싱 추가
         if 'Negative' in self.config_dict:
             negative_dict = self.config_dict['Negative'].copy()
             negative_dict.pop('config_file', None)
-            # base_id가 없으면 기본값 1
             if 'base_id' not in negative_dict:
                 negative_dict['base_id'] = 1
             self.negative = Negative(**negative_dict)
             print("🔥 Negative configuration loaded")
         else:
-            # 기본값으로 Negative 생성
             self.negative = Negative()
             print("📌 Negative configuration not found, using defaults")
     
@@ -102,9 +94,8 @@ class ConfigParser:
         config.dataset = self.dataset
         config.model = self.model
         config.training = self.training
-        config.openset = self.openset  # 🐋 추가
-        config.negative = self.negative  # 🔥 추가
-        # config 파일 경로도 추가 (필요시 접근 가능)
+        config.openset = self.openset
+        config.negative = self.negative
         config.config_file = self.filename
         return config
     
@@ -113,12 +104,10 @@ class ConfigParser:
         for config_type_name, config_type in self.config_dict.items():
             string += f'----- {config_type_name} --- START -----\n'
             for name, value in config_type.items():
-                # config_file은 출력에서 제외
                 if name != 'config_file':
                     string += f'{name:25} : {value}\n'
             string += f'----- {config_type_name} --- END -------\n'
         
-        # 🐋 Openset이 파싱되었지만 config_dict에 없는 경우 (기본값 사용)
         if self.openset and 'Openset' not in self.config_dict:
             string += f'----- Openset (Default) --- START -----\n'
             for field in dataclasses.fields(self.openset):
@@ -126,7 +115,6 @@ class ConfigParser:
                 string += f'{field.name:25} : {value}\n'
             string += f'----- Openset (Default) --- END -------\n'
         
-        # 🔥 Negative가 파싱되었지만 config_dict에 없는 경우 (기본값 사용)
         if self.negative and 'Negative' not in self.config_dict:
             string += f'----- Negative (Default) --- START -----\n'
             for field in dataclasses.fields(self.negative):
@@ -135,6 +123,3 @@ class ConfigParser:
             string += f'----- Negative (Default) --- END -------\n'
         
         return string
-    
-    def __repr__(self):
-        return self.__str__()
