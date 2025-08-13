@@ -154,14 +154,28 @@ class SCRTrainer:
             self.openset_config = config.openset
             
             # Threshold calibrator
+            #self.threshold_calibrator = ThresholdCalibrator(
+            #    mode="cosine",
+            #    alpha=config.openset.smoothing_alpha,
+            #    max_delta=config.openset.max_delta,
+            #    clip_range=(-1.0, 1.0),
+            #    use_auto_margin=False,
+            #    margin_init=config.openset.margin_tau,
+            #    min_samples=10
+            #)
+            # 🍎 새로운 ThresholdCalibrator 초기화 (FAR 모드 지원)
             self.threshold_calibrator = ThresholdCalibrator(
                 mode="cosine",
-                alpha=config.openset.smoothing_alpha,
-                max_delta=config.openset.max_delta,
+                threshold_mode=config.openset.threshold_mode,        # 🍎 'far' or 'eer'
+                target_far=config.openset.target_far,                # 🍎 0.01 (1%)
+                alpha=config.openset.threshold_alpha,                # 🍎 파라미터명 통일
+                max_delta=config.openset.threshold_max_delta,        # 🍎 파라미터명 통일
                 clip_range=(-1.0, 1.0),
-                use_auto_margin=False,
+                use_auto_margin=config.openset.use_margin,
                 margin_init=config.openset.margin_tau,
-                min_samples=10
+                far_target=None,  # 🍎 auto-margin용 (별도)
+                min_samples=10,
+                verbose=config.openset.verbose_calibration           # 🍎 상세 출력 옵션
             )
             
             # Dev/Train 데이터 관리
@@ -179,7 +193,13 @@ class SCRTrainer:
                 tau_m=config.openset.margin_tau
             )
             
-            print("🐋 Open-set mode enabled")
+            # 🍎 모드별 초기값 조정
+            if config.openset.threshold_mode == 'far':
+                print("🍎 FAR Target mode enabled")
+                print(f"   Target FAR: {config.openset.target_far*100:.1f}%")
+            else:
+                print("🐋 EER mode enabled")
+            
             print(f"   Initial τ_s: {config.openset.initial_tau}")
             print(f"   Margin: {config.openset.use_margin} (τ_m={config.openset.margin_tau})")
         else:
@@ -482,6 +502,9 @@ class SCRTrainer:
     def _calibrate_threshold(self):
         """🐋 EER 기반 임계치 캘리브레이션"""
         
+        # 🍎 모드 표시 추가
+        print(f"\n📊 Extracting scores for {self.openset_config.threshold_mode.upper()} calibration...")
+        
         # Dev 데이터 수집
         all_dev_paths = []
         all_dev_labels = []
@@ -536,17 +559,30 @@ class SCRTrainer:
         
         # 캘리브레이션
         if len(s_genuine) >= 10 and len(s_impostor) >= 10:
+           # result = self.threshold_calibrator.calibrate(
+           #     s_genuine, s_impostor,
+           #     old_tau=self.ncm.tau_s
+           # )
+            # 🍎 새로운 캘리브레이션 (FAR/EER 자동 선택)
             result = self.threshold_calibrator.calibrate(
-                s_genuine, s_impostor,
+                genuine_scores=s_genuine,
+                impostor_scores=s_impostor,
                 old_tau=self.ncm.tau_s
             )
-            
+
+
             # NCM에 적용
             self.ncm.set_thresholds(
                 tau_s=result['tau_smoothed'],
                 use_margin=self.openset_config.use_margin,
                 tau_m=self.openset_config.margin_tau
             )
+
+            # 🍎 FAR 모드일 때 추가 정보 출력
+            if self.openset_config.threshold_mode == 'far':
+                print(f"🍎 FAR Target Achievement:")
+                print(f"   Target: {self.openset_config.target_far*100:.1f}%")
+                print(f"   Actual: {result.get('current_far', 0)*100:.1f}%")
         else:
             print("⚠️ Not enough samples for calibration")
     
@@ -627,10 +663,17 @@ class SCRTrainer:
             print(f"   NegRef: TRR={TRR_n:.3f}, FAR={FAR_n:.3f}")
         print(f"   Threshold: τ_s={self.ncm.tau_s:.4f}")
         
+        # 🍎 모드 정보 추가
+        if self.openset_config.threshold_mode == 'far':
+            print(f"   Mode: FAR Target ({self.openset_config.target_far*100:.1f}%)")
+        else:
+            print(f"   Mode: EER")
+        
         return {
             'TAR': TAR, 'FRR': FRR,
             'TRR_unknown': TRR_u, 'FAR_unknown': FAR_u,
-            'TRR_negref': TRR_n, 'FAR_negref': FAR_n
+            'TRR_negref': TRR_n, 'FAR_negref': FAR_n,
+            'mode': self.openset_config.threshold_mode  # 🍎 모드 정보 추가
         }
     
     @torch.no_grad()

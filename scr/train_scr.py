@@ -353,7 +353,6 @@ def main(args):
     else:
         print(f"📌 Projection Head: Disabled (using raw 6144D features)")
     
-
     # 👻 사전훈련 가중치 로드 (device 이동 전에!)
     if hasattr(config_obj.model, 'use_pretrained') and config_obj.model.use_pretrained:  # 👻
         if config_obj.model.pretrained_path and config_obj.model.pretrained_path.exists():  # 👻

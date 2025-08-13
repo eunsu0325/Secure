@@ -70,8 +70,20 @@ class ConfigParser:
         if 'Openset' in self.config_dict:
             openset_dict = self.config_dict['Openset'].copy()
             openset_dict.pop('config_file', None)
+            
+            # 🍎 FAR 모드 기본값 추가 (3줄만!)
+            if 'threshold_mode' not in openset_dict:
+                openset_dict['threshold_mode'] = 'far'
+            if 'target_far' not in openset_dict:
+                openset_dict['target_far'] = 0.01
+            if 'verbose_calibration' not in openset_dict:
+                openset_dict['verbose_calibration'] = True
+            
             self.openset = Openset(**openset_dict)
-            print("🐋 Open-set configuration loaded")
+            
+            # 🍎 모드 표시 (1줄 추가)
+            mode_info = f" (FAR {self.openset.target_far*100:.1f}%)" if self.openset.threshold_mode == 'far' else " (EER)"
+            print(f"🐋 Open-set configuration loaded{mode_info}")
         else:
             self.openset = Openset(enabled=False)
             print("📌 Open-set configuration not found, using defaults (disabled)")

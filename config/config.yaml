@@ -1,60 +1,72 @@
-# 🐋 config/config.yaml에 추가
+# 🐋 config/config.yaml (정리 버전)
+
 Dataset:
-  train_set_file: /content/drive/MyDrive/Data/GPDSmanosASM_txt/train_palma.txt  # 학습용 데이터셋 경로 (등록할 사용자들)
-  test_set_file: /content/drive/MyDrive/Data/GPDSmanosASM_txt/test_palma.txt    # 평가용 데이터셋 경로 (성능 측정)
-  height: 128        # 입력 이미지 높이 (픽셀)
-  width: 128         # 입력 이미지 너비 (픽셀)
-  channels: 1        # 이미지 채널 수 (1=흑백, 3=컬러)
-  augmentation: true # 데이터 증강 사용 여부 (학습 시 랜덤 변환)
-  negative_samples_file: /content/drive/MyDrive/CCNet_OKD_CD/data/train_Tongji.txt  # NegRef용 네거티브 샘플 (impostor 분포 참조)
-  num_negative_classes: 10  # 초기 학습에 사용할 네거티브 클래스 수
+  train_set_file: /content/drive/MyDrive/Data/GPDSmanosASM_txt/train_palma.txt
+  test_set_file: /content/drive/MyDrive/Data/GPDSmanosASM_txt/test_palma.txt
+  height: 128
+  width: 128
+  channels: 1
+  augmentation: true
+  negative_samples_file: /content/drive/MyDrive/CCNet_OKD_CD/data/train_Tongji.txt
+  num_negative_classes: 10
 
 Model:
-  architecture: ccnet        # 모델 아키텍처 이름
-  competition_weight: 0.8    # CCNet의 competition 가중치 (특징 추출 강도)
-  use_pretrained: true       # 사전학습 가중치 사용 여부
-  pretrained_path: /content/drive/MyDrive/net_params1.pth   # 사전학습 모델 경로
-  # 🧀 프로젝션 헤드 설정 추가
-  use_projection: true        # 프로젝션 헤드 사용 여부
-  projection_dim: 128         # 최종 출력 차원 (64, 128, 256 등 조절 가능)
-
+  architecture: ccnet
+  competition_weight: 0.8
+  use_pretrained: true
+  pretrained_path: /content/drive/MyDrive/net_params1.pth
+  # 🧀 프로젝션 헤드 설정
+  use_projection: true
+  projection_dim: 128
 
 Training:
-  scr_batch_size: 10         # 새 사용자의 샘플 배치 크기 (유지)
-  memory_batch_size: 16      # 🍄 메모리 버퍼에서 가져올 샘플 수 (1:2 비율로 조정)
-  num_experiences: 100       # 학습할 총 사용자(experience) 수
-  memory_size: 1000          # 메모리 버퍼 최대 크기 (샘플 수)
-  min_samples_per_class: 15 # 클래스당 최소 유지 샘플 수
-  scr_epochs: 3              # 🍄 각 사용자당 학습 에폭 수 (과적합 방지)
-  iterations_per_epoch: 15   # 🍄 에폭당 반복 횟수 (배치 작아져서 증가)
-  num_epochs: 3000           # 전체 학습 에폭 (사용 안 함)
-  num_workers: 8             # 데이터 로더 워커 프로세스 수
-  learning_rate: 0.0001      # 학습률 (Adam optimizer)
-  scheduler_step_size: 50   # 학습률 감소 주기 (에폭)
-  scheduler_gamma: 0.8       # 학습률 감소 비율
-  temperature: 0.07          # SupConLoss 온도 파라미터 (대조 학습 민감도)
-  save_interval: 1000        # 체크포인트 저장 주기 (사용 안 함)
-  test_interval: 5          # 평가 및 캘리브레이션 주기 (N명마다)
-  checkpoint_path: /content/drive/MyDrive/scr_test  # 체크포인트 저장 경로
-  results_path: /content/drive/MyDrive/scr_test     # 결과 파일 저장 경로
-  gpu_ids: "0"               # 사용할 GPU ID
-  ncm_momentum: 0.9          # 🍄 NCM 프로토타입 업데이트 모멘텀 (0.9=EMA 적용)
+  scr_batch_size: 10
+  memory_batch_size: 16
+  num_experiences: 100
+  memory_size: 1000
+  min_samples_per_class: 15
+  scr_epochs: 3
+  iterations_per_epoch: 15
+  num_epochs: 3000  # (사용 안 함)
+  num_workers: 8
+  learning_rate: 0.0001
+  scheduler_step_size: 50
+  scheduler_gamma: 0.8
+  temperature: 0.07
+  save_interval: 1000  # (사용 안 함)
+  test_interval: 5  # ⭐ 평가 및 캘리브레이션 주기
+  checkpoint_path: /content/drive/MyDrive/scr_test
+  results_path: /content/drive/MyDrive/scr_test
+  gpu_ids: "0"
+  ncm_momentum: 0.9
 
-# 🐋 새로 추가 - 오픈셋 인식 설정
+# 🐋 오픈셋 인식 설정 (정리)
 Openset:
-  enabled: true              # 오픈셋 기능 활성화 (false면 기존 closed-set 모드)
-  warmup_users: 10           # 워밍업 기간 (N명까지는 고정 임계치 사용)
-  initial_tau: 0.9           # 초기 임계치 값 (코사인 유사도 기준)
-  smoothing_alpha: 0.35       # EMA 스무딩 계수 (0~1, 클수록 빠른 적응)
-  max_delta: 0.15            # 임계치 최대 변화폭 (안정성 제한)
-  use_margin: false           # 마진 규칙 사용 여부 (1등-2등 점수 차이)
-  margin_tau: 0.07          # 마진 임계치 (최소 점수 차이 요구)
-  dev_ratio: 0.3             # Dev 세트 비율 (30% = 캘리브레이션용, 70% = 학습용)
-  negref_max_eval: 5000      # NegRef 평가 시 최대 샘플 수 (속도 제한)
+  enabled: true
+
+  # ☄️ 임계치 설정 (통합)
+  threshold_mode: 'far'      # ☄️ 'eer' or 'far'
+  target_far: 0.01           # ☄️ FAR 타겟 1%
+  threshold_alpha: 0.2       # ☄️ EMA 스무딩 계수 (기존 smoothing_alpha 대체)
+  threshold_max_delta: 0.03  # ☄️ 최대 변화폭 (기존 max_delta 대체)
+  
+  # 초기값 및 워밍업
+  warmup_users: 10           # 워밍업 기간
+  initial_tau: 0.9           # 초기 임계치
+  
+  # 마진 규칙
+  use_margin: false
+  margin_tau: 0.07
+  
+  # 데이터 분할
+  dev_ratio: 0.3             # Dev 세트 비율
+  negref_max_eval: 5000      # NegRef 최대 샘플
+  
+  # 로깅
+  verbose_calibration: true  # ☄️ 상세 출력
 
 # 🔥 네거티브 샘플 설정
 Negative:
-  warmup_experiences: 4      # exp0~3까지만 네거티브 사용
-  max_per_batch: 1          # 배치당 네거티브 클래스 최대 1장
-  r0: 0.5                   # exp0에서 메모리:현재유저 비율 상한
-  # base_id는 런타임에 자동 계산 (max_user_id + 1)
+  warmup_experiences: 4
+  max_per_batch: 1
+  r0: 0.5

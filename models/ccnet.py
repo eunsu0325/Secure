@@ -310,9 +310,17 @@ class ccnet(torch.nn.Module):
         # x = self.drop(x) 🔥
         # x = self.arclayer_(x, y) 🔥
 
-        # return x, F.normalize(fe, dim=-1) 🔥
-        return F.normalize(fe, dim=-1)  # Only return normalized features for SupConLoss
-
+        # 🔥 핵심 수정: 프로젝션 헤드 적용
+        if self.training and self.use_projection:
+            # 학습 모드: 프로젝션 적용
+            fe_norm = F.normalize(fe, dim=-1)
+            z = self.projection_head(fe_norm)
+            z = F.normalize(z, dim=-1)
+            return z  # 128D 반환
+        else:
+            # 평가 모드: 원본 특징
+            return F.normalize(fe, dim=-1)  # 6144D 반환
+    
     def getFeatureCode(self, x):
         x1 = self.cb1(x)
         x2 = self.cb2(x)
