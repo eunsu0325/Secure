@@ -1,8 +1,7 @@
-#scr/train_scr.py
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Supervised Contrastive Replay (SCR) Training Script with Open-set Support  # 🐋 설명 수정
+Supervised Contrastive Replay (SCR) Training Script with Open-set Support
 CCNet + SCR for Continual Learning
 """
 
@@ -24,6 +23,16 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import ConfigParser
 # 👻 사전훈련 로더 import 추가
 from utils.pretrained_loader import PretrainedLoader  # 👻
+
+# 🎨 시각화 관련 import 추가
+import matplotlib
+matplotlib.use('Agg')  # 서버 환경용
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+from sklearn.manifold import TSNE
+from PIL import Image
+import torch.nn.functional as F
+# 🎨
 
 from models import ccnet, MyDataset, get_scr_transforms
 from scr import (
@@ -104,6 +113,148 @@ def remove_negative_samples_gradually(memory_buffer: ClassBalancedBuffer,
     
     print(f"Removed {num_to_remove} negative classes ({removed_count} samples)")
     return removed_count
+
+# 🎨 t-SNE 시각화 함수 추가
+@torch.no_grad()
+def plot_tsne_from_memory(trainer,
+                          save_path,
+                          per_class=150,
+                          space='fe',     # 'fe' = 6144D, 'z' = 128D
+                          perplexity=30,
+                          max_points=5000,
+                          seed=42):
+    """
+    메모리 버퍼의 임베딩을 t-SNE로 시각화
+    """
+    model = trainer.model
+    model.eval()
+    device = trainer.device
+    
+    # 1) 메모리 버퍼에서 데이터 가져오기
+    paths, labels = trainer.memory_buffer.get_all_data()
+    if len(paths) == 0:
+        print("[t-SNE] Memory buffer is empty.")
+        return
+    
+    # 가짜 클래스 제외 (네거티브 샘플)
+    base_id = getattr(trainer, 'base_id', 
+                     getattr(trainer.config.negative, 'base_id', 10000))
+    real_data = [(p, l) for p, l in zip(paths, labels) 
+                 if int(l) < base_id]
+    
+    if len(real_data) == 0:
+        print("[t-SNE] No real users in buffer.")
+        return
+    
+    # 클래스별 균형 샘플링
+    from collections import defaultdict
+    by_cls = defaultdict(list)
+    for p, y in real_data:
+        by_cls[int(y)].append(p)
+    
+    # 균등 샘플링
+    rng = random.Random(seed)
+    sampled = []
+    for c, lst in by_cls.items():
+        k = min(per_class, len(lst))
+        sampled += [(p, c) for p in rng.sample(lst, k)]
+    
+    # 전체 상한선
+    if len(sampled) > max_points:
+        sampled = rng.sample(sampled, max_points)
+    
+    print(f"[t-SNE] Processing {len(sampled)} samples from {len(by_cls)} classes")
+    
+    # 2) Transform 정의
+    transform = trainer.test_transform
+    ch = trainer.config.dataset.channels
+    
+    # 3) 배치로 임베딩 추출
+    batch_size = 128
+    features_list = []
+    labels_list = []
+    
+    for i in range(0, len(sampled), batch_size):
+        batch = sampled[i:i+batch_size]
+        
+        # 이미지 로드
+        imgs = []
+        for path, _ in batch:
+            with Image.open(path) as img:
+                img = img.convert('L' if ch == 1 else 'RGB')
+                imgs.append(transform(img))
+        
+        imgs = torch.stack(imgs).to(device)
+        
+        # Feature extraction
+        features = model(imgs)  # eval 모드에서는 6144D L2-normalized
+        
+        if space == 'z' and hasattr(model, 'projection_head'):
+            # 128D projection 공간
+            features = F.normalize(model.projection_head(features), dim=-1)
+        
+        features_list.append(features.cpu())
+        labels_list.extend([y for _, y in batch])
+    
+    # 합치기
+    X = torch.cat(features_list, dim=0).numpy()
+    Y = np.array(labels_list)
+    
+    # 4) t-SNE 실행
+    perplexity = min(perplexity, max(5, len(Y)//4))
+    
+    print(f"[t-SNE] Running t-SNE with perplexity={perplexity}...")
+    tsne = TSNE(
+        n_components=2,
+        perplexity=perplexity,
+        n_iter=1500,
+        metric='euclidean',  # L2-정규화 후 euclidean = 코사인과 단조 동등
+        init='pca',
+        learning_rate='auto',
+        random_state=seed,
+        verbose=0  # 간결한 출력
+    )
+    
+    Z = tsne.fit_transform(X)
+    
+    # 5) 플롯 그리기
+    plt.figure(figsize=(12, 8))
+    
+    # 색상맵 사용
+    n_classes = len(set(Y))
+    cmap = cm.get_cmap('tab20' if n_classes <= 20 else 'hsv', n_classes)
+    
+    # 클래스별로 그리기
+    for idx, c in enumerate(sorted(set(Y))):
+        mask = (Y == c)
+        color = cmap(idx)
+        plt.scatter(
+            Z[mask, 0], Z[mask, 1],
+            c=[color],
+            s=15,
+            alpha=0.7,
+            edgecolors='none',
+            label=f'User {c}' if n_classes <= 10 else None
+        )
+    
+    # 제목 및 스타일
+    plt.title(f't-SNE Visualization ({space.upper()}) | {n_classes} classes, {len(Y)} points', 
+              fontsize=14, fontweight='bold')
+    plt.axis('off')
+    
+    # 범례 (클래스가 적을 때만)
+    if n_classes <= 10:
+        plt.legend(loc='best', markerscale=2)
+    
+    plt.tight_layout()
+    
+    # 저장
+    os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"[t-SNE] Saved to {save_path}")
+# 🎨
 
 class ContinualLearningEvaluator:
     """
@@ -475,6 +626,37 @@ def main(args):
             
             print(f"\n=== Evaluation at Experience {exp_id + 1} ===")
             
+            # 🎨 t-SNE 시각화 추가
+            if (exp_id + 1) % 10 == 0 or exp_id == config_obj.training.num_experiences - 1:
+                tsne_dir = os.path.join(results_dir, "tsne")
+                os.makedirs(tsne_dir, exist_ok=True)
+                
+                # 6144D feature space 시각화
+                tsne_path = os.path.join(tsne_dir, f"tsne_exp_{exp_id+1:03d}.png")
+                plot_tsne_from_memory(
+                    trainer=trainer,
+                    save_path=tsne_path,
+                    per_class=150,
+                    space='fe',  # NCM 공간
+                    perplexity=30,
+                    max_points=5000,
+                    seed=42
+                )
+                
+                # Projection space도 시각화 (옵션)
+                if config_obj.model.use_projection:
+                    tsne_path_z = os.path.join(tsne_dir, f"tsne_z_exp_{exp_id+1:03d}.png")
+                    plot_tsne_from_memory(
+                        trainer=trainer,
+                        save_path=tsne_path_z,
+                        per_class=150,
+                        space='z',  # 128D projection
+                        perplexity=30,
+                        max_points=5000,
+                        seed=42
+                    )
+            # 🎨
+            
             # 테스트셋으로 평가
             accuracy, openset_metrics = evaluate_on_test_set(  # 🐋
                 trainer, config_obj, 
@@ -545,6 +727,16 @@ def main(args):
     history_path = os.path.join(results_dir, 'training_history.json')
     with open(history_path, 'w') as f:
         json.dump(training_history, f, indent=4)
+    
+    # 🎨 t-SNE 시각화 경로 추가
+    tsne_images = []
+    tsne_dir = os.path.join(results_dir, "tsne")
+    if os.path.exists(tsne_dir):
+        tsne_images = sorted([f for f in os.listdir(tsne_dir) if f.endswith('.png')])
+        if tsne_images:
+            print(f"\n🎨 t-SNE visualizations saved: {len(tsne_images)} images")
+            print(f"   Location: {tsne_dir}")
+    # 🎨
     
     # 최종 통계
     final_result = training_history['accuracies'][-1] if training_history['accuracies'] else {}
