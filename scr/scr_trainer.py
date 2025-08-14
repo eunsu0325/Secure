@@ -522,8 +522,7 @@ class SCRTrainer:
             self.test_transform, self.device
         )
         
-        # Impostor scores - 3가지 소스
-        # 1) 등록 클래스 간
+        # 2-1. Between impostor (등록자끼리 교차)
         s_imp_between = extract_scores_impostor_between(
             self.model, self.ncm,
             all_dev_paths, all_dev_labels,
@@ -531,16 +530,7 @@ class SCRTrainer:
             max_pairs=2000
         )
         
-        # 2) Unknown (미등록 사용자)
-        s_imp_unknown = extract_scores_impostor_unknown(
-            self.model, self.ncm,
-            self.config.dataset.train_set_file,
-            self.registered_users,
-            self.test_transform, self.device,
-            max_eval=3000
-        )
-        
-        # 3) NegRef
+        # 2-2. NegRef impostor (외부 데이터)
         s_imp_negref = extract_scores_impostor_negref(
             self.model, self.ncm,
             self.config.dataset.negative_samples_file,
@@ -548,41 +538,44 @@ class SCRTrainer:
             max_eval=self.openset_config.negref_max_eval
         )
         
-        # 균형 맞추기
+        # 🍎 균형 맞추기 (Between + NegRef만!)
+        # Unknown 제거 - 평가용이므로
         s_impostor = balance_impostor_scores(
-            s_imp_between, s_imp_unknown, s_imp_negref,
-            ratio=(0.2, 0.3, 0.5)
+            s_imp_between, 
+            None,  # Unknown 안 씀!
+            s_imp_negref,
+            ratio=(0.3, 0.0, 0.7)  # Between 30%, NegRef 70%
         )
         
         print(f"   Genuine: {len(s_genuine)} pairs")
-        print(f"   Impostor: {len(s_impostor)} pairs")
+        print(f"   Impostor: {len(s_impostor)} pairs (Between + NegRef)")
         
-        # 캘리브레이션
+        # 🍎 캘리브레이션 (EER 또는 FAR 모드)
         if len(s_genuine) >= 10 and len(s_impostor) >= 10:
-           # result = self.threshold_calibrator.calibrate(
-           #     s_genuine, s_impostor,
-           #     old_tau=self.ncm.tau_s
-           # )
-            # 🍎 새로운 캘리브레이션 (FAR/EER 자동 선택)
+            # calibrate 메서드가 내부적으로 EER/FAR 계산함!
             result = self.threshold_calibrator.calibrate(
                 genuine_scores=s_genuine,
                 impostor_scores=s_impostor,
                 old_tau=self.ncm.tau_s
             )
-
-
+            
             # NCM에 적용
             self.ncm.set_thresholds(
                 tau_s=result['tau_smoothed'],
                 use_margin=self.openset_config.use_margin,
                 tau_m=self.openset_config.margin_tau
             )
-
-            # 🍎 FAR 모드일 때 추가 정보 출력
-            if self.openset_config.threshold_mode == 'far':
-                print(f"🍎 FAR Target Achievement:")
-                print(f"   Target: {self.openset_config.target_far*100:.1f}%")
-                print(f"   Actual: {result.get('current_far', 0)*100:.1f}%")
+            
+            # 🍎 모드별 출력
+            if self.openset_config.threshold_mode == 'eer':
+                print(f"📊 EER Mode Results:")
+                print(f"   EER: {result.get('eer', 0)*100:.2f}%")
+                print(f"   Threshold: {result['tau_smoothed']:.4f}")
+            else:  # far mode
+                print(f"🍎 FAR Target Results:")
+                print(f"   Target FAR: {self.openset_config.target_far*100:.1f}%")
+                print(f"   Achieved FAR: {result.get('current_far', 0)*100:.1f}%")
+                print(f"   Threshold: {result['tau_smoothed']:.4f}")
         else:
             print("⚠️ Not enough samples for calibration")
     
