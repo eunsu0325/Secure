@@ -1,7 +1,7 @@
 # config/config.py
 import dataclasses
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict  # 💎 Dict 추가
 
 @dataclasses.dataclass
 class Dataset:
@@ -46,6 +46,33 @@ class Training:
     gpu_ids: str
     ncm_momentum: float
     batch_size: int = 128
+    
+    # 💎 ProxyContrastLoss 설정 추가
+    use_proxy_loss: bool = True
+    proxy_lambda: float = 0.3
+    proxy_temperature: float = 0.15  # SupCon보다 높게!
+    proxy_topk: int = 30
+    proxy_full_until: int = 100
+    proxy_warmup_classes: int = 5
+    
+    # 💎 Lambda 스케줄링 (Optional)
+    proxy_lambda_schedule: Optional[Dict[str, float]] = None
+    
+    # 💎 커버리지 샘플링 설정
+    use_coverage_sampling: bool = True
+    coverage_k_per_class: int = 2
+    
+    # 💎 프로토타입 설정
+    prototype_beta: float = 0.05  # EMA 계수 (현재는 미사용)
+    
+    def __post_init__(self):
+        """💎 Lambda 스케줄 기본값 설정"""
+        if self.proxy_lambda_schedule is None and self.use_proxy_loss:
+            self.proxy_lambda_schedule = {
+                'warmup': 0.1,
+                'warmup_10': 0.2,
+                'warmup_20': 0.3
+            }
 
 @dataclasses.dataclass
 class Openset:

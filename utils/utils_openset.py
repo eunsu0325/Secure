@@ -200,17 +200,53 @@ def extract_scores_impostor_negref(model, ncm, negref_file: str, transform, devi
 
 
 def balance_impostor_scores(s_between: np.ndarray, s_unknown: np.ndarray, s_negref: np.ndarray,
-                           ratio: Tuple[float, float, float] = (0.2, 0.5, 0.3),
+                           ratio: Tuple[float, float, float] = (0.5, 0.0, 0.5),
                            total: int = 4000) -> np.ndarray:
-    """impostor 점수 균형 맞추기"""
-    pools = [np.asarray(s_between), np.asarray(s_unknown), np.asarray(s_negref)]
-    want = [int(total * r) for r in ratio]
-    out = []
+    """impostor 점수 균형 맞추기 - None 안전 버전"""
     
-    for arr, k in zip(pools, want):
-        if arr.size == 0:
+    # 💎 입력 검증 및 변환
+    sources = []
+    weights = []
+    
+    if s_between is not None and isinstance(s_between, (list, np.ndarray)):
+        arr = np.asarray(s_between)
+        if arr.size > 0:
+            sources.append(arr)
+            weights.append(ratio[0])
+    
+    if s_unknown is not None and isinstance(s_unknown, (list, np.ndarray)):
+        arr = np.asarray(s_unknown)
+        if arr.size > 0:
+            sources.append(arr)
+            weights.append(ratio[1])
+    
+    if s_negref is not None and isinstance(s_negref, (list, np.ndarray)):
+        arr = np.asarray(s_negref)
+        if arr.size > 0:
+            sources.append(arr)
+            weights.append(ratio[2])
+    
+    # 💎 소스가 없으면 빈 배열 반환
+    if not sources:
+        return np.array([])
+    
+    # 💎 소스가 하나면 그대로 반환
+    if len(sources) == 1:
+        arr = sources[0]
+        return arr[:total] if len(arr) > total else arr
+    
+    # 💎 가중치 정규화
+    total_weight = sum(weights)
+    normalized_weights = [w / total_weight for w in weights]
+    
+    # 💎 각 소스에서 샘플링
+    out = []
+    for arr, weight in zip(sources, normalized_weights):
+        k = int(total * weight)
+        if k == 0:
             continue
-        if arr.size <= k:
+            
+        if len(arr) <= k:
             out.append(arr)
         else:
             out.append(np.random.choice(arr, k, replace=False))
@@ -219,7 +255,6 @@ def balance_impostor_scores(s_between: np.ndarray, s_unknown: np.ndarray, s_negr
         return np.array([])
     
     return np.concatenate(out)
-
 
 @torch.no_grad()
 def predict_batch(model, ncm, paths: List[str], transform, device, batch_size: int = 128) -> np.ndarray:

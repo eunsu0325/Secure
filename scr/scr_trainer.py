@@ -8,8 +8,9 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional, Set
 from tqdm import tqdm
 from PIL import Image
+import torch.nn.functional as F  # 💎 추가
 
-from loss import SupConLoss
+from loss import SupConLoss, ProxyContrastLoss  # 💎 ProxyContrastLoss 추가
 from models import get_scr_transforms
 from utils.util import AverageMeter
 from utils.pretrained_loader import PretrainedLoader
@@ -77,9 +78,10 @@ class MemoryDataset(Dataset):
 class SCRTrainer:
     """
     Supervised Contrastive Replay Trainer with Open-set Support.
+    💎 Enhanced with ProxyContrastLoss and Coverage Sampling
     """
     
-    def __init__(self, 
+    def __init__(self,
                  model: nn.Module,
                  ncm_classifier,
                  memory_buffer,
@@ -117,9 +119,55 @@ class SCRTrainer:
             base_temperature=config.training.temperature
         )
         
+        # 💎 ProxyContrastLoss 초기화
+        self.use_proxy = getattr(config.training, 'use_proxy_loss', True)
+        self.proxy_lambda = getattr(config.training, 'proxy_lambda', 0.3)
+        self.proxy_temp = getattr(config.training, 'proxy_temperature', 0.15)
+        self.proxy_topk = getattr(config.training, 'proxy_topk', 30)
+        self.proxy_full_until = getattr(config.training, 'proxy_full_until', 100)
+        self.proxy_min_classes = getattr(config.training, 'proxy_warmup_classes', 5)
+        
+        # 💎 ProxyLoss 객체 생성
+        if self.use_proxy:
+            self.proxy_loss = ProxyContrastLoss(
+                temperature=self.proxy_temp,
+                lambda_proxy=self.proxy_lambda,  # 초기값, 나중에 스케줄링
+                topk=self.proxy_topk,
+                full_until=self.proxy_full_until
+            )
+            print(f"💎 ProxyContrastLoss enabled:")
+            print(f"   Temperature: {self.proxy_temp} (vs SupCon: {config.training.temperature})")
+            print(f"   Lambda: {self.proxy_lambda}")
+            print(f"   Top-K: {self.proxy_topk}")
+        else:
+            self.proxy_loss = None
+        
+        # 💎 프로토타입 캐시
+        self.proto_cache_P = None      # [C, 128] 텐서
+        self.proto_cache_ids = []      # 정렬된 클래스 ID
+        self.proxy_active = False       # warmup 후 활성화
+        
+        # 💎 커버리지 샘플링 설정
+        self.use_coverage = getattr(config.training, 'use_coverage_sampling', True)
+        self.coverage_k = getattr(config.training, 'coverage_k_per_class', 2)
+        
+        if self.use_coverage:
+            print(f"💎 Coverage sampling enabled: k={self.coverage_k} per class")
+        
+        # 💎 Lambda 스케줄 설정
+        self.proxy_lambda_schedule = getattr(config.training, 'proxy_lambda_schedule', None)
+        if self.proxy_lambda_schedule is None and self.use_proxy:
+            # 기본 스케줄
+            self.proxy_lambda_schedule = {
+                'warmup': 0.1,
+                'warmup_10': 0.2,
+                'warmup_20': 0.3
+            }
+            print(f"💎 Lambda schedule: {self.proxy_lambda_schedule}")
+        
         # Optimizer
         self.optimizer = optim.Adam(
-            model.parameters(), 
+            model.parameters(),
             lr=config.training.learning_rate
         )
         
@@ -153,16 +201,6 @@ class SCRTrainer:
         if self.openset_enabled:
             self.openset_config = config.openset
             
-            # Threshold calibrator
-            #self.threshold_calibrator = ThresholdCalibrator(
-            #    mode="cosine",
-            #    alpha=config.openset.smoothing_alpha,
-            #    max_delta=config.openset.max_delta,
-            #    clip_range=(-1.0, 1.0),
-            #    use_auto_margin=False,
-            #    margin_init=config.openset.margin_tau,
-            #    min_samples=10
-            #)
             # 🍎 새로운 ThresholdCalibrator 초기화 (FAR 모드 지원)
             self.threshold_calibrator = ThresholdCalibrator(
                 mode="cosine",
@@ -229,7 +267,11 @@ class SCRTrainer:
             print(f"🔥 SCRTrainer initialized with pretrained model")
         else:
             print(f"🎲 SCRTrainer initialized with random weights")
-    
+        
+        # 💎 모니터링 변수 추가
+        self.proxy_loss_history = []
+        self.drift_history = []
+
     # 🌽 헬퍼 메서드 추가
     def _dedup_negative_classes(self, paths, labels, max_per_class=1):
         """네거티브 클래스 중복 제거"""
@@ -241,7 +283,7 @@ class SCRTrainer:
                     continue
                 seen.add(li)
             out_p.append(p)
-            out_l.append(li)
+            out_l.append(l)
         return out_p, out_l
     
     def _memory_cap_for_ratio(self, num_current, r):
@@ -250,10 +292,81 @@ class SCRTrainer:
             return 0
         return int((r / max(1e-8, 1.0 - r)) * num_current)
     
+    # 💎 Lambda 스케줄링 메서드 추가
+    def get_proxy_lambda(self):
+        """Experience 기반 lambda 스케줄링"""
+        if not self.proxy_lambda_schedule or not self.use_proxy:
+            return self.proxy_lambda  # 고정값
+        
+        # 스케줄 적용
+        lambda_val = 0.0
+        
+        if self.experience_count >= self.warmup_T:
+            lambda_val = self.proxy_lambda_schedule.get('warmup', 0.1)
+        if self.experience_count >= self.warmup_T + 10:
+            lambda_val = self.proxy_lambda_schedule.get('warmup_10', 0.2)
+        if self.experience_count >= self.warmup_T + 20:
+            lambda_val = self.proxy_lambda_schedule.get('warmup_20', 0.3)
+        
+        return lambda_val
+    
+    # 💎 프로토타입 캐시 업데이트 메서드 추가
+    @torch.no_grad()
+    def update_proto_cache(self):
+        """
+        💎 6144D NCM 프로토타입을 128D로 투영하여 캐시
+        Experience 끝에 한 번만 실행
+        """
+        # Warmup 체크
+        if self.experience_count < self.warmup_T:
+            return
+        
+        # 실제 클래스만 (네거티브 제외)
+        real_classes = [c for c in self.ncm.class_means_dict.keys()
+                        if c < self.base_id]
+        
+        # 최소 클래스 수 체크
+        if len(real_classes) < self.proxy_min_classes:
+            print(f"⏳ Waiting for more classes: {len(real_classes)}/{self.proxy_min_classes}")
+            return
+        
+        # ProxyLoss 활성화
+        self.proxy_active = True
+        
+        # 정렬된 순서 유지 (중요!)
+        self.proto_cache_ids = sorted(real_classes)
+        
+        # 6144D 프로토타입 수집
+        protos_6144 = torch.stack([
+            self.ncm.class_means_dict[c]
+            for c in self.proto_cache_ids
+        ]).to(self.device)
+        
+        # 128D로 투영
+        self.model.eval()
+        protos_6144_norm = F.normalize(protos_6144, dim=-1)
+        P = self.model.projection_head(protos_6144_norm)
+        self.proto_cache_P = F.normalize(P, dim=-1).detach()  # 💎 detach 필수!
+        self.model.train()
+        
+        print(f"💎 Proto cache updated: {len(self.proto_cache_ids)} classes")
+        print(f"   Cache shape: {self.proto_cache_P.shape}")
+    
     def train_experience(self, user_id: int, image_paths: List[str], labels: List[int]) -> Dict:
         """하나의 experience (한 명의 사용자) 학습 - 오픈셋 지원."""
         
         print(f"\n=== Training Experience {self.experience_count}: User {user_id} ===")
+        
+        # 💎 Lambda 스케줄 업데이트
+        if self.use_proxy and self.proxy_loss:
+            new_lambda = self.get_proxy_lambda()
+            self.proxy_loss.lambda_proxy = new_lambda
+            if self.experience_count % 10 == 0:
+                print(f"💎 Lambda schedule: {new_lambda:.2f}")
+        
+        # 💎 메모리 버퍼에 경험 카운터 전달 (로그용)
+        if hasattr(self.memory_buffer, 'set_experience_count'):
+            self.memory_buffer.set_experience_count(self.experience_count)
         
         # 원본 labels를 보존 (중요!)
         original_labels = labels.copy()
@@ -261,7 +374,7 @@ class SCRTrainer:
         # 🐋 Step 1: Dev/Train 분리 (오픈셋 모드인 경우)
         if self.openset_enabled:
             train_paths, train_labels, dev_paths, dev_labels = split_user_data(
-                image_paths, original_labels, 
+                image_paths, original_labels,
                 dev_ratio=self.openset_config.dev_ratio,
                 min_dev=2
             )
@@ -298,7 +411,7 @@ class SCRTrainer:
                 
                 # 1. 현재 데이터에서 B_n 샘플링 (중복 제거 + 안전한 크기)
                 current_indices = np.random.choice(
-                    len(current_dataset), 
+                    len(current_dataset),
                     size=min(len(current_dataset), self.config.training.scr_batch_size),
                     replace=False  # 중복 제거!
                 )
@@ -306,10 +419,19 @@ class SCRTrainer:
                 
                 # 2. 메모리에서 B_M 샘플링 (SCR 논문: 매 iteration 샘플링)
                 if len(self.memory_buffer) > 0:
-                    # 메모리에서 샘플링
-                    memory_paths, memory_labels = self.memory_buffer.sample(
-                        self.config.training.memory_batch_size
-                    )
+                    # 💎 커버리지 샘플링 사용
+                    if self.use_coverage and hasattr(self.memory_buffer, 'coverage_sample'):
+                        memory_paths, memory_labels = self.memory_buffer.coverage_sample(
+                            self.config.training.memory_batch_size,
+                            k_per_class=self.coverage_k
+                        )
+                        if iteration == 0 and epoch == 0:
+                            print(f"💎 Using coverage sampling")
+                    else:
+                        # 🧊 기존 샘플링
+                        memory_paths, memory_labels = self.memory_buffer.sample(
+                            self.config.training.memory_batch_size
+                        )
                     
                     if torch.is_tensor(memory_labels):
                         memory_labels = memory_labels.cpu().tolist()
@@ -381,11 +503,12 @@ class SCRTrainer:
                     
                     # Forward
                     self.optimizer.zero_grad()
-                    features = self.model(x)  # [2*batch_size, feature_dim]
+                    # 🧊 features = self.model(x)  # [2*batch_size, feature_dim]
+                    features_all = self.model(x)  # 💎 변수명 변경 [2*batch_size, 128]
                     
                     # 올바른 페어링
-                    f1 = features[:batch_size]
-                    f2 = features[batch_size:]
+                    f1 = features_all[:batch_size]  # 💎
+                    f2 = features_all[batch_size:]   # 💎
                     
                     # 🌽 첫 배치 디버그 출력
                     if iteration == 0 and epoch == 0:
@@ -407,16 +530,38 @@ class SCRTrainer:
                                 print("  ⚠️  WARNING: Positive pairs not more similar! Check pairing!")
                     
                     # SupConLoss 형식으로 reshape: [batch_size, 2, feature_dim]
-                    features = torch.stack([f1, f2], dim=1)
+                    # 🧊 features = torch.stack([f1, f2], dim=1)
+                    features_paired = torch.stack([f1, f2], dim=1)  # 💎 새 변수명
                     
                     # 차원 확인
-                    assert features.shape[0] == batch_labels.shape[0], \
-                        f"Batch size mismatch: features {features.shape[0]} vs labels {batch_labels.shape[0]}"
-                    assert features.shape[1] == 2, \
-                        f"Must have 2 views, got {features.shape[1]}"
+                    assert features_paired.shape[0] == batch_labels.shape[0], \
+                        f"Batch size mismatch: features {features_paired.shape[0]} vs labels {batch_labels.shape[0]}"
+                    assert features_paired.shape[1] == 2, \
+                        f"Must have 2 views, got {features_paired.shape[1]}"
                     
                     # Calculate loss
-                    loss = self.criterion(features, batch_labels)
+                    # 🧊 loss = self.criterion(features, batch_labels)
+                    loss = self.criterion(features_paired, batch_labels)  # 💎 SupConLoss
+                    
+                    # 💎 ProxyContrastLoss 추가
+                    if self.proxy_active and self.proto_cache_P is not None and self.use_proxy:
+                        # 정규화 (필수!)
+                        z_all = F.normalize(features_all, dim=-1)
+                        y_all = batch_labels.repeat(2).long()  # 두 뷰 라벨
+                        
+                        loss_proxy = self.proxy_loss(
+                            z_all, y_all,
+                            self.proto_cache_P,
+                            self.proto_cache_ids
+                        )
+                        
+                        loss = loss + loss_proxy
+                        
+                        # 모니터링
+                        if iteration == 0 and epoch == 0:
+                            print(f"💎 ProxyLoss: {loss_proxy.item():.4f}, SupCon: {loss.item() - loss_proxy.item():.4f}")
+                            self.proxy_loss_history.append(loss_proxy.item())
+                    
                     loss_avg.update(loss.item(), batch_size)
                     
                     # Backward with gradient clipping
@@ -429,7 +574,7 @@ class SCRTrainer:
             if (epoch + 1) % 5 == 0:
                 avg_loss = epoch_loss / self.config.training.iterations_per_epoch
                 print(f"  Epoch [{epoch+1}/{self.config.training.scr_epochs}] Loss: {avg_loss:.4f}")
-        
+
         # 🌈 올바른 순서: 버퍼 먼저, NCM 나중!
         print(f"\n=== Before buffer update ===")
         print(f"Buffer size: {len(self.memory_buffer)}")
@@ -443,6 +588,10 @@ class SCRTrainer:
         # Step 2: NCM 업데이트 (버퍼 업데이트 후!)
         self._update_ncm()
         
+        # 💎 Step 3: 프로토타입 캐시 업데이트 (Experience 끝!)
+        if self.use_proxy:
+            self.update_proto_cache()
+        
         # 디버깅: NCM과 버퍼 동기화 확인
         all_paths, all_labels = self.memory_buffer.get_all_data()
         buffer_classes = set(int(label) for label in all_labels)
@@ -454,7 +603,7 @@ class SCRTrainer:
         else:
             print(f"✅ NCM synchronized: {len(ncm_classes)} classes")
         
-        # 🐋 Step 3: 주기적 캘리브레이션 및 평가 (오픈셋 모드)
+        # 🐋 Step 4: 주기적 캘리브레이션 및 평가 (오픈셋 모드)
         if self.openset_enabled and len(self.registered_users) % self.config.training.test_interval == 0:
             
             # Warmup 체크
@@ -541,7 +690,7 @@ class SCRTrainer:
         # 🍎 균형 맞추기 (Between + NegRef만!)
         # Unknown 제거 - 평가용이므로
         s_impostor = balance_impostor_scores(
-            s_imp_between, 
+            s_imp_between,
             None,  # Unknown 안 씀!
             s_imp_negref,
             ratio=(0.3, 0.0, 0.7)  # Between 30%, NegRef 70%
@@ -684,15 +833,13 @@ class SCRTrainer:
         all_paths, all_labels = self.memory_buffer.get_all_data()
         
         # 🍄 가짜 클래스 필터링
-        # NEGREF_BASE = 10000  # 🪵 하드코딩 제거!!!
         real_paths = []
         real_labels = []
         fake_count = 0
         
         for path, label in zip(all_paths, all_labels):
             label_int = int(label) if not isinstance(label, int) else label
-            # if label_int < NEGREF_BASE:  # 🪵 하드코딩된 10000 사용 - 버그!
-            if label_int < self.base_id:  # 🌽 동적 base_id 사용 - 정답!
+            if label_int < self.base_id:  # 🌽 동적 base_id 사용
                 real_paths.append(path)
                 real_labels.append(label)
             else:
@@ -756,7 +903,6 @@ class SCRTrainer:
         self.ncm.replace_class_means_dict(class_means)
         
         # 🍄 실제 클래스만 확인
-        # real_classes = [k for k in class_means.keys() if k < NEGREF_BASE]  # 🪵 하드코딩
         real_classes = [k for k in class_means.keys() if k < self.base_id]  # 🌽 동적 base_id
         print(f"🍄 Updated NCM with {len(real_classes)} real classes (no fake contamination)")
         
@@ -811,6 +957,15 @@ class SCRTrainer:
             'memory_buffer_size': len(self.memory_buffer)
         }
         
+        # 💎 ProxyLoss 관련 저장
+        if self.use_proxy:
+            checkpoint_dict['proxy_data'] = {
+                'proto_cache_P': self.proto_cache_P,
+                'proto_cache_ids': self.proto_cache_ids,
+                'proxy_active': self.proxy_active,
+                'proxy_loss_history': self.proxy_loss_history
+            }
+        
         # 🐋 오픈셋 관련 추가 저장
         if self.openset_enabled:
             checkpoint_dict['openset_data'] = {
@@ -830,6 +985,14 @@ class SCRTrainer:
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         self.experience_count = checkpoint['experience_count']
+        
+        # 💎 ProxyLoss 관련 복원
+        if 'proxy_data' in checkpoint and self.use_proxy:
+            proxy_data = checkpoint['proxy_data']
+            self.proto_cache_P = proxy_data.get('proto_cache_P')
+            self.proto_cache_ids = proxy_data.get('proto_cache_ids', [])
+            self.proxy_active = proxy_data.get('proxy_active', False)
+            self.proxy_loss_history = proxy_data.get('proxy_loss_history', [])
         
         # 🐋 오픈셋 관련 복원
         if 'openset_data' in checkpoint and self.openset_enabled:

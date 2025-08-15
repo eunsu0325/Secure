@@ -32,13 +32,34 @@ Training:
   learning_rate: 0.0001
   scheduler_step_size: 50
   scheduler_gamma: 0.8
-  temperature: 0.07
+  temperature: 0.07  # SupConLoss용
   save_interval: 1000  # (사용 안 함)
   test_interval: 5  # ⭐ 평가 및 캘리브레이션 주기
-  checkpoint_path: /content/drive/MyDrive/scr_test
-  results_path: /content/drive/MyDrive/scr_test
+  checkpoint_path: /content/drive/MyDrive/scr_proxy
+  results_path: /content/drive/MyDrive/scr_proxy
   gpu_ids: "0"
   ncm_momentum: 0.9
+  
+  # 💎 ProxyContrastLoss 설정 (NEW!)
+  use_proxy_loss: true
+  proxy_lambda: 0.3  # 손실 가중치
+  proxy_temperature: 0.15  # SupCon(0.07)보다 높게!
+  proxy_topk: 30  # Top-K 클래스
+  proxy_full_until: 100  # 100개 이하면 전체 사용
+  proxy_warmup_classes: 5  # 최소 클래스 수
+  
+  # 💎 Lambda 스케줄링 (점진적 증가)
+  proxy_lambda_schedule:
+    warmup: 0.1      # warmup 직후
+    warmup_10: 0.2   # warmup + 10 exp
+    warmup_20: 0.3   # warmup + 20 exp
+  
+  # 💎 커버리지 샘플링
+  use_coverage_sampling: true
+  coverage_k_per_class: 2  # 클래스당 샘플 수
+  
+  # 💎 프로토타입 설정
+  prototype_beta: 0.05  # EMA 계수 (미래 확장용)
 
 # 🐋 오픈셋 인식 설정 (정리)
 Openset:

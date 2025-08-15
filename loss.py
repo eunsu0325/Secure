@@ -108,3 +108,111 @@ class SupConLoss(nn.Module):
         loss = loss.mean() if valid.any() else torch.zeros([], device=device)  # 🌽
 
         return loss
+
+
+# 💎 ProxyContrastLoss 추가 - 프로토타입 기반 대조 학습
+class ProxyContrastLoss(nn.Module):
+    """
+    💎 Prototype-based Contrastive Loss for Continual Learning
+    
+    프로토타입(클래스 대표점)과의 대조 학습으로 catastrophic forgetting 방지
+    - 고정된 앵커 역할로 드리프트 감소
+    - Top-K 선택으로 계산 효율성 확보
+    - 정답 클래스 강제 포함으로 안정성 보장
+    
+    Args:
+        temperature: 소프트맥스 온도 (높을수록 부드러운 분포)
+        lambda_proxy: 손실 가중치
+        topk: 비교할 최대 클래스 수
+        full_until: 이 수 이하면 모든 클래스 사용
+    """
+    def __init__(self, temperature=0.15, lambda_proxy=0.3, topk=30, full_until=100):
+        super().__init__()
+        self.temperature = temperature  # 💎 SupCon보다 높은 온도 (0.15 vs 0.07)
+        self.lambda_proxy = lambda_proxy
+        self.topk = topk
+        self.full_until = full_until
+    
+    def forward(self, z, y, proto_cache_P, proto_cache_ids):
+        """
+        💎 Forward pass
+        
+        Args:
+            z: [B, D] 배치 임베딩 (L2 정규화됨)
+            y: [B] 라벨
+            proto_cache_P: [C, D] 프로토타입 텐서 (L2 정규화됨)
+            proto_cache_ids: 정렬된 클래스 ID 리스트
+            
+        Returns:
+            스칼라 손실값
+        """
+        # 💎 프로토타입이 없으면 0 반환 (초기 상태)
+        if proto_cache_P is None or len(proto_cache_ids) == 0:
+            return torch.tensor(0.0, device=z.device)
+        
+        B = z.size(0)  # 배치 크기
+        C = proto_cache_P.size(0)  # 클래스 수
+        
+        # 💎 클래스 ID → 인덱스 매핑
+        id2idx = {cid: i for i, cid in enumerate(proto_cache_ids)}
+        
+        # 💎 코사인 유사도 계산 (이미 정규화된 벡터들)
+        # AMP 대응
+        if z.dtype == torch.float16:
+            sim = (z.float() @ proto_cache_P.float().t()) / self.temperature
+        else:
+            sim = (z @ proto_cache_P.t()) / self.temperature  # [B, C]
+        
+        # 💎 Top-K 선택 또는 전체 사용
+        if C <= self.full_until or self.topk >= C:
+            # 클래스가 적으면 전체 사용
+            sel_idx = torch.arange(C, device=z.device).unsqueeze(0).expand(B, -1)  # [B, C]
+            sel_sim = sim
+        else:
+            # 💎 Top-K 클래스만 선택 (계산 효율성)
+            sel_sim, sel_idx = sim.topk(self.topk, dim=1)  # [B, K]
+            
+            # 💎 정답 클래스 강제 포함 (중요!)
+            for i in range(B):
+                true_label = y[i].item()
+                if true_label in id2idx:
+                    true_idx = id2idx[true_label]
+                    
+                    # 💎 텐서 in 연산 버그 방지 - .any() 사용
+                    exists = (sel_idx[i] == true_idx).any()
+                    if not exists:
+                        # Top-K에 없으면 마지막 자리를 정답으로 교체
+                        sel_sim[i, -1] = sim[i, true_idx]
+                        sel_idx[i, -1] = true_idx
+        
+        # 💎 Cross Entropy 손실 계산
+        losses = []
+        for i in range(B):
+            true_label = y[i].item()
+            
+            # 프로토타입이 없는 새 클래스는 스킵
+            if true_label not in id2idx:
+                continue
+            
+            true_idx = id2idx[true_label]
+            
+            # 💎 선택된 클래스 중 정답 위치 찾기
+            pos_mask = (sel_idx[i] == true_idx)
+            if not pos_mask.any():
+                continue  # 정답이 없으면 스킵 (방어 코드)
+            
+            pos_in_topk = pos_mask.nonzero(as_tuple=True)[0][0]
+            
+            # 💎 Softmax cross entropy
+            log_probs = sel_sim[i].log_softmax(dim=0)  # [K or C]
+            losses.append(-log_probs[pos_in_topk])
+        
+        # 💎 평균 손실 반환
+        if losses:
+            return self.lambda_proxy * torch.stack(losses).mean()
+        else:
+            return torch.tensor(0.0, device=z.device)
+    
+    def update_lambda(self, new_lambda):
+        """💎 Lambda 값 동적 업데이트 (스케줄링용)"""
+        self.lambda_proxy = new_lambda

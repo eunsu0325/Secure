@@ -1,10 +1,11 @@
 # 🌕 Avalanche의 storage_policy.py에서 필요한 부분만 가져옴
 #memory_buffer.py
 
-from collections import defaultdict
+from collections import defaultdict, deque  # 💎 deque 추가
 import random
 from typing import Dict, List, Set, Optional, Tuple
 import torch
+import numpy as np  # 💎 추가
 
 class ReservoirSamplingBuffer:  # 🌕 Avalanche storage_policy.py 라인 88-128 그대로
     """
@@ -124,6 +125,11 @@ class ClassBalancedBuffer:  # 🌕 Avalanche storage_policy.py 라인 239-334 �
         self.min_samples_per_class = min_samples_per_class  # 🐣
         self.seen_classes: Set[int] = set()  # 지금까지 본 클래스들
         self.buffer_groups: Dict[int, ReservoirSamplingBuffer] = {}  # 클래스별 버퍼
+        
+        # 💎 커버리지 샘플링을 위한 큐 추가
+        self._cov_queues = defaultdict(deque)  # 클래스별 exemplar 큐
+        self._cov_classes = []  # 현재 클래스 순서
+        self.experience_count = 0  # 💎 경험 카운터 (로그용)
 
     def get_group_lengths(self, num_groups):  # 🌕 + 🐣 최소 보장 로직 추가
         """
@@ -261,8 +267,88 @@ class ClassBalancedBuffer:  # 🌕 Avalanche storage_policy.py 라인 239-334 �
         
         return all_data, all_labels
     
+    # 💎 커버리지 샘플링 메서드 추가 - 진짜 per-exemplar 순환
+    def _reset_class_queue(self, cls):
+        """💎 클래스의 exemplar 큐를 리셋 (에폭 시작)"""
+        if cls not in self.buffer_groups:
+            return
+        
+        buf = self.buffer_groups[cls].buffer
+        if not buf:
+            return
+            
+        idxs = list(range(len(buf)))
+        random.shuffle(idxs)  # 에폭 시작 시 한 번만 셔플
+        self._cov_queues[cls] = deque(idxs)
+    
+    def coverage_sample(self, n: int, k_per_class: int = 2) -> Tuple[List, List]:
+        """
+        💎 모든 exemplar를 공평하게 순환하는 커버리지 샘플링
+        
+        각 클래스의 모든 exemplar가 한 번씩 사용되기 전에는
+        같은 exemplar가 반복되지 않음 (진짜 순환)
+        
+        :param n: 총 샘플 수
+        :param k_per_class: 클래스당 샘플 수
+        :return: (paths, labels)
+        """
+        if not self.buffer_groups:
+            return [], []
+        
+        # 💎 클래스 목록 변경 감지 → 큐/순서 갱신
+        classes_now = list(self.buffer_groups.keys())
+        if set(classes_now) != set(self._cov_classes):
+            self._cov_classes = classes_now[:]
+            random.shuffle(self._cov_classes)
+            
+            # 모든 클래스 큐 초기화
+            for cls in self._cov_classes:
+                self._reset_class_queue(cls)
+            
+            print(f"💎 Coverage sampler initialized: {len(self._cov_classes)} classes")
+        
+        paths = []
+        labels = []
+        ci = 0  # 클래스 인덱스
+        
+        while len(paths) < n and self._cov_classes:
+            cls = self._cov_classes[ci % len(self._cov_classes)]
+            ci += 1
+            
+            buf = self.buffer_groups[cls].buffer
+            if not buf:
+                continue
+            
+            # 💎 클래스에서 k_per_class개 추출
+            take = min(k_per_class, len(buf), n - len(paths))
+            
+            for _ in range(take):
+                # 💎 큐가 비면 리셋 (한 바퀴 완료!)
+                if not self._cov_queues[cls]:
+                    self._reset_class_queue(cls)
+                    
+                    # 💎 순환 검증 로그 (10 experience마다)
+                    if self.experience_count > 0 and self.experience_count % 10 == 0:
+                        print(f"♻️ Class {cls} completed full cycle (all {len(buf)} exemplars used)")
+                
+                # 💎 큐에서 인덱스 pop (중복 없음 보장!)
+                j = self._cov_queues[cls].popleft()
+                j = min(j, len(buf) - 1)  # 범위 안전
+                
+                p, y = buf[j]
+                paths.append(p)
+                labels.append(y)
+                
+                if len(paths) >= n:
+                    break
+        
+        return paths[:n], labels[:n]
+    
+    def set_experience_count(self, count):
+        """💎 경험 카운터 설정 (로그용)"""
+        self.experience_count = count
 
-        # ClassBalancedBuffer에 추가 필요
+    # ClassBalancedBuffer에 추가 필요
     def get_all_data(self) -> Tuple[List, List]:
         """버퍼의 모든 데이터를 반환"""
         all_data = []
