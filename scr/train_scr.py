@@ -3,6 +3,7 @@
 """
 Supervised Contrastive Replay (SCR) Training Script with Open-set Support
 CCNet + SCR for Continual Learning
+⭐️ Energy Score Support Added
 """
 
 import os
@@ -21,18 +22,16 @@ from torch.utils.data import DataLoader, Subset
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import ConfigParser
-# 👻 사전훈련 로더 import 추가
-from utils.pretrained_loader import PretrainedLoader  # 👻
+from utils.pretrained_loader import PretrainedLoader
 
-# 🎨 시각화 관련 import 추가
+# 시각화 관련
 import matplotlib
-matplotlib.use('Agg')  # 서버 환경용
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from sklearn.manifold import TSNE
 from PIL import Image
 import torch.nn.functional as F
-# 🎨
 
 from models import ccnet, MyDataset, get_scr_transforms
 from scr import (
@@ -50,7 +49,6 @@ def fix_random_seed(seed):
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
-# 🌽 BASE_ID 계산 함수 추가
 def compute_safe_base_id(*txt_files):
     """모든 txt 파일에서 최대 user ID를 찾아 안전한 BASE_ID 계산"""
     max_id = 0
@@ -69,7 +67,6 @@ def compute_safe_base_id(*txt_files):
     print(f"[NEG-BASE] max_user_id={max_id}, BASE_ID={base}")
     return base
 
-# 🌽 purge_negatives 함수 추가
 def purge_negatives(memory_buffer, base_id):
     """메모리 버퍼에서 모든 네거티브 클래스 제거"""
     to_del = [int(c) for c in list(memory_buffer.seen_classes) if int(c) >= base_id]
@@ -81,62 +78,46 @@ def purge_negatives(memory_buffer, base_id):
         memory_buffer.seen_classes.discard(c)
     print(f"🧹 Purged {len(to_del)} negative classes ({removed} samples)")
 
-# 🌽 remove_negative_samples_gradually 함수 수정 (버그 수정)
 def remove_negative_samples_gradually(memory_buffer: ClassBalancedBuffer, 
-                                    base_id: int,  # 🌽 base_id 파라미터 추가
+                                    base_id: int,
                                     removal_ratio: float = 0.2):
-    """
-    메모리 버퍼에서 negative 샘플을 점진적으로 제거
-    
-    :param removal_ratio: 제거할 비율 (0.2 = 20%)
-    """
-    # negative_classes = [c for c in memory_buffer.seen_classes if c < 0]  # 🪵 버그: 네거티브는 음수가 아님
-    negative_classes = [int(c) for c in memory_buffer.seen_classes if int(c) >= base_id]  # 🌽 수정
+    """메모리 버퍼에서 negative 샘플을 점진적으로 제거"""
+    negative_classes = [int(c) for c in memory_buffer.seen_classes if int(c) >= base_id]
     
     if not negative_classes:
         return 0
     
-    # 제거할 클래스 수 계산
     num_to_remove = max(1, int(len(negative_classes) * removal_ratio))
-    
-    # 랜덤하게 선택하여 제거
     classes_to_remove = np.random.choice(negative_classes, size=num_to_remove, replace=False)
     
     removed_count = 0
     for class_id in classes_to_remove:
         if class_id in memory_buffer.buffer_groups:
-            # 해당 클래스의 샘플 수
             removed_count += len(memory_buffer.buffer_groups[class_id].buffer)
-            # 버퍼에서 제거
             del memory_buffer.buffer_groups[class_id]
             memory_buffer.seen_classes.remove(class_id)
     
     print(f"Removed {num_to_remove} negative classes ({removed_count} samples)")
     return removed_count
 
-# 🎨 t-SNE 시각화 함수 추가
 @torch.no_grad()
 def plot_tsne_from_memory(trainer,
                           save_path,
                           per_class=150,
-                          space='fe',     # 'fe' = 6144D, 'z' = 128D
+                          space='fe',
                           perplexity=30,
                           max_points=5000,
                           seed=42):
-    """
-    메모리 버퍼의 임베딩을 t-SNE로 시각화
-    """
+    """메모리 버퍼의 임베딩을 t-SNE로 시각화"""
     model = trainer.model
     model.eval()
     device = trainer.device
     
-    # 1) 메모리 버퍼에서 데이터 가져오기
     paths, labels = trainer.memory_buffer.get_all_data()
     if len(paths) == 0:
         print("[t-SNE] Memory buffer is empty.")
         return
     
-    # 가짜 클래스 제외 (네거티브 샘플)
     base_id = getattr(trainer, 'base_id', 
                      getattr(trainer.config.negative, 'base_id', 10000))
     real_data = [(p, l) for p, l in zip(paths, labels) 
@@ -146,30 +127,25 @@ def plot_tsne_from_memory(trainer,
         print("[t-SNE] No real users in buffer.")
         return
     
-    # 클래스별 균형 샘플링
     from collections import defaultdict
     by_cls = defaultdict(list)
     for p, y in real_data:
         by_cls[int(y)].append(p)
     
-    # 균등 샘플링
     rng = random.Random(seed)
     sampled = []
     for c, lst in by_cls.items():
         k = min(per_class, len(lst))
         sampled += [(p, c) for p in rng.sample(lst, k)]
     
-    # 전체 상한선
     if len(sampled) > max_points:
         sampled = rng.sample(sampled, max_points)
     
     print(f"[t-SNE] Processing {len(sampled)} samples from {len(by_cls)} classes")
     
-    # 2) Transform 정의
     transform = trainer.test_transform
     ch = trainer.config.dataset.channels
     
-    # 3) 배치로 임베딩 추출
     batch_size = 128
     features_list = []
     labels_list = []
@@ -177,7 +153,6 @@ def plot_tsne_from_memory(trainer,
     for i in range(0, len(sampled), batch_size):
         batch = sampled[i:i+batch_size]
         
-        # 이미지 로드
         imgs = []
         for path, _ in batch:
             with Image.open(path) as img:
@@ -185,22 +160,17 @@ def plot_tsne_from_memory(trainer,
                 imgs.append(transform(img))
         
         imgs = torch.stack(imgs).to(device)
-        
-        # Feature extraction
-        features = model(imgs)  # eval 모드에서는 6144D L2-normalized
+        features = model(imgs)
         
         if space == 'z' and hasattr(model, 'projection_head'):
-            # 128D projection 공간
             features = F.normalize(model.projection_head(features), dim=-1)
         
         features_list.append(features.cpu())
         labels_list.extend([y for _, y in batch])
     
-    # 합치기
     X = torch.cat(features_list, dim=0).numpy()
     Y = np.array(labels_list)
     
-    # 4) t-SNE 실행
     perplexity = min(perplexity, max(5, len(Y)//4))
     
     print(f"[t-SNE] Running t-SNE with perplexity={perplexity}...")
@@ -208,23 +178,20 @@ def plot_tsne_from_memory(trainer,
         n_components=2,
         perplexity=perplexity,
         n_iter=1500,
-        metric='euclidean',  # L2-정규화 후 euclidean = 코사인과 단조 동등
+        metric='euclidean',
         init='pca',
         learning_rate='auto',
         random_state=seed,
-        verbose=0  # 간결한 출력
+        verbose=0
     )
     
     Z = tsne.fit_transform(X)
     
-    # 5) 플롯 그리기
     plt.figure(figsize=(12, 8))
     
-    # 색상맵 사용
     n_classes = len(set(Y))
     cmap = cm.get_cmap('tab20' if n_classes <= 20 else 'hsv', n_classes)
     
-    # 클래스별로 그리기
     for idx, c in enumerate(sorted(set(Y))):
         mask = (Y == c)
         color = cmap(idx)
@@ -237,42 +204,38 @@ def plot_tsne_from_memory(trainer,
             label=f'User {c}' if n_classes <= 10 else None
         )
     
-    # 제목 및 스타일
     plt.title(f't-SNE Visualization ({space.upper()}) | {n_classes} classes, {len(Y)} points', 
               fontsize=14, fontweight='bold')
     plt.axis('off')
     
-    # 범례 (클래스가 적을 때만)
     if n_classes <= 10:
         plt.legend(loc='best', markerscale=2)
     
     plt.tight_layout()
     
-    # 저장
     os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
     
     print(f"[t-SNE] Saved to {save_path}")
-# 🎨
 
 class ContinualLearningEvaluator:
     """
     Continual Learning 평가 메트릭 계산
     - Average Accuracy
     - Forgetting Measure
-    🐋 - Open-set metrics (TAR, TRR, FAR)
+    - Open-set metrics (TAR, TRR, FAR)
     """
     def __init__(self, num_experiences: int):
         self.num_experiences = num_experiences
-        self.accuracy_history = defaultdict(list)  # {exp_id: [acc1, acc2, ...]}
-        self.openset_history = []  # 🐋 오픈셋 메트릭 히스토리
+        self.accuracy_history = defaultdict(list)
+        self.openset_history = []
         
     def update(self, experience_id: int, accuracy: float):
         """experience_id 학습 후 정확도 업데이트"""
         self.accuracy_history[experience_id].append(accuracy)
     
-    def update_openset(self, metrics: dict):  # 🐋 새 메서드
+    def update_openset(self, metrics: dict):
         """오픈셋 메트릭 업데이트"""
         self.openset_history.append(metrics)
     
@@ -281,14 +244,11 @@ class ContinualLearningEvaluator:
         all_accs = []
         for accs in self.accuracy_history.values():
             if accs:
-                all_accs.append(accs[-1])  # 각 experience의 최신 정확도
+                all_accs.append(accs[-1])
         return np.mean(all_accs) if all_accs else 0.0
     
     def get_forgetting_measure(self) -> float:
-        """
-        Forgetting Measure 계산
-        각 experience에 대해: max(이전 정확도) - 현재 정확도
-        """
+        """Forgetting Measure 계산"""
         forgetting = []
         for exp_id, accs in self.accuracy_history.items():
             if len(accs) > 1:
@@ -298,22 +258,21 @@ class ContinualLearningEvaluator:
         
         return np.mean(forgetting) if forgetting else 0.0
     
-    def get_latest_openset_metrics(self) -> dict:  # 🐋 새 메서드
+    def get_latest_openset_metrics(self) -> dict:
         """최신 오픈셋 메트릭 반환"""
         if self.openset_history:
             return self.openset_history[-1]
         return {}
 
 
-def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tuple:  # 🐋 수정
+def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tuple:
     """
     test_set_file을 사용한 전체 평가
-    🐋 openset_mode=True면 오픈셋 평가도 수행
+    openset_mode=True면 오픈셋 평가도 수행
     
     Returns:
         (accuracy, openset_metrics) if openset_mode else (accuracy, None)
     """
-    # 전체 테스트셋 로드
     test_dataset = MyDataset(
         txt=config.dataset.test_set_file,
         transforms=get_scr_transforms(
@@ -326,13 +285,11 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
         outchannels=config.dataset.channels
     )
     
-    # 현재까지 학습한 클래스만 필터링
     known_classes = set(trainer.ncm.class_means_dict.keys())
     
     if not known_classes:
-        return (0.0, {}) if openset_mode else (0.0, None)  # 🐋
+        return (0.0, {}) if openset_mode else (0.0, None)
     
-    # 🐋 오픈셋 모드: Known과 Unknown 분리
     if openset_mode and trainer.openset_enabled:
         known_indices = []
         unknown_indices = []
@@ -344,21 +301,17 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
             else:
                 unknown_indices.append(i)
         
-        # Known 평가 (Closed-set accuracy)
         if known_indices:
             known_subset = Subset(test_dataset, known_indices)
             accuracy = trainer.evaluate(known_subset)
         else:
             accuracy = 0.0
         
-        # 🐋 오픈셋 메트릭 계산
         openset_metrics = {}
         
         if known_indices and trainer.ncm.tau_s is not None:
-            # Known에서 TAR/FRR 계산
             from utils.utils_openset import predict_batch
             
-            # 샘플링 (너무 많으면)
             if len(known_indices) > 500:
                 known_indices = np.random.choice(known_indices, 500, replace=False)
             
@@ -377,14 +330,12 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
             openset_metrics['FRR'] = rejected / max(1, len(preds))
         
         if unknown_indices and trainer.ncm.tau_s is not None:
-            # Unknown에서 TRR/FAR 계산
             from utils.utils_openset import predict_batch
             
-            # 샘플링
             if len(unknown_indices) > 500:
                 unknown_indices = np.random.choice(unknown_indices, 500, replace=False)
             
-            unknown_paths = [test_dataset.images_path[i] for i in unknown_indices]  # 🐋
+            unknown_paths = [test_dataset.images_path[i] for i in unknown_indices]
             
             preds = predict_batch(
                 trainer.model, trainer.ncm,
@@ -395,15 +346,22 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
             openset_metrics['FAR_unknown'] = 1 - openset_metrics['TRR_unknown']
         
         openset_metrics['tau_s'] = trainer.ncm.tau_s
-        openset_metrics['tau_m'] = trainer.ncm.tau_m if trainer.ncm.use_margin else None
+        # ⚡️ tau_m 제거 (마진 규칙 제거)
+        # openset_metrics['tau_m'] = trainer.ncm.tau_m if trainer.ncm.use_margin else None
+        
+        # ⭐️ 에너지 모드 정보 추가
+        if hasattr(trainer.ncm, 'use_energy') and trainer.ncm.use_energy:
+            openset_metrics['score_mode'] = 'energy'
+            openset_metrics['energy_T'] = trainer.ncm.energy_T
+            openset_metrics['energy_k_mode'] = trainer.ncm.energy_k_mode
+        else:
+            openset_metrics['score_mode'] = 'max'
         
         print(f"Evaluating on {len(known_indices)} known + {len(unknown_indices)} unknown samples")
         
         return accuracy, openset_metrics
     
     else:
-        # 🐋 기존 방식 (Closed-set만)
-        # 필터링된 인덱스 찾기
         filtered_indices = []
         for i in range(len(test_dataset)):
             label = int(test_dataset.images_label[i])
@@ -411,16 +369,14 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
                 filtered_indices.append(i)
         
         if not filtered_indices:
-            return (0.0, None)  # 🐋
+            return (0.0, None)
         
-        # Subset 생성
         filtered_test = Subset(test_dataset, filtered_indices)
         
         print(f"Evaluating on {len(filtered_indices)} test samples from {len(known_classes)} classes")
         
-        # 평가
-        accuracy = trainer.evaluate(filtered_test)  # 🐋
-        return accuracy, None  # 🐋
+        accuracy = trainer.evaluate(filtered_test)
+        return accuracy, None
 
 
 def main(args):
@@ -428,24 +384,42 @@ def main(args):
     
     # 1. Configuration 로드
     config = ConfigParser(args.config)
-    # 👻 config 객체 가져오기
-    config_obj = config.get_config()  # 👻
+    config_obj = config.get_config()
     print(f"Using config: {args.config}")
     print(config)
     
-    # 🌽 BASE_ID 계산 및 설정
+    # BASE_ID 계산 및 설정
     config_obj.negative.base_id = compute_safe_base_id(
         config_obj.dataset.train_set_file,
         config_obj.dataset.test_set_file
     )
     
-    # 🐋 오픈셋 모드 확인
+    # 오픈셋 모드 확인
     openset_enabled = hasattr(config_obj, 'openset') and config_obj.openset.enabled
     if openset_enabled:
         print("\n🐋 ========== OPEN-SET MODE ENABLED ==========")
         print(f"   Warmup users: {config_obj.openset.warmup_users}")
         print(f"   Initial tau: {config_obj.openset.initial_tau}")
-        print(f"   Margin: {config_obj.openset.use_margin} (tau={config_obj.openset.margin_tau})")
+        
+        # ⭐️ 에너지 모드 확인
+        if hasattr(config_obj.openset, 'score_mode') and config_obj.openset.score_mode == 'energy':
+            print(f"   ⭐️ Score mode: ENERGY")
+            print(f"      Temperature: {getattr(config_obj.training, 'energy_temperature', 0.15)}")
+            print(f"      K mode: {getattr(config_obj.training, 'energy_k_mode', 'sqrt')}")
+            if getattr(config_obj.training, 'energy_k_mode', 'sqrt') == 'fixed':
+                print(f"      K fixed: {getattr(config_obj.training, 'energy_k_fixed', 10)}")
+        else:
+            print(f"   Score mode: MAX")
+        
+        # ⚡️ 마진 출력 제거
+        # print(f"   Margin: {config_obj.openset.use_margin} (tau={config_obj.openset.margin_tau})")
+        
+        # FAR/EER 모드 표시
+        if config_obj.openset.threshold_mode == 'far':
+            print(f"   Threshold mode: FAR Target ({config_obj.openset.target_far*100:.1f}%)")
+        else:
+            print(f"   Threshold mode: EER")
+        
         print("🐋 =========================================\n")
     
     # GPU 설정
@@ -462,8 +436,12 @@ def main(args):
     
     # 2. 결과 저장 디렉토리 생성
     results_dir = os.path.join(config_obj.training.results_path, 'scr_results')
-    if openset_enabled:  # 🐋
-        results_dir = os.path.join(config_obj.training.results_path, 'scr_openset_results')
+    if openset_enabled:
+        # ⭐️ 에너지 모드면 디렉토리 이름에 표시
+        if hasattr(config_obj.openset, 'score_mode') and config_obj.openset.score_mode == 'energy':
+            results_dir = os.path.join(config_obj.training.results_path, 'scr_openset_energy_results')
+        else:
+            results_dir = os.path.join(config_obj.training.results_path, 'scr_openset_results')
     os.makedirs(results_dir, exist_ok=True)
     
     # 3. 데이터 스트림 초기화
@@ -472,7 +450,7 @@ def main(args):
         train_file=config_obj.dataset.train_set_file,
         negative_file=config_obj.dataset.negative_samples_file,
         num_negative_classes=config_obj.dataset.num_negative_classes,
-        base_id=config_obj.negative.base_id  # 🌽 base_id 전달
+        base_id=config_obj.negative.base_id
     )
     
     stats = data_stream.get_statistics()
@@ -484,16 +462,13 @@ def main(args):
     print("\n=== Initializing Model and Components ===")
     
     # CCNet 모델
-    # 🦴 model = ccnet(weight=config_obj.model.competition_weight)
-    
-    # 🧀 프로젝션 헤드 설정 포함하여 모델 생성
     model = ccnet(
         weight=config_obj.model.competition_weight,
         use_projection=config_obj.model.use_projection,
         projection_dim=config_obj.model.projection_dim
     )
 
-    # 🧀 프로젝션 헤드 설정 출력
+    # 프로젝션 헤드 설정 출력
     if config_obj.model.use_projection:
         print(f"🧀 Projection Head Configuration:")
         print(f"   Enabled: True")
@@ -504,32 +479,31 @@ def main(args):
     else:
         print(f"📌 Projection Head: Disabled (using raw 6144D features)")
     
-    # 👻 사전훈련 가중치 로드 (device 이동 전에!)
-    if hasattr(config_obj.model, 'use_pretrained') and config_obj.model.use_pretrained:  # 👻
-        if config_obj.model.pretrained_path and config_obj.model.pretrained_path.exists():  # 👻
-            print(f"\n📦 Loading pretrained weights from main script...")  # 👻
-            loader = PretrainedLoader()  # 👻
-            try:  # 👻
-                model = loader.load_ccnet_pretrained(  # 👻
-                    model=model,  # 👻
-                    checkpoint_path=config_obj.model.pretrained_path,  # 👻
-                    device=device,  # 👻
-                    verbose=True  # 👻
-                )  # 👻
-                print("✅ Pretrained weights loaded successfully!")  # 👻
-            except Exception as e:  # 👻
-                print(f"⚠️  Failed to load pretrained model: {e}")  # 👻
-                print("Continuing with random initialization...")  # 👻
-        else:  # 👻
-            print(f"⚠️  Pretrained path not found or not set")  # 👻
-    else:  # 👻
-        print("🎲 Starting from random initialization")  # 👻
+    # 사전훈련 가중치 로드
+    if hasattr(config_obj.model, 'use_pretrained') and config_obj.model.use_pretrained:
+        if config_obj.model.pretrained_path and config_obj.model.pretrained_path.exists():
+            print(f"\n📦 Loading pretrained weights from main script...")
+            loader = PretrainedLoader()
+            try:
+                model = loader.load_ccnet_pretrained(
+                    model=model,
+                    checkpoint_path=config_obj.model.pretrained_path,
+                    device=device,
+                    verbose=True
+                )
+                print("✅ Pretrained weights loaded successfully!")
+            except Exception as e:
+                print(f"⚠️  Failed to load pretrained model: {e}")
+                print("Continuing with random initialization...")
+        else:
+            print(f"⚠️  Pretrained path not found or not set")
+    else:
+        print("🎲 Starting from random initialization")
     
-    # 👻 모델을 device로 이동
-    model = model.to(device)  # 👻
+    model = model.to(device)
     
     # NCM Classifier
-    ncm_classifier = NCMClassifier(normalize=True).to(device)  # 🐋 코사인 모드로 변경
+    ncm_classifier = NCMClassifier(normalize=True).to(device)
     
     # Memory Buffer
     memory_buffer = ClassBalancedBuffer(
@@ -538,20 +512,18 @@ def main(args):
     )
     
     # SCR Trainer
-    # 👻 config_obj 전달
     trainer = SCRTrainer(
         model=model,
         ncm_classifier=ncm_classifier,
         memory_buffer=memory_buffer,
-        config=config_obj,  # 👻 config → config_obj
+        config=config_obj,
         device=device
     )
     
-    # 5. Negative 샘플로 초기화 🐣
+    # 5. Negative 샘플로 초기화
     print("\n=== Initializing with Negative Samples ===")
     neg_paths, neg_labels = data_stream.get_negative_samples()
     
-    # memory_batch_size만큼만 선택
     if len(neg_paths) > config_obj.training.memory_batch_size:
         selected_indices = np.random.choice(
             len(neg_paths), 
@@ -561,12 +533,10 @@ def main(args):
         neg_paths = [neg_paths[i] for i in selected_indices]
         neg_labels = [neg_labels[i] for i in selected_indices]
     
-    # 메모리 버퍼 초기화
     memory_buffer.update_from_dataset(neg_paths, neg_labels)
     print(f"Initial buffer size: {len(memory_buffer)}")
     
-    # NCM 초기화 🐣
-    print("🍄 NCM starts empty - no fake class contamination")  # 🍄
+    print("🍄 NCM starts empty - no fake class contamination")
     
     # 6. 평가자 초기화
     evaluator = ContinualLearningEvaluator(num_experiences=config_obj.training.num_experiences)
@@ -578,22 +548,27 @@ def main(args):
         'forgetting_measures': [],
         'memory_sizes': [],
         'negative_removal_history': [],
-        'openset_metrics': [],  # 🐋 추가
-        # 👻 사전훈련 정보 추가
-        'pretrained_used': config_obj.model.use_pretrained,  # 👻
-        'pretrained_path': str(config_obj.model.pretrained_path) if config_obj.model.pretrained_path else None,  # 👻
-        'openset_enabled': openset_enabled  # 🐋 추가
+        'openset_metrics': [],
+        'pretrained_used': config_obj.model.use_pretrained,
+        'pretrained_path': str(config_obj.model.pretrained_path) if config_obj.model.pretrained_path else None,
+        'openset_enabled': openset_enabled,
+        # ⭐️ 에너지 스코어 설정 저장
+        'energy_score_config': {
+            'enabled': hasattr(config_obj.openset, 'score_mode') and config_obj.openset.score_mode == 'energy',
+            'temperature': getattr(config_obj.training, 'energy_temperature', None),
+            'k_mode': getattr(config_obj.training, 'energy_k_mode', None),
+            'k_fixed': getattr(config_obj.training, 'energy_k_fixed', None)
+        } if openset_enabled else None
     }
     
     # 8. Continual Learning 시작
     print("\n=== Starting Continual Learning ===")
     print(f"Total experiences: {config_obj.training.num_experiences}")
     print(f"Evaluation interval: every {config_obj.training.test_interval} users")
-    print(f"🔥 Negative warmup: exp0~{config_obj.negative.warmup_experiences-1}")  # 🌽
-    # 👻 중요 파라미터 출력
-    print(f"Learning rate: {config_obj.training.learning_rate}")  # 👻
-    print(f"Memory batch size: {config_obj.training.memory_batch_size}")  # 👻
-    print(f"Temperature: {config_obj.training.temperature}")  # 👻
+    print(f"🔥 Negative warmup: exp0~{config_obj.negative.warmup_experiences-1}")
+    print(f"Learning rate: {config_obj.training.learning_rate}")
+    print(f"Memory batch size: {config_obj.training.memory_batch_size}")
+    print(f"Temperature: {config_obj.training.temperature}")
     
     start_time = time.time()
     
@@ -604,19 +579,16 @@ def main(args):
         training_history['losses'].append(stats['loss'])
         training_history['memory_sizes'].append(stats['memory_size'])
         
-        # 🌽 exp3→exp4 경계에서 네거티브 완전 제거
+        # exp3→exp4 경계에서 네거티브 완전 제거
         if exp_id + 1 == config_obj.negative.warmup_experiences:
             print(f"\n🔥 === Warmup End (exp{exp_id}) → Post-warmup (exp{exp_id+1}) ===")
             
-            # 평가 (purge 전)
             acc_pre, _ = evaluate_on_test_set(trainer, config_obj, openset_mode=openset_enabled)
             print(f"[Warmup-End] pre-purge ACC={acc_pre:.2f}%")
             
-            # 네거티브 제거
             purge_negatives(memory_buffer, config_obj.negative.base_id)
             trainer._update_ncm()
             
-            # 평가 (purge 후)
             acc_post, _ = evaluate_on_test_set(trainer, config_obj, openset_mode=openset_enabled)
             print(f"[Warmup-End] post-purge ACC={acc_post:.2f}%")
             print(f"🔥 ========================================\n")
@@ -626,53 +598,50 @@ def main(args):
             
             print(f"\n=== Evaluation at Experience {exp_id + 1} ===")
             
-            # 🎨 t-SNE 시각화 추가
+            # t-SNE 시각화
             if (exp_id + 1) % 10 == 0 or exp_id == config_obj.training.num_experiences - 1:
                 tsne_dir = os.path.join(results_dir, "tsne")
                 os.makedirs(tsne_dir, exist_ok=True)
                 
-                # 6144D feature space 시각화
                 tsne_path = os.path.join(tsne_dir, f"tsne_exp_{exp_id+1:03d}.png")
                 plot_tsne_from_memory(
                     trainer=trainer,
                     save_path=tsne_path,
                     per_class=150,
-                    space='fe',  # NCM 공간
+                    space='fe',
                     perplexity=30,
                     max_points=5000,
                     seed=42
                 )
                 
-                # Projection space도 시각화 (옵션)
                 if config_obj.model.use_projection:
                     tsne_path_z = os.path.join(tsne_dir, f"tsne_z_exp_{exp_id+1:03d}.png")
                     plot_tsne_from_memory(
                         trainer=trainer,
                         save_path=tsne_path_z,
                         per_class=150,
-                        space='z',  # 128D projection
+                        space='z',
                         perplexity=30,
                         max_points=5000,
                         seed=42
                     )
-            # 🎨
             
             # 테스트셋으로 평가
-            accuracy, openset_metrics = evaluate_on_test_set(  # 🐋
+            accuracy, openset_metrics = evaluate_on_test_set(
                 trainer, config_obj, 
                 openset_mode=openset_enabled
             )
             
             # 메트릭 업데이트
             evaluator.update(exp_id, accuracy)
-            if openset_metrics:  # 🐋
+            if openset_metrics:
                 evaluator.update_openset(openset_metrics)
             
             # 평균 정확도와 Forgetting 계산
             avg_acc = evaluator.get_average_accuracy()
             forgetting = evaluator.get_forgetting_measure()
             
-            # 🐋 기록 저장
+            # 기록 저장
             accuracy_record = {
                 'experience': exp_id + 1,
                 'accuracy': accuracy,
@@ -680,7 +649,7 @@ def main(args):
                 'forgetting': forgetting
             }
             
-            # 🐋 오픈셋 메트릭 추가
+            # 오픈셋 메트릭 추가
             if openset_metrics:
                 accuracy_record.update(openset_metrics)
                 training_history['openset_metrics'].append(openset_metrics)
@@ -692,7 +661,7 @@ def main(args):
             print(f"Forgetting Measure: {forgetting:.2f}%")
             print(f"Memory Buffer Size: {len(memory_buffer)}")
             
-            # 🐋 오픈셋 메트릭 출력
+            # 오픈셋 메트릭 출력
             if openset_metrics:
                 print(f"\n🐋 Open-set Metrics:")
                 if 'TAR' in openset_metrics:
@@ -700,8 +669,14 @@ def main(args):
                 if 'TRR_unknown' in openset_metrics:
                     print(f"   TRR_unknown: {openset_metrics['TRR_unknown']:.3f}, FAR_unknown: {openset_metrics['FAR_unknown']:.3f}")
                 print(f"   τ_s: {openset_metrics.get('tau_s', 0):.4f}")
+                
+                # ⭐️ 에너지 모드 정보 출력
+                if openset_metrics.get('score_mode') == 'energy':
+                    print(f"   ⭐️ Mode: Energy (T={openset_metrics.get('energy_T', 0):.2f}, k={openset_metrics.get('energy_k_mode', 'N/A')})")
+                else:
+                    print(f"   Mode: Max")
             
-            # 🐋 Trainer의 오픈셋 평가 히스토리도 저장
+            # Trainer의 오픈셋 평가 히스토리도 저장
             if hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
                 training_history['trainer_openset_history'] = trainer.evaluation_history
             
@@ -728,7 +703,7 @@ def main(args):
     with open(history_path, 'w') as f:
         json.dump(training_history, f, indent=4)
     
-    # 🎨 t-SNE 시각화 경로 추가
+    # t-SNE 시각화 경로 추가
     tsne_images = []
     tsne_dir = os.path.join(results_dir, "tsne")
     if os.path.exists(tsne_dir):
@@ -736,7 +711,6 @@ def main(args):
         if tsne_images:
             print(f"\n🎨 t-SNE visualizations saved: {len(tsne_images)} images")
             print(f"   Location: {tsne_dir}")
-    # 🎨
     
     # 최종 통계
     final_result = training_history['accuracies'][-1] if training_history['accuracies'] else {}
@@ -749,13 +723,19 @@ def main(args):
     print(f"Final Average Accuracy: {final_avg_acc:.2f}%")
     print(f"Final Forgetting Measure: {final_forget:.2f}%")
     
-    # 🐋 최종 오픈셋 메트릭
+    # 최종 오픈셋 메트릭
     if openset_enabled and 'TAR' in final_result:
         print(f"\n🐋 Final Open-set Performance:")
         print(f"   TAR: {final_result.get('TAR', 0):.3f}")
         print(f"   TRR (Unknown): {final_result.get('TRR_unknown', 0):.3f}")
         print(f"   FAR (Unknown): {final_result.get('FAR_unknown', 0):.3f}")
         print(f"   Final τ_s: {final_result.get('tau_s', 0):.4f}")
+        
+        # ⭐️ 에너지 모드 최종 정보
+        if final_result.get('score_mode') == 'energy':
+            print(f"   ⭐️ Score Mode: Energy")
+            print(f"      Final T: {final_result.get('energy_T', 0):.2f}")
+            print(f"      Final k mode: {final_result.get('energy_k_mode', 'N/A')}")
     
     print(f"\nTotal Training Time: {(time.time() - start_time)/60:.1f} minutes")
     
@@ -769,17 +749,25 @@ def main(args):
         'final_forgetting': final_forget,
         'total_time_minutes': (time.time() - start_time) / 60,
         'negative_removal_history': training_history['negative_removal_history'],
-        'openset_enabled': openset_enabled  # 🐋
+        'openset_enabled': openset_enabled
     }
     
-    # 🐋 오픈셋 요약 추가
+    # 오픈셋 요약 추가
     if openset_enabled and final_result:
         summary['final_openset'] = {
             'TAR': final_result.get('TAR', 0),
             'TRR_unknown': final_result.get('TRR_unknown', 0),
             'FAR_unknown': final_result.get('FAR_unknown', 0),
-            'tau_s': final_result.get('tau_s', 0)
+            'tau_s': final_result.get('tau_s', 0),
+            'score_mode': final_result.get('score_mode', 'max')  # ⭐️
         }
+        
+        # ⭐️ 에너지 설정 추가
+        if final_result.get('score_mode') == 'energy':
+            summary['final_openset']['energy_config'] = {
+                'temperature': final_result.get('energy_T', 0),
+                'k_mode': final_result.get('energy_k_mode', 'N/A')
+            }
     
     summary_path = os.path.join(results_dir, 'summary.json')
     with open(summary_path, 'w') as f:
@@ -789,7 +777,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='SCR Training for CCNet with Open-set Support')  # 🐋 설명 수정
+    parser = argparse.ArgumentParser(description='SCR Training for CCNet with Open-set Support (Energy Score)')
     parser.add_argument('--config', type=str, default='config/config.yaml',
                         help='Path to config file')
     parser.add_argument('--seed', type=int, default=42,

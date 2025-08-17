@@ -35,11 +35,18 @@ Training:
   temperature: 0.07  # SupConLoss용
   save_interval: 1000  # (사용 안 함)
   test_interval: 5  # ⭐ 평가 및 캘리브레이션 주기
-  checkpoint_path: /content/drive/MyDrive/scr_proxy
-  results_path: /content/drive/MyDrive/scr_proxy
+  checkpoint_path: /content/drive/MyDrive/scr_proxy_Energy
+  results_path: /content/drive/MyDrive/scr_proxy_Energy
   gpu_ids: "0"
   ncm_momentum: 0.9
   
+
+  # ⭐️ 에너지 스코어 설정 추가
+  use_energy_score: true
+  energy_temperature: 0.15
+  energy_k_mode: 'sqrt'  # 'sqrt', 'fixed', 'log'
+  energy_k_fixed: 10
+
   # 💎 ProxyContrastLoss 설정 (NEW!)
   use_proxy_loss: true
   proxy_lambda: 0.3  # 손실 가중치
@@ -76,8 +83,8 @@ Openset:
   initial_tau: 0.9           # 초기 임계치
   
   # 마진 규칙
-  use_margin: false
-  margin_tau: 0.07
+  #use_margin: false
+  #margin_tau: 0.07
   
   # 데이터 분할
   dev_ratio: 0.3             # Dev 세트 비율
@@ -85,6 +92,9 @@ Openset:
   
   # 로깅
   verbose_calibration: true  # ☄️ 상세 출력
+
+  # ⭐️ 스코어 모드 (새로 추가)
+  score_mode: 'energy'  # 'max' or 'energy'
 
 # 🔥 네거티브 샘플 설정
 Negative:

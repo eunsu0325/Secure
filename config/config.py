@@ -64,6 +64,11 @@ class Training:
     
     # 💎 프로토타입 설정
     prototype_beta: float = 0.05  # EMA 계수 (현재는 미사용)
+    # ⭐️ 에너지 스코어 설정 추가
+    use_energy_score: bool = False
+    energy_temperature: float = 0.15
+    energy_k_mode: str = 'sqrt'  # 'sqrt', 'fixed', 'log'
+    energy_k_fixed: int = 10
     
     def __post_init__(self):
         """💎 Lambda 스케줄 기본값 설정"""
@@ -90,10 +95,12 @@ class Openset:
     threshold_alpha: float = 0.2          # 🍎 EMA 계수 (기존 smoothing_alpha)
     threshold_max_delta: float = 0.03     # 🍎 최대 변화폭 (기존 max_delta)
     
-    use_margin: bool = True
-    margin_tau: float = 0.05
+    #use_margin: bool = True
+    #margin_tau: float = 0.05
     dev_ratio: float = 0.2
     negref_max_eval: int = 5000
+    # ⭐️ 스코어 모드 추가
+    score_mode: str = 'energy'  # 'max' or 'energy'
     
     # 🍎 추가 옵션
     verbose_calibration: bool = True      # 🍎 상세 출력

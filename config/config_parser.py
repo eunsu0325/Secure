@@ -96,10 +96,26 @@ class ConfigParser:
             
             # 💎 프로토타입 설정
             if 'prototype_beta' not in training_dict:
-                training_dict['prototype_beta'] = 0.05
+                training_dict['prototype_beta'] = 0.
+            # ⭐️ 에너지 스코어 기본값
+            if 'use_energy_score' not in training_dict:
+                training_dict['use_energy_score'] = False
+            if 'energy_temperature' not in training_dict:
+                training_dict['energy_temperature'] = 0.15
+            if 'energy_k_mode' not in training_dict:
+                training_dict['energy_k_mode'] = 'sqrt'
+            if 'energy_k_fixed' not in training_dict:
+                training_dict['energy_k_fixed'] = 10
                 
             self.training = Training(**training_dict)
             
+
+                # ⭐️ 에너지 설정 출력
+            if self.training.use_energy_score:
+                print(f"⚡ Energy Score configuration loaded:")
+                print(f"   Temperature: {self.training.energy_temperature}")
+                print(f"   K mode: {self.training.energy_k_mode}")
+
             # 💎 ProxyLoss 설정 출력
             if self.training.use_proxy_loss:
                 print(f"💎 ProxyContrastLoss configuration loaded:")
@@ -118,6 +134,9 @@ class ConfigParser:
                 openset_dict['target_far'] = 0.01
             if 'verbose_calibration' not in openset_dict:
                 openset_dict['verbose_calibration'] = True
+            # ⭐️ 스코어 모드 기본값
+            if 'score_mode' not in openset_dict:
+                openset_dict['score_mode'] = 'max'
             
             self.openset = Openset(**openset_dict)
             

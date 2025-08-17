@@ -1,4 +1,4 @@
-# 🐋 scr/utils_openset.py (신규)
+# utils/utils_openset.py
 """오픈셋 관련 유틸리티 함수들"""
 
 import numpy as np
@@ -80,9 +80,145 @@ def extract_features(model, paths: List[str], transform, device, batch_size: int
     return torch.cat(feats, dim=0).numpy() if feats else np.array([])
 
 
+# ⭐️ === 에너지 스코어 버전 추가 ===
+
+@torch.no_grad()
+def extract_scores_genuine_energy(model, ncm, dev_paths: List[str], dev_labels: List[int],
+                                 transform, device, batch_size: int = 64) -> np.ndarray:
+    """
+    ⭐️ Genuine 샘플의 에너지 스코어 추출
+    
+    Returns:
+        np.array: genuine 에너지 스코어들
+    """
+    if not dev_paths:
+        return np.array([])
+    
+    model.eval()
+    scores = []
+    
+    # 배치 처리를 위한 간단한 로더
+    for i in range(0, len(dev_paths), batch_size):
+        batch_paths = dev_paths[i:i+batch_size]
+        batch_labels = dev_labels[i:i+batch_size]
+        
+        # 이미지 로드 및 변환
+        batch_imgs = []
+        for path in batch_paths:
+            img = Image.open(path).convert('L')
+            img = transform(img)
+            batch_imgs.append(img)
+        
+        if batch_imgs:
+            x = torch.stack(batch_imgs).to(device)
+            
+            # 특징 추출
+            fe = model.getFeatureCode(x)
+            
+            # 에너지 스코어 계산
+            gate_scores = ncm.compute_energy_score(fe)
+            scores.extend(gate_scores.cpu().numpy())
+    
+    return np.array(scores)
+
+
+@torch.no_grad()
+def extract_scores_impostor_between_energy(model, ncm, dev_paths: List[str], dev_labels: List[int],
+                                          transform, device, max_pairs: int = 2000) -> np.ndarray:
+    """
+    ⭐️ Between impostor의 에너지 스코어 (자기 클래스 제외)
+    
+    Returns:
+        np.array: impostor 에너지 스코어들
+    """
+    if not dev_paths:
+        return np.array([])
+    
+    by_class = defaultdict(list)
+    for p, y in zip(dev_paths, dev_labels):
+        by_class[int(y)].append(p)
+    
+    model.eval()
+    scores = []
+    
+    # 각 클래스에서 샘플링
+    for cls_id, cls_paths in by_class.items():
+        if len(cls_paths) < 1:
+            continue
+        
+        # 클래스당 최대 10개만 사용 (효율성)
+        sample_paths = cls_paths[:min(10, len(cls_paths))]
+        
+        for path in sample_paths:
+            img = Image.open(path).convert('L')
+            img = transform(img)
+            x = img.unsqueeze(0).to(device)
+            
+            # 특징 추출
+            fe = model.getFeatureCode(x)
+            
+            # 자기 클래스 제외 에너지 (마스킹된 버전)
+            label_tensor = torch.tensor([cls_id], device=device)
+            gate_score = ncm.compute_energy_masked(fe, label_tensor)
+            
+            scores.append(gate_score.item())
+            
+            if len(scores) >= max_pairs:
+                return np.array(scores)
+    
+    return np.array(scores)
+
+
+@torch.no_grad()
+def extract_scores_impostor_negref_energy(model, ncm, negref_file: str, transform, device,
+                                         max_eval: int = 5000) -> np.ndarray:
+    """
+    ⭐️ NegRef의 에너지 스코어
+    
+    Returns:
+        np.array: negref impostor 에너지 스코어들
+    """
+    if not negref_file or not os.path.exists(negref_file):
+        return np.array([])
+    
+    paths, labels = load_paths_labels_from_txt(negref_file)
+    
+    if not paths:
+        return np.array([])
+    
+    # 샘플링
+    if len(paths) > max_eval:
+        idx = np.random.choice(len(paths), max_eval, replace=False)
+        paths = [paths[i] for i in idx]
+    
+    model.eval()
+    scores = []
+    
+    # 배치 처리
+    batch_size = 64
+    for i in range(0, len(paths), batch_size):
+        batch_paths = paths[i:i+batch_size]
+        batch = []
+        
+        for p in batch_paths:
+            img = Image.open(p).convert('L')
+            img = transform(img)
+            batch.append(img)
+        
+        if batch:
+            x = torch.stack(batch).to(device)
+            fe = model.getFeatureCode(x)
+            gate_scores = ncm.compute_energy_score(fe)
+            scores.extend(gate_scores.cpu().numpy())
+    
+    return np.array(scores)
+
+
+# === 기존 최댓값 기반 함수들 (유지) ===
+
 def extract_scores_genuine(model, ncm, dev_paths: List[str], dev_labels: List[int],
                           transform, device) -> np.ndarray:
-    """같은 클래스 내 genuine 점수"""
+    """같은 클래스 내 genuine 점수 (최댓값 방식)"""
     by_class = defaultdict(list)
     for p, y in zip(dev_paths, dev_labels):
         by_class[int(y)].append(p)
@@ -110,7 +246,7 @@ def extract_scores_genuine(model, ncm, dev_paths: List[str], dev_labels: List[in
 
 def extract_scores_impostor_between(model, ncm, dev_paths: List[str], dev_labels: List[int],
                                    transform, device, max_pairs: int = 2000) -> np.ndarray:
-    """다른 클래스 간 impostor 점수"""
+    """다른 클래스 간 impostor 점수 (최댓값 방식)"""
     by_class = defaultdict(list)
     for p, y in zip(dev_paths, dev_labels):
         by_class[int(y)].append(p)
@@ -138,7 +274,7 @@ def extract_scores_impostor_between(model, ncm, dev_paths: List[str], dev_labels
 
 def extract_scores_impostor_unknown(model, ncm, txt_file: str, registered_users: Set[int],
                                    transform, device, max_eval: int = 3000) -> np.ndarray:
-    """미등록 사용자의 impostor 점수"""
+    """미등록 사용자의 impostor 점수 (최댓값 방식)"""
     paths, labels = load_paths_labels_excluding(txt_file, registered_users)
     
     if not paths:
@@ -168,7 +304,7 @@ def extract_scores_impostor_unknown(model, ncm, txt_file: str, registered_users:
 
 def extract_scores_impostor_negref(model, ncm, negref_file: str, transform, device,
                                   max_eval: int = 5000) -> np.ndarray:
-    """NegRef의 impostor 점수"""
+    """NegRef의 impostor 점수 (최댓값 방식)"""
     if not negref_file or not os.path.exists(negref_file):
         return np.array([])
     
@@ -204,7 +340,7 @@ def balance_impostor_scores(s_between: np.ndarray, s_unknown: np.ndarray, s_negr
                            total: int = 4000) -> np.ndarray:
     """impostor 점수 균형 맞추기 - None 안전 버전"""
     
-    # 💎 입력 검증 및 변환
+    # 입력 검증 및 변환
     sources = []
     weights = []
     
@@ -226,20 +362,20 @@ def balance_impostor_scores(s_between: np.ndarray, s_unknown: np.ndarray, s_negr
             sources.append(arr)
             weights.append(ratio[2])
     
-    # 💎 소스가 없으면 빈 배열 반환
+    # 소스가 없으면 빈 배열 반환
     if not sources:
         return np.array([])
     
-    # 💎 소스가 하나면 그대로 반환
+    # 소스가 하나면 그대로 반환
     if len(sources) == 1:
         arr = sources[0]
         return arr[:total] if len(arr) > total else arr
     
-    # 💎 가중치 정규화
+    # 가중치 정규화
     total_weight = sum(weights)
     normalized_weights = [w / total_weight for w in weights]
     
-    # 💎 각 소스에서 샘플링
+    # 각 소스에서 샘플링
     out = []
     for arr, weight in zip(sources, normalized_weights):
         k = int(total * weight)
@@ -255,6 +391,7 @@ def balance_impostor_scores(s_between: np.ndarray, s_unknown: np.ndarray, s_negr
         return np.array([])
     
     return np.concatenate(out)
+
 
 @torch.no_grad()
 def predict_batch(model, ncm, paths: List[str], transform, device, batch_size: int = 128) -> np.ndarray:
