@@ -35,8 +35,8 @@ Training:
   temperature: 0.07  # SupConLoss용
   save_interval: 1000  # (사용 안 함)
   test_interval: 5  # ⭐ 평가 및 캘리브레이션 주기
-  checkpoint_path: /content/drive/MyDrive/scr_proxy_Energy
-  results_path: /content/drive/MyDrive/scr_proxy_Energy
+  checkpoint_path: /content/drive/MyDrive/scr_proxy_Energy_1
+  results_path: /content/drive/MyDrive/scr_proxy_Energy_1
   gpu_ids: "0"
   ncm_momentum: 0.9
   
@@ -50,7 +50,7 @@ Training:
   # 💎 ProxyContrastLoss 설정 (NEW!)
   use_proxy_loss: true
   proxy_lambda: 0.3  # 손실 가중치
-  proxy_temperature: 0.15  # SupCon(0.07)보다 높게!
+  proxy_temperature: 0.20  # SupCon(0.07)보다 높게!
   proxy_topk: 30  # Top-K 클래스
   proxy_full_until: 100  # 100개 이하면 전체 사용
   proxy_warmup_classes: 5  # 최소 클래스 수
@@ -88,7 +88,7 @@ Openset:
   
   # 데이터 분할
   dev_ratio: 0.3             # Dev 세트 비율
-  negref_max_eval: 5000      # NegRef 최대 샘플
+  negref_max_eval: 6000      # NegRef 최대 샘플
   
   # 로깅
   verbose_calibration: true  # ☄️ 상세 출력

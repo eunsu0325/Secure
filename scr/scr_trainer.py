@@ -212,6 +212,7 @@ class SCRTrainer:
         
         if self.openset_enabled:
             self.openset_config = config.openset
+            self._first_calibration_done = False  # ← 추가
             
             # ⭐️ 에너지 스코어 설정 확인
             self.use_energy_score = getattr(config.openset, 'score_mode', 'max') == 'energy'
@@ -711,9 +712,9 @@ class SCRTrainer:
             result = self.threshold_calibrator.calibrate(
                 genuine_scores=s_genuine,
                 impostor_scores=s_impostor,
-                old_tau=self.ncm.tau_s
+                old_tau=None if not self._first_calibration_done else self.ncm.tau_s  # ← 수정
             )
-            
+            self._first_calibration_done = True  # ← 추가
             # NCM에 적용 (⚡️ 마진 제거)
             self.ncm.set_thresholds(
                 tau_s=result['tau_smoothed']
