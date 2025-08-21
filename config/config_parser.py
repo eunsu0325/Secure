@@ -40,12 +40,13 @@ class ConfigParser:
                     else:
                         config_type[key] = None
         
-        # Parse sections
+        # Parse Dataset section
         if 'Dataset' in self.config_dict:
             dataset_dict = self.config_dict['Dataset'].copy()
             dataset_dict.pop('config_file', None)
             self.dataset = Dataset(**dataset_dict)
         
+        # Parse Model section
         if 'Model' in self.config_dict:
             model_dict = self.config_dict['Model'].copy()
             model_dict.pop('config_file', None)
@@ -60,6 +61,7 @@ class ConfigParser:
                 model_dict['projection_dim'] = 128
             self.model = Model(**model_dict)
         
+        # Parse Training section
         if 'Training' in self.config_dict:
             training_dict = self.config_dict['Training'].copy()
             training_dict.pop('config_file', None)
@@ -96,7 +98,8 @@ class ConfigParser:
             
             # 💎 프로토타입 설정
             if 'prototype_beta' not in training_dict:
-                training_dict['prototype_beta'] = 0.
+                training_dict['prototype_beta'] = 0.05
+                
             # ⭐️ 에너지 스코어 기본값
             if 'use_energy_score' not in training_dict:
                 training_dict['use_energy_score'] = False
@@ -109,8 +112,7 @@ class ConfigParser:
                 
             self.training = Training(**training_dict)
             
-
-                # ⭐️ 에너지 설정 출력
+            # ⭐️ 에너지 설정 출력
             if self.training.use_energy_score:
                 print(f"⚡ Energy Score configuration loaded:")
                 print(f"   Temperature: {self.training.energy_temperature}")
@@ -123,11 +125,12 @@ class ConfigParser:
                 print(f"   Temperature: {self.training.proxy_temperature}")
                 print(f"   Schedule: {self.training.proxy_lambda_schedule}")
         
+        # Parse Openset section
         if 'Openset' in self.config_dict:
             openset_dict = self.config_dict['Openset'].copy()
             openset_dict.pop('config_file', None)
             
-            # 🍎 FAR 모드 기본값 추가 (3줄만!)
+            # 🍎 기본값 추가
             if 'threshold_mode' not in openset_dict:
                 openset_dict['threshold_mode'] = 'far'
             if 'target_far' not in openset_dict:
@@ -136,17 +139,37 @@ class ConfigParser:
                 openset_dict['verbose_calibration'] = True
             # ⭐️ 스코어 모드 기본값
             if 'score_mode' not in openset_dict:
-                openset_dict['score_mode'] = 'max'
+                openset_dict['score_mode'] = 'energy'
+            
+            # 🥩 TTA 기본값 추가
+            if 'tta_n_views' not in openset_dict:
+                openset_dict['tta_n_views'] = 1  # 기본: 비활성화
+            if 'tta_include_original' not in openset_dict:
+                openset_dict['tta_include_original'] = True
+            if 'tta_agree_k' not in openset_dict:
+                openset_dict['tta_agree_k'] = 0
+            if 'tta_augmentation_strength' not in openset_dict:
+                openset_dict['tta_augmentation_strength'] = 0.5
+            if 'tta_aggregation' not in openset_dict:
+                openset_dict['tta_aggregation'] = 'median'
             
             self.openset = Openset(**openset_dict)
             
-            # 🍎 모드 표시 (1줄 추가)
+            # 🍎 모드 표시
             mode_info = f" (FAR {self.openset.target_far*100:.1f}%)" if self.openset.threshold_mode == 'far' else " (EER)"
             print(f"🐋 Open-set configuration loaded{mode_info}")
+            
+            # 🥩 TTA 설정 출력
+            if openset_dict.get('tta_n_views', 1) > 1:
+                print(f"🎯 TTA enabled: {openset_dict['tta_n_views']} views")
+                print(f"   Include original: {openset_dict.get('tta_include_original', True)}")
+                print(f"   Augmentation strength: {openset_dict.get('tta_augmentation_strength', 0.5)}")
+                print(f"   Aggregation: {openset_dict.get('tta_aggregation', 'median')}")
         else:
             self.openset = Openset(enabled=False)
             print("📌 Open-set configuration not found, using defaults (disabled)")
         
+        # Parse Negative section
         if 'Negative' in self.config_dict:
             negative_dict = self.config_dict['Negative'].copy()
             negative_dict.pop('config_file', None)

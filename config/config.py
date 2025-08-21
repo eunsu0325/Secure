@@ -1,7 +1,7 @@
 # config/config.py
 import dataclasses
 from pathlib import Path
-from typing import Optional, Dict  # 💎 Dict 추가
+from typing import Optional, Dict
 
 @dataclasses.dataclass
 class Dataset:
@@ -46,6 +46,7 @@ class Training:
     gpu_ids: str
     ncm_momentum: float
     batch_size: int = 128
+    seed: int = 42  # 🥩 추가!
     
     # 💎 ProxyContrastLoss 설정 추가
     use_proxy_loss: bool = True
@@ -64,6 +65,7 @@ class Training:
     
     # 💎 프로토타입 설정
     prototype_beta: float = 0.05  # EMA 계수 (현재는 미사용)
+    
     # ⭐️ 에너지 스코어 설정 추가
     use_energy_score: bool = False
     energy_temperature: float = 0.15
@@ -85,25 +87,27 @@ class Openset:
     warmup_users: int = 10
     initial_tau: float = 0.7
     
-    # 🍏 기존 파라미터 (제거/변경)
-    # smoothing_alpha: float = 0.2  # threshold_alpha로 변경
-    # max_delta: float = 0.03        # threshold_max_delta로 변경
-    
     # 🍎 통일된 임계치 파라미터
-    threshold_mode: str = 'far'           # 🍎 'eer' or 'far'
-    target_far: float = 0.01              # 🍎 FAR 타겟 (1%)
-    threshold_alpha: float = 0.2          # 🍎 EMA 계수 (기존 smoothing_alpha)
-    threshold_max_delta: float = 0.03     # 🍎 최대 변화폭 (기존 max_delta)
+    threshold_mode: str = 'far'           # 'eer' or 'far'
+    target_far: float = 0.01              # FAR 타겟 (1%)
+    threshold_alpha: float = 0.2          # EMA 계수 (기존 smoothing_alpha)
+    threshold_max_delta: float = 0.03     # 최대 변화폭 (기존 max_delta)
     
-    #use_margin: bool = True
-    #margin_tau: float = 0.05
     dev_ratio: float = 0.2
     negref_max_eval: int = 5000
+    
     # ⭐️ 스코어 모드 추가
     score_mode: str = 'energy'  # 'max' or 'energy'
     
     # 🍎 추가 옵션
-    verbose_calibration: bool = True      # 🍎 상세 출력
+    verbose_calibration: bool = True      # 상세 출력
+    
+    # 🥩 TTA (Test-Time Augmentation) 설정 추가
+    tta_n_views: int = 1  # 1이면 비활성화, 2~3 권장
+    tta_include_original: bool = True  # 원본 포함 여부
+    tta_agree_k: int = 0  # 0이면 과반 자동 계산
+    tta_augmentation_strength: float = 0.5  # 증강 강도 (0.0~1.0)
+    tta_aggregation: str = 'median'  # 'median' or 'mean' for scores
 
 @dataclasses.dataclass
 class Negative:

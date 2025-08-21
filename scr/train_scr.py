@@ -4,6 +4,7 @@
 Supervised Contrastive Replay (SCR) Training Script with Open-set Support
 CCNet + SCR for Continual Learning
 ⭐️ Energy Score Support Added
+🎯 TTA Support Added
 """
 
 import os
@@ -41,13 +42,25 @@ from scr import (
     SCRTrainer
 )
 
-def fix_random_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
+# 🥩 오픈셋 함수들 import 추가
+try:
+    from utils.utils_openset import (
+        predict_batch,
+        predict_batch_tta,
+        load_paths_labels_from_txt
+    )
+    TTA_AVAILABLE = True
+except ImportError:
+    from utils.utils_openset import (
+        predict_batch,
+        load_paths_labels_from_txt
+    )
+    TTA_AVAILABLE = False
+    print("⚠️ TTA functions not available")
+
+# 🥩 fix_random_seed 제거 (SCRTrainer에서 처리)
+# def fix_random_seed(seed):
+#     ...
 
 def compute_safe_base_id(*txt_files):
     """모든 txt 파일에서 최대 user ID를 찾아 안전한 BASE_ID 계산"""
@@ -269,6 +282,7 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
     """
     test_set_file을 사용한 전체 평가
     openset_mode=True면 오픈셋 평가도 수행
+    🥩 TTA 지원 추가
     
     Returns:
         (accuracy, openset_metrics) if openset_mode else (accuracy, None)
@@ -290,6 +304,11 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
     if not known_classes:
         return (0.0, {}) if openset_mode else (0.0, None)
     
+    # 🥩 TTA 설정 확인
+    use_tta = (TTA_AVAILABLE and 
+               hasattr(trainer, 'use_tta') and trainer.use_tta and 
+               hasattr(config, 'openset') and config.openset.tta_n_views > 1)
+    
     if openset_mode and trainer.openset_enabled:
         known_indices = []
         unknown_indices = []
@@ -310,18 +329,28 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
         openset_metrics = {}
         
         if known_indices and trainer.ncm.tau_s is not None:
-            from utils.utils_openset import predict_batch
-            
             if len(known_indices) > 500:
                 known_indices = np.random.choice(known_indices, 500, replace=False)
             
             known_paths = [test_dataset.images_path[i] for i in known_indices] 
             known_labels = [int(test_dataset.images_label[i]) for i in known_indices]
             
-            preds = predict_batch(
-                trainer.model, trainer.ncm,
-                known_paths, trainer.test_transform, trainer.device
-            )
+            # 🥩 TTA 또는 일반 예측
+            if use_tta:
+                preds = predict_batch_tta(
+                    trainer.model, trainer.ncm,
+                    known_paths, trainer.test_transform, trainer.device,
+                    n_views=config.openset.tta_n_views,
+                    include_original=config.openset.tta_include_original,
+                    agree_k=config.openset.tta_agree_k,
+                    aug_strength=config.openset.tta_augmentation_strength,
+                    img_size=config.dataset.height,
+                )
+            else:
+                preds = predict_batch(
+                    trainer.model, trainer.ncm,
+                    known_paths, trainer.test_transform, trainer.device,
+                )
             
             correct = sum(1 for p, l in zip(preds, known_labels) if p == l)
             rejected = sum(1 for p in preds if p == -1)
@@ -330,24 +359,34 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
             openset_metrics['FRR'] = rejected / max(1, len(preds))
         
         if unknown_indices and trainer.ncm.tau_s is not None:
-            from utils.utils_openset import predict_batch
-            
             if len(unknown_indices) > 500:
                 unknown_indices = np.random.choice(unknown_indices, 500, replace=False)
             
             unknown_paths = [test_dataset.images_path[i] for i in unknown_indices]
             
-            preds = predict_batch(
-                trainer.model, trainer.ncm,
-                unknown_paths, trainer.test_transform, trainer.device
-            )
+            # 🥩 TTA 또는 일반 예측
+            if use_tta:
+                preds = predict_batch_tta(
+                    trainer.model, trainer.ncm,
+                    unknown_paths, trainer.test_transform, trainer.device,
+                    n_views=config.openset.tta_n_views,
+                    include_original=config.openset.tta_include_original,
+                    agree_k=config.openset.tta_agree_k,
+                    aug_strength=config.openset.tta_augmentation_strength,
+                    img_size=config.dataset.height,
+                    channels=config.dataset.channels  # 🥩 추가
+                )
+            else:
+                preds = predict_batch(
+                    trainer.model, trainer.ncm,
+                    unknown_paths, trainer.test_transform, trainer.device,
+                    channels=config.dataset.channels  # 🥩 추가
+                )
             
             openset_metrics['TRR_unknown'] = sum(1 for p in preds if p == -1) / len(preds)
             openset_metrics['FAR_unknown'] = 1 - openset_metrics['TRR_unknown']
         
         openset_metrics['tau_s'] = trainer.ncm.tau_s
-        # ⚡️ tau_m 제거 (마진 규칙 제거)
-        # openset_metrics['tau_m'] = trainer.ncm.tau_m if trainer.ncm.use_margin else None
         
         # ⭐️ 에너지 모드 정보 추가
         if hasattr(trainer.ncm, 'use_energy') and trainer.ncm.use_energy:
@@ -357,7 +396,16 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
         else:
             openset_metrics['score_mode'] = 'max'
         
+        # 🥩 TTA 정보 추가
+        if use_tta:
+            openset_metrics['tta_enabled'] = True
+            openset_metrics['tta_views'] = config.openset.tta_n_views
+        else:
+            openset_metrics['tta_enabled'] = False
+        
         print(f"Evaluating on {len(known_indices)} known + {len(unknown_indices)} unknown samples")
+        if use_tta:
+            print(f"   🎯 Using TTA with {config.openset.tta_n_views} views")
         
         return accuracy, openset_metrics
     
@@ -388,6 +436,14 @@ def main(args):
     print(f"Using config: {args.config}")
     print(config)
     
+    # 🥩 config에 seed 설정 추가 (SCRTrainer가 사용)
+    if not hasattr(config_obj.training, 'seed'):
+        config_obj.training.seed = args.seed
+    
+    # 🥩 Random seed는 SCRTrainer에서 설정하므로 여기서는 제거
+    # if args.seed is not None:
+    #     fix_random_seed(args.seed)
+    
     # BASE_ID 계산 및 설정
     config_obj.negative.base_id = compute_safe_base_id(
         config_obj.dataset.train_set_file,
@@ -411,8 +467,12 @@ def main(args):
         else:
             print(f"   Score mode: MAX")
         
-        # ⚡️ 마진 출력 제거
-        # print(f"   Margin: {config_obj.openset.use_margin} (tau={config_obj.openset.margin_tau})")
+        # 🥩 TTA 정보 추가
+        if config_obj.openset.tta_n_views > 1:
+            print(f"   🎯 TTA: {config_obj.openset.tta_n_views} views")
+            print(f"      Include original: {config_obj.openset.tta_include_original}")
+            print(f"      Augmentation: {config_obj.openset.tta_augmentation_strength}")
+            print(f"      Aggregation: {config_obj.openset.tta_aggregation}")
         
         # FAR/EER 모드 표시
         if config_obj.openset.threshold_mode == 'far':
@@ -429,10 +489,6 @@ def main(args):
         else "cpu"
     )
     print(f'Device: {device}')
-    
-    # Random seed 고정
-    if args.seed is not None:
-        fix_random_seed(args.seed)
     
     # 2. 결과 저장 디렉토리 생성
     results_dir = os.path.join(config_obj.training.results_path, 'scr_results')
@@ -511,7 +567,7 @@ def main(args):
         min_samples_per_class=config_obj.training.min_samples_per_class
     )
     
-    # SCR Trainer
+    # SCR Trainer (🥩 여기서 시드가 설정됨)
     trainer = SCRTrainer(
         model=model,
         ncm_classifier=ncm_classifier,
@@ -552,12 +608,22 @@ def main(args):
         'pretrained_used': config_obj.model.use_pretrained,
         'pretrained_path': str(config_obj.model.pretrained_path) if config_obj.model.pretrained_path else None,
         'openset_enabled': openset_enabled,
+        'seed': config_obj.training.seed,  # 🥩 seed 정보 저장
         # ⭐️ 에너지 스코어 설정 저장
         'energy_score_config': {
             'enabled': hasattr(config_obj.openset, 'score_mode') and config_obj.openset.score_mode == 'energy',
             'temperature': getattr(config_obj.training, 'energy_temperature', None),
             'k_mode': getattr(config_obj.training, 'energy_k_mode', None),
             'k_fixed': getattr(config_obj.training, 'energy_k_fixed', None)
+        } if openset_enabled else None,
+        # 🥩 TTA 설정 저장
+        'tta_config': {
+            'enabled': config_obj.openset.tta_n_views > 1,
+            'n_views': config_obj.openset.tta_n_views,
+            'include_original': config_obj.openset.tta_include_original,
+            'augmentation_strength': config_obj.openset.tta_augmentation_strength,
+            'aggregation': config_obj.openset.tta_aggregation,
+            'agree_k': config_obj.openset.tta_agree_k
         } if openset_enabled else None
     }
     
@@ -569,6 +635,7 @@ def main(args):
     print(f"Learning rate: {config_obj.training.learning_rate}")
     print(f"Memory batch size: {config_obj.training.memory_batch_size}")
     print(f"Temperature: {config_obj.training.temperature}")
+    print(f"🎲 Random seed: {config_obj.training.seed}")  # 🥩 seed 출력
     
     start_time = time.time()
     
@@ -675,6 +742,10 @@ def main(args):
                     print(f"   ⭐️ Mode: Energy (T={openset_metrics.get('energy_T', 0):.2f}, k={openset_metrics.get('energy_k_mode', 'N/A')})")
                 else:
                     print(f"   Mode: Max")
+                
+                # 🥩 TTA 정보 출력
+                if openset_metrics.get('tta_enabled'):
+                    print(f"   🎯 TTA: {openset_metrics.get('tta_views', 1)} views")
             
             # Trainer의 오픈셋 평가 히스토리도 저장
             if hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
@@ -736,6 +807,10 @@ def main(args):
             print(f"   ⭐️ Score Mode: Energy")
             print(f"      Final T: {final_result.get('energy_T', 0):.2f}")
             print(f"      Final k mode: {final_result.get('energy_k_mode', 'N/A')}")
+        
+        # 🥩 TTA 최종 정보
+        if final_result.get('tta_enabled'):
+            print(f"   🎯 TTA: Enabled ({final_result.get('tta_views', 1)} views)")
     
     print(f"\nTotal Training Time: {(time.time() - start_time)/60:.1f} minutes")
     
@@ -749,7 +824,8 @@ def main(args):
         'final_forgetting': final_forget,
         'total_time_minutes': (time.time() - start_time) / 60,
         'negative_removal_history': training_history['negative_removal_history'],
-        'openset_enabled': openset_enabled
+        'openset_enabled': openset_enabled,
+        'seed': config_obj.training.seed  # 🥩 seed 저장
     }
     
     # 오픈셋 요약 추가
@@ -759,7 +835,8 @@ def main(args):
             'TRR_unknown': final_result.get('TRR_unknown', 0),
             'FAR_unknown': final_result.get('FAR_unknown', 0),
             'tau_s': final_result.get('tau_s', 0),
-            'score_mode': final_result.get('score_mode', 'max')  # ⭐️
+            'score_mode': final_result.get('score_mode', 'max'),
+            'tta_enabled': final_result.get('tta_enabled', False)  # 🥩 TTA 추가
         }
         
         # ⭐️ 에너지 설정 추가
@@ -767,6 +844,13 @@ def main(args):
             summary['final_openset']['energy_config'] = {
                 'temperature': final_result.get('energy_T', 0),
                 'k_mode': final_result.get('energy_k_mode', 'N/A')
+            }
+        
+        # 🥩 TTA 설정 추가
+        if final_result.get('tta_enabled'):
+            summary['final_openset']['tta_config'] = {
+                'n_views': final_result.get('tta_views', 1),
+                'aggregation': config_obj.openset.tta_aggregation
             }
     
     summary_path = os.path.join(results_dir, 'summary.json')
@@ -777,7 +861,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='SCR Training for CCNet with Open-set Support (Energy Score)')
+    parser = argparse.ArgumentParser(description='SCR Training for CCNet with Open-set Support (Energy Score + TTA)')
     parser.add_argument('--config', type=str, default='config/config.yaml',
                         help='Path to config file')
     parser.add_argument('--seed', type=int, default=42,

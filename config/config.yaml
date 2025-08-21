@@ -1,4 +1,4 @@
-# 🐋 config/config.yaml (정리 버전)
+# config/config.yaml
 
 Dataset:
   train_set_file: /content/drive/MyDrive/Data/GPDSmanosASM_txt/train_palma.txt
@@ -35,19 +35,19 @@ Training:
   temperature: 0.07  # SupConLoss용
   save_interval: 1000  # (사용 안 함)
   test_interval: 5  # ⭐ 평가 및 캘리브레이션 주기
-  checkpoint_path: /content/drive/MyDrive/scr_proxy_Energy_1
-  results_path: /content/drive/MyDrive/scr_proxy_Energy_1
+  checkpoint_path: /content/drive/MyDrive/scr_proxy_Energy_TTA
+  results_path: /content/drive/MyDrive/scr_proxy_Energy_TTA
   gpu_ids: "0"
   ncm_momentum: 0.9
-  
+  seed: 42  # 🥩 추가!
 
-  # ⭐️ 에너지 스코어 설정 추가
+  # ⭐️ 에너지 스코어 설정
   use_energy_score: true
   energy_temperature: 0.15
   energy_k_mode: 'sqrt'  # 'sqrt', 'fixed', 'log'
   energy_k_fixed: 10
 
-  # 💎 ProxyContrastLoss 설정 (NEW!)
+  # 💎 ProxyContrastLoss 설정
   use_proxy_loss: true
   proxy_lambda: 0.3  # 손실 가중치
   proxy_temperature: 0.20  # SupCon(0.07)보다 높게!
@@ -68,36 +68,39 @@ Training:
   # 💎 프로토타입 설정
   prototype_beta: 0.05  # EMA 계수 (미래 확장용)
 
-# 🐋 오픈셋 인식 설정 (정리)
+# 🐋 오픈셋 인식 설정
 Openset:
   enabled: true
 
-  # ☄️ 임계치 설정 (통합)
-  threshold_mode: 'far'      # ☄️ 'eer' or 'far'
-  target_far: 0.01           # ☄️ FAR 타겟 1%
-  threshold_alpha: 0.2       # ☄️ EMA 스무딩 계수 (기존 smoothing_alpha 대체)
-  threshold_max_delta: 0.03  # ☄️ 최대 변화폭 (기존 max_delta 대체)
+  # ☄️ 임계치 설정
+  threshold_mode: 'far'      # 'eer' or 'far'
+  target_far: 0.01           # FAR 타겟 1%
+  threshold_alpha: 0.2       # EMA 스무딩 계수
+  threshold_max_delta: 0.03  # 최대 변화폭
   
   # 초기값 및 워밍업
   warmup_users: 10           # 워밍업 기간
   initial_tau: 0.9           # 초기 임계치
-  
-  # 마진 규칙
-  #use_margin: false
-  #margin_tau: 0.07
   
   # 데이터 분할
   dev_ratio: 0.3             # Dev 세트 비율
   negref_max_eval: 6000      # NegRef 최대 샘플
   
   # 로깅
-  verbose_calibration: true  # ☄️ 상세 출력
+  verbose_calibration: true  # 상세 출력
 
-  # ⭐️ 스코어 모드 (새로 추가)
+  # ⭐️ 스코어 모드
   score_mode: 'energy'  # 'max' or 'energy'
+
+  # 🥩 TTA 설정 (Test-Time Augmentation)
+  tta_n_views: 3  # 1=비활성, 2~3 권장
+  tta_include_original: true  # 원본 포함 권장
+  tta_agree_k: 0  # 0=과반 자동, 2=2개 이상 동의
+  tta_augmentation_strength: 1.0  # 0.3~0.7 권장
+  tta_aggregation: 'median'  # 'median' or 'mean'
 
 # 🔥 네거티브 샘플 설정
 Negative:
   warmup_experiences: 4
   max_per_batch: 1
-  r0: 0.5
+  r0: 0.5 

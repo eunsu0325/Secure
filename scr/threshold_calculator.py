@@ -279,19 +279,24 @@ class ThresholdCalibrator:
         self.history.append(result)
         
         # 7. 결과 출력
-        if self.verbose:  # ☄️
-            print(f"\n✅ Calibration Complete ({self.threshold_mode.upper()} mode):")  # ☄️
-            print(f"   τ_s: {old_tau:.4f} → {tau_new:.4f} → {tau_smoothed:.4f} (smoothed)")
+        if self.verbose:
+            print(f"\n✅ Calibration Complete ({self.threshold_mode.upper()} mode):")
             
-            if self.threshold_mode == "far":  # ☄️
+            # old_tau가 None일 수 있으므로 처리
+            if old_tau is not None:
+                print(f"   τ_s: {old_tau:.4f} → {tau_new:.4f} → {tau_smoothed:.4f} (smoothed)")
+            else:
+                print(f"   τ_s: initial → {tau_new:.4f} → {tau_smoothed:.4f} (smoothed)")
+            
+            if self.threshold_mode == "far":
                 print(f"   Target FAR: {self.target_far*100:.2f}%")
                 print(f"   Achieved FAR: {achieved_metric*100:.2f}%")
             else:
                 print(f"   EER: {achieved_metric*100:.2f}%")
             
-            print(f"   Current FAR: {current_far*100:.2f}%, FRR: {current_frr*100:.2f}%")  # ☄️
-            print(f"   Margin: τ_m = {self.tau_m:.3f}")
-        
+            print(f"   Current FAR: {current_far*100:.2f}%, FRR: {current_frr*100:.2f}%")
+            if self.use_auto_margin:
+                print(f"   Margin: τ_m = {self.tau_m:.3f}")
         return result
     
     def get_stats(self) -> Dict:
