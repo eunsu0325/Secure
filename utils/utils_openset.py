@@ -117,33 +117,50 @@ def extract_features(model, paths: List[str], transform, device,
 
 
 def get_light_augmentation(strength: float = 0.5, img_size: int = 128) -> T.Compose:
-    """
-    인증용 가벼운 증강 (학습 증강보다 훨씬 약함)
-    """
-    if strength <= 0:
-        return T.Lambda(lambda x: x)
-    
+    """더 강력한 인증용 증강"""
     transforms = []
     
+    # 항상 적용 (strength > 0)
+    if strength > 0:
+        # 회전 강화: 5도 → 10~15도
+        transforms.append(T.RandomRotation(
+            degrees=15 * strength  # 🔥 최대 15도
+        ))
+    
     if strength > 0.2:
-        transforms.append(T.RandomRotation(degrees=5 * strength))
+        # Perspective 강화
+        transforms.append(T.RandomPerspective(
+            distortion_scale=0.15 * strength,  # 🔥 0.05 → 0.15
+            p=0.7  # 🔥 확률도 증가
+        ))
     
     if strength > 0.3:
-        transforms.append(T.RandomPerspective(
-            distortion_scale=0.05 * strength, 
-            p=0.5
-        ))
-    
-    if strength > 0.4:
+        # Crop 범위 확대
         transforms.append(T.RandomResizedCrop(
             size=img_size,
-            scale=(1.0 - 0.05*strength, 1.0),
-            ratio=(1.0, 1.0),
-            interpolation=InterpolationMode.BICUBIC  # 🥩 deprecation 방지
+            scale=(1.0 - 0.15*strength, 1.0),  # 🔥 최소 85% 크기
+            ratio=(0.9, 1.1),  # 🔥 종횡비도 변경
+            interpolation=InterpolationMode.BICUBIC
         ))
     
+    if strength > 0.5:
+        # 🔥 추가 증강들
+        transforms.append(T.RandomChoice([
+            # 밝기/대비 (학습보다는 약하게)
+            T.ColorJitter(brightness=0.02, contrast=0.03),
+            
+            # 아핀 변환
+            T.RandomAffine(
+                degrees=0,
+                translate=(0.05 * strength, 0.05 * strength),
+                scale=(0.95, 1.05)
+            ),
+            
+            # 가우시안 블러 (약하게)
+            T.GaussianBlur(kernel_size=3, sigma=(0.1, 0.5))
+        ]))
+    
     return T.Compose(transforms) if transforms else T.Lambda(lambda x: x)
-
 
 # 🥩 === TTA 메인 함수 ===
 @torch.no_grad()

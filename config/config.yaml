@@ -1,4 +1,4 @@
-# config/config.yaml
+\# config/config.yaml
 
 Dataset:
   train_set_file: /content/drive/MyDrive/Data/GPDSmanosASM_txt/train_palma.txt
@@ -35,8 +35,8 @@ Training:
   temperature: 0.07  # SupConLoss용
   save_interval: 1000  # (사용 안 함)
   test_interval: 5  # ⭐ 평가 및 캘리브레이션 주기
-  checkpoint_path: /content/drive/MyDrive/scr_proxy_Energy_TTA
-  results_path: /content/drive/MyDrive/scr_proxy_Energy_TTA
+  checkpoint_path: /content/drive/MyDrive/scr_proxy_MAX_TTA
+  results_path: /content/drive/MyDrive/scr_proxy_MAX_TTA
   gpu_ids: "0"
   ncm_momentum: 0.9
   seed: 42  # 🥩 추가!
@@ -75,8 +75,8 @@ Openset:
   # ☄️ 임계치 설정
   threshold_mode: 'far'      # 'eer' or 'far'
   target_far: 0.01           # FAR 타겟 1%
-  threshold_alpha: 0.2       # EMA 스무딩 계수
-  threshold_max_delta: 0.03  # 최대 변화폭
+  threshold_alpha: 0.5       # EMA 스무딩 계수
+  threshold_max_delta: 1.0  # 최대 변화폭
   
   # 초기값 및 워밍업
   warmup_users: 10           # 워밍업 기간
@@ -90,14 +90,14 @@ Openset:
   verbose_calibration: true  # 상세 출력
 
   # ⭐️ 스코어 모드
-  score_mode: 'energy'  # 'max' or 'energy'
+  score_mode: 'max'  # 'max' or 'energy'
 
   # 🥩 TTA 설정 (Test-Time Augmentation)
   tta_n_views: 3  # 1=비활성, 2~3 권장
   tta_include_original: true  # 원본 포함 권장
   tta_agree_k: 0  # 0=과반 자동, 2=2개 이상 동의
   tta_augmentation_strength: 1.0  # 0.3~0.7 권장
-  tta_aggregation: 'median'  # 'median' or 'mean'
+  tta_aggregation: 'median  # 'median' or 'mean'
 
 # 🔥 네거티브 샘플 설정
 Negative:
