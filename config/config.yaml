@@ -1,4 +1,4 @@
-\# config/config.yaml
+# config/config.yaml
 
 Dataset:
   train_set_file: /content/drive/MyDrive/Data/GPDSmanosASM_txt/train_palma.txt
