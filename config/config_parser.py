@@ -153,6 +153,14 @@ class ConfigParser:
             if 'tta_aggregation' not in openset_dict:
                 openset_dict['tta_aggregation'] = 'median'
             
+            # 🫐 TTA 반복 기본값 추가
+            if 'tta_n_repeats' not in openset_dict:
+                openset_dict['tta_n_repeats'] = 1
+            if 'tta_repeat_aggregation' not in openset_dict:
+                openset_dict['tta_repeat_aggregation'] = 'median'
+            if 'tta_verbose' not in openset_dict:
+                openset_dict['tta_verbose'] = False
+            
             self.openset = Openset(**openset_dict)
             
             # 🍎 모드 표시
@@ -165,6 +173,12 @@ class ConfigParser:
                 print(f"   Include original: {openset_dict.get('tta_include_original', True)}")
                 print(f"   Augmentation strength: {openset_dict.get('tta_augmentation_strength', 0.5)}")
                 print(f"   Aggregation: {openset_dict.get('tta_aggregation', 'median')}")
+                
+                # 🫐 반복 설정 출력 추가
+                if openset_dict.get('tta_n_repeats', 1) > 1:
+                    print(f"   Repeats: {openset_dict['tta_n_repeats']}")
+                    print(f"   Repeat aggregation: {openset_dict.get('tta_repeat_aggregation', 'median')}")
+                    print(f"   Total evaluations per sample: {openset_dict['tta_n_views'] * openset_dict['tta_n_repeats']}")
         else:
             self.openset = Openset(enabled=False)
             print("📌 Open-set configuration not found, using defaults (disabled)")

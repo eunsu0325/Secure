@@ -294,6 +294,9 @@ class SCRTrainer:
                     print(f"   Include original: {self.openset_config.tta_include_original}")
                     print(f"   Augmentation: {self.openset_config.tta_augmentation_strength}")
                     print(f"   Aggregation: {self.openset_config.tta_aggregation}")
+                    # 🫐 반복 설정 출력 추가
+                    if getattr(self.openset_config, 'tta_n_repeats', 1) > 1:
+                        print(f"   Repeats: {self.openset_config.tta_n_repeats}")
                 else:
                     print("⚠️ TTA requested but functions not available")
                     self.use_tta = False
@@ -714,6 +717,14 @@ class SCRTrainer:
         score_mode = getattr(self.openset_config, 'score_mode', 'max')
         use_tta = self.use_tta and TTA_FUNCTIONS_AVAILABLE  # 🥩 TTA 체크
         
+        # 🫐 TTA 반복 설정 가져오기
+        n_repeats = getattr(self.openset_config, 'tta_n_repeats', 1)
+        repeat_agg = getattr(self.openset_config, 'tta_repeat_aggregation', 'median')
+        tta_verbose = getattr(self.openset_config, 'tta_verbose', False)
+        
+        # 🫐 시드 가져오기
+        seed = getattr(self.config.training, 'seed', 42)
+        
         # 🥩 이미지 크기와 채널 가져오기
         img_size = self.config.dataset.height
         channels = self.config.dataset.channels  # 🥩 추가
@@ -721,7 +732,7 @@ class SCRTrainer:
         # 🥩 모드 표시
         mode_str = f"{'ENERGY' if score_mode == 'energy' else 'MAX'}"
         if use_tta:
-            mode_str += f" + TTA(n={self.openset_config.tta_n_views})"
+            mode_str += f" + TTA(n={self.openset_config.tta_n_views}, repeats={n_repeats})"
         
         # ⭐️ 모드별 설정
         if score_mode == 'energy' and self.use_energy_score and ENERGY_FUNCTIONS_AVAILABLE:
@@ -731,6 +742,12 @@ class SCRTrainer:
         else:
             self.ncm.use_energy = False
             print(f"📊 Using MAX scores for calibration {mode_str}")
+        
+        # 🫐 반복 설정 출력
+        if use_tta and n_repeats > 1:
+            print(f"🔄 TTA with {n_repeats} repeats enabled")
+            print(f"   Total evaluations per sample: {self.openset_config.tta_n_views * n_repeats}")
+            print(f"   Repeat aggregation: {repeat_agg}")
         
         print(f"\n📊 Extracting scores for {self.openset_config.threshold_mode.upper()} calibration...")
         
@@ -753,7 +770,11 @@ class SCRTrainer:
                 aug_strength=self.openset_config.tta_augmentation_strength,
                 aggregation=self.openset_config.tta_aggregation,
                 img_size=img_size,
-                channels=channels  # 🔧 channels 전달
+                channels=channels,
+                n_repeats=n_repeats,  # 🫐 추가
+                repeat_aggregation=repeat_agg,  # 🫐 추가
+                verbose=tta_verbose,  # 🫐 추가
+                seed=seed  # 🫐 추가
             )
             
             s_imp_between = extract_scores_impostor_between_tta(
@@ -766,7 +787,11 @@ class SCRTrainer:
                 aggregation=self.openset_config.tta_aggregation,
                 max_pairs=2000,
                 img_size=img_size,
-                channels=channels  # 🔧 channels 전달
+                channels=channels,
+                n_repeats=n_repeats,  # 🫐 추가
+                repeat_aggregation=repeat_agg,  # 🫐 추가
+                verbose=tta_verbose,  # 🫐 추가
+                seed=seed  # 🫐 추가
             )
             
             s_imp_negref = extract_scores_impostor_negref_tta(
@@ -779,7 +804,11 @@ class SCRTrainer:
                 aggregation=self.openset_config.tta_aggregation,
                 max_eval=self.openset_config.negref_max_eval,
                 img_size=img_size,
-                channels=channels  # 🔧 channels 전달
+                channels=channels,
+                n_repeats=n_repeats,  # 🫐 추가
+                repeat_aggregation=repeat_agg,  # 🫐 추가
+                verbose=tta_verbose,  # 🫐 추가
+                seed=seed  # 🫐 추가
             )
         else:
             # ⭐️ 단일뷰 - 모드에 따른 점수 추출
@@ -789,7 +818,7 @@ class SCRTrainer:
                     self.model, self.ncm,
                     all_dev_paths, all_dev_labels,
                     self.test_transform, self.device,
-                    channels=channels  # 🔧 channels 전달
+                    channels=channels
                 )
                 
                 s_imp_between = extract_scores_impostor_between_energy(
@@ -797,7 +826,7 @@ class SCRTrainer:
                     all_dev_paths, all_dev_labels,
                     self.test_transform, self.device,
                     max_pairs=2000,
-                    channels=channels  # 🔧 channels 전달
+                    channels=channels
                 )
                 
                 s_imp_negref = extract_scores_impostor_negref_energy(
@@ -805,7 +834,7 @@ class SCRTrainer:
                     self.config.dataset.negative_samples_file,
                     self.test_transform, self.device,
                     max_eval=self.openset_config.negref_max_eval,
-                    channels=channels  # 🔧 channels 전달
+                    channels=channels
                 )
             else:
                 # 기존 최댓값 버전
@@ -813,7 +842,7 @@ class SCRTrainer:
                     self.model, self.ncm,
                     all_dev_paths, all_dev_labels,
                     self.test_transform, self.device,
-                    channels=channels  # 🔧 channels 전달
+                    channels=channels
                 )
                 
                 s_imp_between = extract_scores_impostor_between(
@@ -821,7 +850,7 @@ class SCRTrainer:
                     all_dev_paths, all_dev_labels,
                     self.test_transform, self.device,
                     max_pairs=2000,
-                    channels=channels  # 🔧 channels 전달
+                    channels=channels
                 )
                 
                 s_imp_negref = extract_scores_impostor_negref(
@@ -829,7 +858,7 @@ class SCRTrainer:
                     self.config.dataset.negative_samples_file,
                     self.test_transform, self.device,
                     max_eval=self.openset_config.negref_max_eval,
-                    channels=channels  # 🔧 channels 전달
+                    channels=channels
                 )
         
         # 균형 맞추기
@@ -845,6 +874,9 @@ class SCRTrainer:
         # 🥩 TTA 정보 추가
         if use_tta:
             print(f"   TTA aggregation: {self.openset_config.tta_aggregation}")
+            # 🫐 반복 정보 추가
+            if n_repeats > 1:
+                print(f"   TTA repeats: {n_repeats}")
         
         # 캘리브레이션
         if len(s_genuine) >= 10 and len(s_impostor) >= 10:
@@ -1206,4 +1238,4 @@ class SCRTrainer:
             openset_data = checkpoint['openset_data']
             self.ncm.tau_s = openset_data.get('tau_s')
             self.registered_users = set(openset_data.get('registered_users', []))
-            self.evaluation_history = openset_data.get('evaluation_history', [])
+            self.evaluation_history = openset_data.get('evaluation_history', [])  

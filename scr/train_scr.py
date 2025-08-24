@@ -5,6 +5,7 @@ Supervised Contrastive Replay (SCR) Training Script with Open-set Support
 CCNet + SCR for Continual Learning
 ⭐️ Energy Score Support Added
 🎯 TTA Support Added
+🫐 TTA Repeats Support Added
 """
 
 import os
@@ -57,10 +58,6 @@ except ImportError:
     )
     TTA_AVAILABLE = False
     print("⚠️ TTA functions not available")
-
-# 🥩 fix_random_seed 제거 (SCRTrainer에서 처리)
-# def fix_random_seed(seed):
-#     ...
 
 def compute_safe_base_id(*txt_files):
     """모든 txt 파일에서 최대 user ID를 찾아 안전한 BASE_ID 계산"""
@@ -345,11 +342,13 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
                     agree_k=config.openset.tta_agree_k,
                     aug_strength=config.openset.tta_augmentation_strength,
                     img_size=config.dataset.height,
+                    channels=config.dataset.channels  # 🫐 추가
                 )
             else:
                 preds = predict_batch(
                     trainer.model, trainer.ncm,
                     known_paths, trainer.test_transform, trainer.device,
+                    channels=config.dataset.channels  # 🫐 추가
                 )
             
             correct = sum(1 for p, l in zip(preds, known_labels) if p == l)
@@ -400,12 +399,19 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
         if use_tta:
             openset_metrics['tta_enabled'] = True
             openset_metrics['tta_views'] = config.openset.tta_n_views
+            # 🫐 TTA 반복 정보 추가
+            if hasattr(config.openset, 'tta_n_repeats') and config.openset.tta_n_repeats > 1:
+                openset_metrics['tta_repeats'] = config.openset.tta_n_repeats
+                openset_metrics['tta_repeat_aggregation'] = config.openset.tta_repeat_aggregation
         else:
             openset_metrics['tta_enabled'] = False
         
         print(f"Evaluating on {len(known_indices)} known + {len(unknown_indices)} unknown samples")
         if use_tta:
             print(f"   🎯 Using TTA with {config.openset.tta_n_views} views")
+            # 🫐 반복 정보 출력
+            if hasattr(config.openset, 'tta_n_repeats') and config.openset.tta_n_repeats > 1:
+                print(f"   🔄 TTA repeats: {config.openset.tta_n_repeats}")
         
         return accuracy, openset_metrics
     
@@ -440,10 +446,6 @@ def main(args):
     if not hasattr(config_obj.training, 'seed'):
         config_obj.training.seed = args.seed
     
-    # 🥩 Random seed는 SCRTrainer에서 설정하므로 여기서는 제거
-    # if args.seed is not None:
-    #     fix_random_seed(args.seed)
-    
     # BASE_ID 계산 및 설정
     config_obj.negative.base_id = compute_safe_base_id(
         config_obj.dataset.train_set_file,
@@ -473,6 +475,12 @@ def main(args):
             print(f"      Include original: {config_obj.openset.tta_include_original}")
             print(f"      Augmentation: {config_obj.openset.tta_augmentation_strength}")
             print(f"      Aggregation: {config_obj.openset.tta_aggregation}")
+            
+            # 🫐 TTA 반복 정보 추가
+            if hasattr(config_obj.openset, 'tta_n_repeats') and config_obj.openset.tta_n_repeats > 1:
+                print(f"   🔄 TTA Repeats: {config_obj.openset.tta_n_repeats}")
+                print(f"      Repeat aggregation: {config_obj.openset.tta_repeat_aggregation}")
+                print(f"      Total evaluations per sample: {config_obj.openset.tta_n_views * config_obj.openset.tta_n_repeats}")
         
         # FAR/EER 모드 표시
         if config_obj.openset.threshold_mode == 'far':
@@ -623,7 +631,10 @@ def main(args):
             'include_original': config_obj.openset.tta_include_original,
             'augmentation_strength': config_obj.openset.tta_augmentation_strength,
             'aggregation': config_obj.openset.tta_aggregation,
-            'agree_k': config_obj.openset.tta_agree_k
+            'agree_k': config_obj.openset.tta_agree_k,
+            # 🫐 TTA 반복 설정 추가
+            'n_repeats': getattr(config_obj.openset, 'tta_n_repeats', 1),
+            'repeat_aggregation': getattr(config_obj.openset, 'tta_repeat_aggregation', 'median')
         } if openset_enabled else None
     }
     
@@ -746,6 +757,9 @@ def main(args):
                 # 🥩 TTA 정보 출력
                 if openset_metrics.get('tta_enabled'):
                     print(f"   🎯 TTA: {openset_metrics.get('tta_views', 1)} views")
+                    # 🫐 TTA 반복 정보 출력
+                    if openset_metrics.get('tta_repeats', 1) > 1:
+                        print(f"   🔄 TTA repeats: {openset_metrics.get('tta_repeats', 1)}")
             
             # Trainer의 오픈셋 평가 히스토리도 저장
             if hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
@@ -811,6 +825,10 @@ def main(args):
         # 🥩 TTA 최종 정보
         if final_result.get('tta_enabled'):
             print(f"   🎯 TTA: Enabled ({final_result.get('tta_views', 1)} views)")
+            # 🫐 TTA 반복 최종 정보
+            if final_result.get('tta_repeats', 1) > 1:
+                print(f"   🔄 TTA Repeats: {final_result.get('tta_repeats', 1)}")
+                print(f"      Repeat aggregation: {final_result.get('tta_repeat_aggregation', 'median')}")
     
     print(f"\nTotal Training Time: {(time.time() - start_time)/60:.1f} minutes")
     
@@ -850,7 +868,10 @@ def main(args):
         if final_result.get('tta_enabled'):
             summary['final_openset']['tta_config'] = {
                 'n_views': final_result.get('tta_views', 1),
-                'aggregation': config_obj.openset.tta_aggregation
+                'aggregation': config_obj.openset.tta_aggregation,
+                # 🫐 TTA 반복 정보 추가
+                'n_repeats': final_result.get('tta_repeats', 1),
+                'repeat_aggregation': final_result.get('tta_repeat_aggregation', 'median')
             }
     
     summary_path = os.path.join(results_dir, 'summary.json')
@@ -861,7 +882,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='SCR Training for CCNet with Open-set Support (Energy Score + TTA)')
+    parser = argparse.ArgumentParser(description='SCR Training for CCNet with Open-set Support (Energy Score + TTA + Repeats)')
     parser.add_argument('--config', type=str, default='config/config.yaml',
                         help='Path to config file')
     parser.add_argument('--seed', type=int, default=42,

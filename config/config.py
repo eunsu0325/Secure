@@ -108,6 +108,11 @@ class Openset:
     tta_agree_k: int = 0  # 0이면 과반 자동 계산
     tta_augmentation_strength: float = 0.5  # 증강 강도 (0.0~1.0)
     tta_aggregation: str = 'median'  # 'median' or 'mean' for scores
+    
+    # 🫐 TTA 반복 설정 추가
+    tta_n_repeats: int = 1  # TTA 반복 횟수 (기본값 1)
+    tta_repeat_aggregation: str = 'median'  # 반복 간 집계 방법 'median' or 'mean'
+    tta_verbose: bool = False  # TTA 디버깅 출력
 
 @dataclasses.dataclass
 class Negative:

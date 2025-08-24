@@ -11,6 +11,7 @@ from collections import defaultdict, Counter
 from torchvision import transforms as T
 from torchvision.transforms import InterpolationMode  # 🥩 deprecation 방지
 import random
+from tqdm import tqdm  # 🫐 추가
 
 # 🥩 시드 고정 (재현성)
 def set_seed(seed: int = 42):
@@ -497,25 +498,39 @@ def extract_scores_impostor_negref_energy(model, ncm, negref_file: str, transfor
     return np.array(scores)
 
 
-# 🥩 === TTA 점수 추출 함수들 ===
+# 🥩 === TTA 점수 추출 함수들 (수정 버전) ===
 
 @torch.no_grad()
 def extract_scores_genuine_tta(
     model, ncm, dev_paths: List[str], dev_labels: List[int],
     transform, device, n_views: int = 3, include_original: bool = True,
     aug_strength: float = 0.5, aggregation: str = 'median',
-    img_size: int = 128, channels: int = 1
+    img_size: int = 128, channels: int = 1,
+    n_repeats: int = 1,  # 🫐 추가
+    repeat_aggregation: str = 'median',  # 🫐 추가
+    verbose: bool = False,  # 🫐 추가
+    seed: int = 42  # 🫐 시드 파라미터 추가
 ) -> np.ndarray:
-    """TTA genuine 점수"""
+    """TTA genuine 점수 - 반복 지원 및 최적화 버전"""
     if not dev_paths:
         return np.array([])
     
-    light_aug = get_light_augmentation(aug_strength, img_size)
-    
     model.eval()
-    scores = []
+    final_scores = []
     
-    for path, label in zip(dev_paths, dev_labels):
+    # 🫐 재현성을 위한 시드 설정
+    base_seed = seed
+    
+    # 🫐 전체 뷰 수집 (병렬 처리용)
+    all_views = []
+    sample_info = []  # (sample_idx, repeat_idx, view_idx, label)
+    valid_sample_indices = []  # 최종 점수와 매칭되는 인덱스
+    
+    for idx, (path, label) in enumerate(tqdm(
+        zip(dev_paths, dev_labels),
+        desc="Extracting genuine scores",
+        total=len(dev_paths)
+    )):
         if hasattr(ncm, 'class_means_dict') and label not in ncm.class_means_dict:
             continue
         
@@ -524,42 +539,127 @@ def extract_scores_genuine_tta(
         except:
             continue
         
-        views = []
-        if include_original:
-            views.append(transform(img))
-            for _ in range(n_views - 1):
-                aug_img = light_aug(img) if aug_strength > 0 else img
-                views.append(transform(aug_img))
-        else:
-            for _ in range(n_views):
-                aug_img = light_aug(img) if aug_strength > 0 else img
-                views.append(transform(aug_img))
+        valid_sample_indices.append(idx)
         
-        x = torch.stack(views).to(device)
-        features = model.getFeatureCode(x)
-        # 🥩 정규화 추가
-        features = F.normalize(features, p=2, dim=1, eps=1e-12)
-        
-        view_scores = []
-        for i in range(n_views):
-            feat_i = features[i:i+1]
+        # 🫐 샘플별 모든 뷰 수집
+        for repeat_idx in range(n_repeats):
+            # 🫐 재현성 위한 시드 설정
+            seed_offset = idx * 1000 + repeat_idx
+            torch.manual_seed(base_seed + seed_offset)
+            np.random.seed(base_seed + seed_offset)
+            random.seed(base_seed + seed_offset)
             
-            if hasattr(ncm, 'use_energy') and ncm.use_energy:
-                score = ncm.compute_energy_score(feat_i).item()
-            else:
-                scores_i = ncm.forward(feat_i)
-                score = scores_i.max().item() if scores_i.numel() > 0 else -1000
+            # 🫐 각 반복마다 새로운 증강 생성
+            light_aug = get_light_augmentation(aug_strength, img_size)
             
-            view_scores.append(score)
-        
-        if view_scores:
-            if aggregation == 'median':
-                final_score = np.median(view_scores)
+            # 🫐 뷰 생성 (원본은 첫 반복에만)
+            if include_original and repeat_idx == 0:
+                all_views.append(transform(img))
+                sample_info.append((len(valid_sample_indices)-1, repeat_idx, 0, label))
+                
+                for v_idx in range(1, n_views):
+                    aug_img = light_aug(img)
+                    all_views.append(transform(aug_img))
+                    sample_info.append((len(valid_sample_indices)-1, repeat_idx, v_idx, label))
             else:
-                final_score = np.mean(view_scores)
-            scores.append(final_score)
+                for v_idx in range(n_views):
+                    aug_img = light_aug(img)
+                    all_views.append(transform(aug_img))
+                    sample_info.append((len(valid_sample_indices)-1, repeat_idx, v_idx, label))
     
-    return np.array(scores)
+    if not all_views:
+        return np.array([])
+    
+    # 🫐 전체 배치 처리 (GPU 효율적)
+    try:
+        all_views_tensor = torch.stack(all_views).to(device)
+        features = model.getFeatureCode(all_views_tensor)
+    except torch.cuda.OutOfMemoryError:
+        print("⚠️ OOM detected, splitting batch...")
+        features = []
+        batch_size = 50
+        for i in range(0, len(all_views), batch_size):
+            batch = torch.stack(all_views[i:i+batch_size]).to(device)
+            feat_batch = model.getFeatureCode(batch)
+            features.append(feat_batch)
+        features = torch.cat(features, dim=0)
+    
+    features = F.normalize(features, p=2, dim=1, eps=1e-12)
+    
+    # 🫐 점수 계산 및 집계
+    current_sample_idx = -1
+    repeat_scores = []
+    
+    for i, (s_idx, r_idx, v_idx, label) in enumerate(sample_info):
+        # 🫐 새로운 샘플 시작
+        if s_idx != current_sample_idx:
+            if current_sample_idx >= 0 and repeat_scores:
+                # 🫐 이전 샘플의 최종 점수 계산
+                if repeat_aggregation == 'median':
+                    final_score = np.median(repeat_scores)
+                else:
+                    final_score = np.mean(repeat_scores)
+                final_scores.append(final_score)
+                
+                # 🫐 디버깅 출력
+                if verbose and len(final_scores) <= 5:
+                    print(f"Sample {current_sample_idx}:")
+                    for r_i, r_s in enumerate(repeat_scores):
+                        print(f"  Repeat {r_i+1}: {r_s:.4f}")
+                    print(f"  Final ({repeat_aggregation}): {final_score:.4f} (std={np.std(repeat_scores):.4f})")
+            
+            current_sample_idx = s_idx
+            current_label = label
+            repeat_scores = []
+            current_repeat_idx = -1
+            view_scores = []
+        
+        # 🫐 새로운 반복 시작
+        if r_idx != current_repeat_idx:
+            if current_repeat_idx >= 0 and view_scores:
+                # 🫐 이전 반복의 점수 계산
+                if aggregation == 'median':
+                    repeat_score = np.median(view_scores)
+                else:
+                    repeat_score = np.mean(view_scores)
+                repeat_scores.append(repeat_score)
+            
+            current_repeat_idx = r_idx
+            view_scores = []
+        
+        # 🫐 점수 계산
+        feat_i = features[i:i+1]
+        
+        if hasattr(ncm, 'use_energy') and ncm.use_energy:
+            score = ncm.compute_energy_score(feat_i).item()
+        else:
+            scores_i = ncm.forward(feat_i)
+            score = scores_i.max().item() if scores_i.numel() > 0 else -1000
+        
+        view_scores.append(score)
+    
+    # 🫐 마지막 샘플 처리
+    if view_scores:
+        if aggregation == 'median':
+            repeat_score = np.median(view_scores)
+        else:
+            repeat_score = np.mean(view_scores)
+        repeat_scores.append(repeat_score)
+    
+    if repeat_scores:
+        if repeat_aggregation == 'median':
+            final_score = np.median(repeat_scores)
+        else:
+            final_score = np.mean(repeat_scores)
+        final_scores.append(final_score)
+        
+        if verbose and len(final_scores) <= 5:
+            print(f"Sample {current_sample_idx}:")
+            for r_i, r_s in enumerate(repeat_scores):
+                print(f"  Repeat {r_i+1}: {r_s:.4f}")
+            print(f"  Final ({repeat_aggregation}): {final_score:.4f} (std={np.std(repeat_scores):.4f})")
+    
+    return np.array(final_scores)
 
 
 @torch.no_grad()
@@ -567,9 +667,13 @@ def extract_scores_impostor_between_tta(
     model, ncm, dev_paths: List[str], dev_labels: List[int],
     transform, device, n_views: int = 3, include_original: bool = True,
     aug_strength: float = 0.5, aggregation: str = 'median',
-    max_pairs: int = 2000, img_size: int = 128, channels: int = 1
+    max_pairs: int = 2000, img_size: int = 128, channels: int = 1,
+    n_repeats: int = 1,  # 🫐 추가
+    repeat_aggregation: str = 'median',  # 🫐 추가
+    verbose: bool = False,  # 🫐 추가
+    seed: int = 42  # 🫐 시드 파라미터 추가
 ) -> np.ndarray:
-    """TTA between impostor"""
+    """TTA between impostor - 반복 지원 버전"""
     if not dev_paths:
         return np.array([])
     
@@ -577,21 +681,33 @@ def extract_scores_impostor_between_tta(
     for p, l in zip(dev_paths, dev_labels):
         by_class[int(l)].append(p)
     
-    light_aug = get_light_augmentation(aug_strength, img_size)
-    
     model.eval()
-    scores = []
+    final_scores = []
     
-    for cls_id, cls_paths in by_class.items():
-        if len(scores) >= max_pairs:
+    # 🫐 재현성을 위한 시드
+    base_seed = seed
+    
+    # 🫐 max_pairs 제한 (상한선 10000)
+    max_pairs = min(10000, max_pairs)
+    
+    # 🫐 전체 뷰 수집
+    all_views = []
+    sample_info = []  # (sample_idx, repeat_idx, view_idx, class_id)
+    
+    sample_idx = 0
+    pair_count = 0
+    
+    for cls_id, cls_paths in tqdm(by_class.items(), desc="Processing impostor between"):
+        if pair_count >= max_pairs:
             break
         
         sample_paths = cls_paths[:min(5, len(cls_paths))]
         if len(sample_paths) > 3:
+            random.seed(base_seed + cls_id)
             sample_paths = random.sample(sample_paths, 3)
         
         for path in sample_paths:
-            if len(scores) >= max_pairs:
+            if pair_count >= max_pairs:
                 break
             
             try:
@@ -599,57 +715,134 @@ def extract_scores_impostor_between_tta(
             except:
                 continue
             
-            views = []
-            if include_original:
-                views.append(transform(img))
-                for _ in range(n_views - 1):
-                    aug_img = light_aug(img) if aug_strength > 0 else img
-                    views.append(transform(aug_img))
-            else:
-                for _ in range(n_views):
-                    aug_img = light_aug(img) if aug_strength > 0 else img
-                    views.append(transform(aug_img))
-            
-            x = torch.stack(views).to(device)
-            features = model.getFeatureCode(x)
-            # 🥩 정규화 추가
-            features = F.normalize(features, p=2, dim=1, eps=1e-12)
-            
-            view_scores = []
-            for i in range(n_views):
-                feat_i = features[i:i+1]
+            # 🫐 샘플별 모든 뷰 수집
+            for repeat_idx in range(n_repeats):
+                # 🫐 재현성 위한 시드 설정
+                seed_offset = sample_idx * 1000 + repeat_idx
+                torch.manual_seed(base_seed + seed_offset)
+                np.random.seed(base_seed + seed_offset)
+                random.seed(base_seed + seed_offset)
                 
-                if hasattr(ncm, 'use_energy') and ncm.use_energy:
-                    label_tensor = torch.tensor([cls_id], device=device)
-                    if hasattr(ncm, 'compute_energy_masked'):
-                        score = ncm.compute_energy_masked(feat_i, label_tensor).item()
-                    else:
-                        score = ncm.compute_energy_score(feat_i).item()
+                # 🫐 각 반복마다 새로운 증강
+                light_aug = get_light_augmentation(aug_strength, img_size)
+                
+                # 🫐 뷰 생성
+                if include_original and repeat_idx == 0:
+                    all_views.append(transform(img))
+                    sample_info.append((sample_idx, repeat_idx, 0, cls_id))
+                    
+                    for v_idx in range(1, n_views):
+                        aug_img = light_aug(img)
+                        all_views.append(transform(aug_img))
+                        sample_info.append((sample_idx, repeat_idx, v_idx, cls_id))
                 else:
-                    scores_i = ncm.forward(feat_i)
-                    if cls_id < scores_i.shape[1]:
-                        scores_i[0, cls_id] = -float('inf')
-                    score = scores_i.max().item()
-                
-                view_scores.append(score)
+                    for v_idx in range(n_views):
+                        aug_img = light_aug(img)
+                        all_views.append(transform(aug_img))
+                        sample_info.append((sample_idx, repeat_idx, v_idx, cls_id))
             
-            if aggregation == 'median':
-                final_score = np.median(view_scores)
-            else:
-                final_score = np.mean(view_scores)
-            scores.append(final_score)
+            sample_idx += 1
+            pair_count += 1
     
-    return np.array(scores)
-
+    if not all_views:
+        return np.array([])
+    
+    # 🫐 전체 배치 처리
+    try:
+        all_views_tensor = torch.stack(all_views).to(device)
+        features = model.getFeatureCode(all_views_tensor)
+    except torch.cuda.OutOfMemoryError:
+        print("⚠️ OOM detected, splitting batch...")
+        features = []
+        batch_size = 50
+        for i in range(0, len(all_views), batch_size):
+            batch = torch.stack(all_views[i:i+batch_size]).to(device)
+            feat_batch = model.getFeatureCode(batch)
+            features.append(feat_batch)
+        features = torch.cat(features, dim=0)
+    
+    features = F.normalize(features, p=2, dim=1, eps=1e-12)
+    
+    # 🫐 점수 계산 및 집계
+    current_sample_idx = -1
+    repeat_scores = []
+    
+    for i, (s_idx, r_idx, v_idx, cls_id) in enumerate(sample_info):
+        if s_idx != current_sample_idx:
+            if current_sample_idx >= 0 and repeat_scores:
+                if repeat_aggregation == 'median':
+                    final_score = np.median(repeat_scores)
+                else:
+                    final_score = np.mean(repeat_scores)
+                final_scores.append(final_score)
+                
+                if verbose and len(final_scores) <= 5:
+                    print(f"Impostor sample {current_sample_idx}: {final_score:.4f}")
+            
+            current_sample_idx = s_idx
+            repeat_scores = []
+            current_repeat_idx = -1
+            view_scores = []
+            current_cls_id = cls_id
+        
+        if r_idx != current_repeat_idx:
+            if current_repeat_idx >= 0 and view_scores:
+                if aggregation == 'median':
+                    repeat_score = np.median(view_scores)
+                else:
+                    repeat_score = np.mean(view_scores)
+                repeat_scores.append(repeat_score)
+            
+            current_repeat_idx = r_idx
+            view_scores = []
+        
+        # 🫐 점수 계산 (자기 클래스 제외)
+        feat_i = features[i:i+1]
+        
+        if hasattr(ncm, 'use_energy') and ncm.use_energy:
+            label_tensor = torch.tensor([current_cls_id], device=device)
+            if hasattr(ncm, 'compute_energy_masked'):
+                score = ncm.compute_energy_masked(feat_i, label_tensor).item()
+            else:
+                score = ncm.compute_energy_score(feat_i).item()
+        else:
+            scores_i = ncm.forward(feat_i)
+            if current_cls_id < scores_i.shape[1]:
+                scores_i[0, current_cls_id] = -float('inf')
+            score = scores_i.max().item()
+        
+        view_scores.append(score)
+    
+    # 🫐 마지막 샘플 처리
+    if view_scores:
+        if aggregation == 'median':
+            repeat_score = np.median(view_scores)
+        else:
+            repeat_score = np.mean(view_scores)
+        repeat_scores.append(repeat_score)
+    
+    if repeat_scores:
+        if repeat_aggregation == 'median':
+            final_score = np.median(repeat_scores)
+        else:
+            final_score = np.mean(repeat_scores)
+        final_scores.append(final_score)
+    
+    return np.array(final_scores)
 
 @torch.no_grad()
 def extract_scores_impostor_negref_tta(
     model, ncm, negref_file: str, transform, device,
     n_views: int = 3, include_original: bool = True,
     aug_strength: float = 0.5, aggregation: str = 'median',
-    max_eval: int = 5000, img_size: int = 128, channels: int = 1
+    max_eval: int = 5000, img_size: int = 128, channels: int = 1,
+    n_repeats: int = 1, repeat_aggregation: str = 'median',
+    verbose: bool = False, seed: int = 42
 ) -> np.ndarray:
-    """TTA negref impostor"""
+    """
+    TTA negref impostor - NegRef는 반복 비활성화 (메모리 절약)
+    🔥 NegRef는 외부 데이터이므로 반복의 이득이 적음
+    """
     paths, _ = load_paths_labels_from_txt(negref_file)
     if not paths:
         return np.array([])
@@ -658,53 +851,126 @@ def extract_scores_impostor_negref_tta(
         idx = np.random.choice(len(paths), max_eval, replace=False)
         paths = [paths[i] for i in idx]
     
-    light_aug = get_light_augmentation(aug_strength, img_size)
-    
     model.eval()
-    scores = []
+    final_scores = []
+    base_seed = seed
     
-    for path in paths[:max_eval]:
+    # 🔥 NegRef는 반복 강제 비활성화 (메모리 절약)
+    effective_repeats = 1  # NegRef는 항상 1번만
+    if verbose:
+        print(f"📌 NegRef: Forcing n_repeats=1 (was {n_repeats}) for memory efficiency")
+    
+    # 전체 뷰 수집 (반복 없이)
+    all_views = []
+    sample_info = []
+    
+    for idx, path in enumerate(tqdm(paths[:max_eval], desc="Processing negref")):
         try:
             img = _open_with_channels(path, channels)
         except:
             continue
         
-        views = []
+        # 🔥 반복 없이 1회만 처리
+        torch.manual_seed(base_seed + idx)
+        np.random.seed(base_seed + idx)
+        random.seed(base_seed + idx)
+        
+        light_aug = get_light_augmentation(aug_strength, img_size)
+        
+        # 뷰 생성 (반복 없음)
         if include_original:
-            views.append(transform(img))
-            for _ in range(n_views - 1):
-                aug_img = light_aug(img) if aug_strength > 0 else img
-                views.append(transform(aug_img))
+            all_views.append(transform(img))
+            sample_info.append((idx, 0, 0))
+            
+            for v_idx in range(1, n_views):
+                aug_img = light_aug(img)
+                all_views.append(transform(aug_img))
+                sample_info.append((idx, 0, v_idx))
         else:
-            for _ in range(n_views):
-                aug_img = light_aug(img) if aug_strength > 0 else img
-                views.append(transform(aug_img))
+            for v_idx in range(n_views):
+                aug_img = light_aug(img)
+                all_views.append(transform(aug_img))
+                sample_info.append((idx, 0, v_idx))
+    
+    if not all_views:
+        return np.array([])
+    
+    # 🔥 배치 처리 (메모리 효율적)
+    batch_size = 64  # NegRef는 반복이 없으므로 더 큰 배치 가능
+    features_list = []
+    
+    for i in range(0, len(all_views), batch_size):
+        batch = all_views[i:i+batch_size]
+        batch_tensor = torch.stack(batch).to(device)
         
-        x = torch.stack(views).to(device)
-        features = model.getFeatureCode(x)
-        # 🥩 정규화 추가
-        features = F.normalize(features, p=2, dim=1, eps=1e-12)
+        try:
+            feat = model.getFeatureCode(batch_tensor)
+            features_list.append(feat.cpu())  # CPU로 이동
+            del feat
+        except torch.cuda.OutOfMemoryError:
+            # 더 작은 배치로 재시도
+            print(f"⚠️ OOM at batch size {len(batch)}, splitting...")
+            for j in range(0, len(batch), 16):
+                mini_batch = torch.stack(batch[j:j+16]).to(device)
+                feat = model.getFeatureCode(mini_batch)
+                features_list.append(feat.cpu())
+                del feat, mini_batch
+                torch.cuda.empty_cache()
         
-        view_scores = []
-        for i in range(n_views):
-            feat_i = features[i:i+1]
+        del batch_tensor
+    
+    # CPU에서 결합 및 정규화
+    features = torch.cat(features_list, dim=0)
+    features = F.normalize(features, p=2, dim=1, eps=1e-12)
+    
+    # 점수 계산 (반복 없음)
+    current_sample_idx = -1
+    view_scores = []
+    
+    for i, (s_idx, _, v_idx) in enumerate(sample_info):
+        if s_idx != current_sample_idx:
+            if current_sample_idx >= 0 and view_scores:
+                # 뷰 집계
+                if aggregation == 'median':
+                    final_score = np.median(view_scores)
+                else:
+                    final_score = np.mean(view_scores)
+                final_scores.append(final_score)
+                
+                if verbose and len(final_scores) <= 5:
+                    print(f"NegRef sample {current_sample_idx}: {final_score:.4f}")
             
-            if hasattr(ncm, 'use_energy') and ncm.use_energy:
-                score = ncm.compute_energy_score(feat_i).item()
-            else:
-                scores_i = ncm.forward(feat_i)
-                score = scores_i.max().item() if scores_i.numel() > 0 else -1000
-            
-            view_scores.append(score)
+            current_sample_idx = s_idx
+            view_scores = []
         
+        # 점수 계산
+        feat_i = features[i:i+1].to(device)
+        
+        if hasattr(ncm, 'use_energy') and ncm.use_energy:
+            score = ncm.compute_energy_score(feat_i).item()
+        else:
+            scores_i = ncm.forward(feat_i)
+            score = scores_i.max().item() if scores_i.numel() > 0 else -1000
+        
+        view_scores.append(score)
+        del feat_i
+    
+    # 마지막 샘플 처리
+    if view_scores:
         if aggregation == 'median':
             final_score = np.median(view_scores)
         else:
             final_score = np.mean(view_scores)
-        scores.append(final_score)
+        final_scores.append(final_score)
     
-    return np.array(scores[:max_eval])
-
+    # 메모리 정리
+    del features
+    torch.cuda.empty_cache()
+    
+    if verbose:
+        print(f"📊 NegRef processed: {len(final_scores)} samples (no repeats)")
+    
+    return np.array(final_scores[:max_eval])
 
 # === 기존 최댓값 기반 함수들 (개선) ===
 
@@ -841,7 +1107,6 @@ def extract_scores_impostor_negref(model, ncm, negref_file: str, transform, devi
     return np.array([])
 
 
-# ✖️ 중복 제거: balance_impostor_scores는 하나만 유지
 def balance_impostor_scores(s_between: np.ndarray, s_unknown: np.ndarray, s_negref: np.ndarray,
                            ratio: Tuple[float, float, float] = (0.5, 0.0, 0.5),
                            total: int = 4000) -> np.ndarray:
