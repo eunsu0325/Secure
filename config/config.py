@@ -109,10 +109,53 @@ class Openset:
     tta_augmentation_strength: float = 0.5  # 증강 강도 (0.0~1.0)
     tta_aggregation: str = 'median'  # 'median' or 'mean' for scores
     
-    # 🫐 TTA 반복 설정 추가
-    tta_n_repeats: int = 1  # TTA 반복 횟수 (기본값 1)
-    tta_repeat_aggregation: str = 'median'  # 반복 간 집계 방법 'median' or 'mean'
+    # 🪻 기존 TTA 반복 설정 (backward compatibility)
+    # tta_n_repeats: int = 1  # TTA 반복 횟수 (기본값 1)
+    # tta_repeat_aggregation: str = 'median'  # 반복 간 집계 방법 'median' or 'mean'
+    # tta_verbose: bool = False  # TTA 디버깅 출력
+    
+    # 🎾 TTA 반복 설정 (기존 필드는 backward compatibility 유지)
+    tta_n_repeats: int = 1  # 전체 기본값 (타입별 설정이 없을 때 사용)
+    tta_repeat_aggregation: str = 'median'  # 반복 간 집계 방법
     tta_verbose: bool = False  # TTA 디버깅 출력
+    
+    # 🎾 타입별 독립적인 TTA 반복 설정 추가
+    tta_n_repeats_genuine: Optional[int] = None      # Genuine 점수용
+    tta_n_repeats_between: Optional[int] = None      # Between impostor용
+    tta_n_repeats_negref: Optional[int] = None       # NegRef impostor용
+    
+    # 🎾 Impostor 점수 비율 설정 추가
+    impostor_ratio_between: float = 0.3   # Between impostor 비율 (기본 30%)
+    impostor_ratio_unknown: float = 0.0   # Unknown 비율 (현재 미사용)
+    impostor_ratio_negref: float = 0.7    # NegRef 비율 (기본 70%)
+    impostor_balance_total: int = 4000    # 균형 맞출 총 샘플 수
+    
+    def __post_init__(self):
+        """타입별 반복 설정이 없으면 기본값 사용"""
+        # 🎾 Genuine: 기본값 사용
+        if self.tta_n_repeats_genuine is None:
+            self.tta_n_repeats_genuine = self.tta_n_repeats
+        
+        # 🎾 Between: 기본값 사용
+        if self.tta_n_repeats_between is None:
+            self.tta_n_repeats_between = self.tta_n_repeats
+        
+        # 🎾 NegRef: 메모리 절약을 위해 기본 1 (명시적 설정이 없을 때만)
+        if self.tta_n_repeats_negref is None:
+            # 전체 기본값이 1이면 그대로, 아니면 메모리 절약 위해 1로
+            self.tta_n_repeats_negref = 1 if self.tta_n_repeats > 1 else self.tta_n_repeats
+        
+        # 🎾 비율 정규화 및 검증
+        total_ratio = self.impostor_ratio_between + self.impostor_ratio_unknown + self.impostor_ratio_negref
+        if abs(total_ratio) < 1e-6:  # 모든 비율이 0인 경우
+            # 기본값으로 복원
+            self.impostor_ratio_between = 0.3
+            self.impostor_ratio_unknown = 0.0
+            self.impostor_ratio_negref = 0.7
+        elif abs(total_ratio - 1.0) > 1e-6:  # 합이 1이 아닌 경우 정규화
+            self.impostor_ratio_between = self.impostor_ratio_between / total_ratio
+            self.impostor_ratio_unknown = self.impostor_ratio_unknown / total_ratio
+            self.impostor_ratio_negref = self.impostor_ratio_negref / total_ratio
 
 @dataclasses.dataclass
 class Negative:

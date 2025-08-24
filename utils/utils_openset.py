@@ -509,7 +509,8 @@ def extract_scores_genuine_tta(
     n_repeats: int = 1,  # 🫐 추가
     repeat_aggregation: str = 'median',  # 🫐 추가
     verbose: bool = False,  # 🫐 추가
-    seed: int = 42  # 🫐 시드 파라미터 추가
+    seed: int = 42,  # 🫐 시드 파라미터 추가
+    # 🪻 force_memory_save: bool = False  # 삭제 (NegRef에만 적용)
 ) -> np.ndarray:
     """TTA genuine 점수 - 반복 지원 및 최적화 버전"""
     if not dev_paths:
@@ -529,7 +530,8 @@ def extract_scores_genuine_tta(
     for idx, (path, label) in enumerate(tqdm(
         zip(dev_paths, dev_labels),
         desc="Extracting genuine scores",
-        total=len(dev_paths)
+        total=len(dev_paths),
+        disable=not verbose  # 🎾 verbose 설정에 따라 프로그레스 바 제어
     )):
         if hasattr(ncm, 'class_means_dict') and label not in ncm.class_means_dict:
             continue
@@ -697,7 +699,9 @@ def extract_scores_impostor_between_tta(
     sample_idx = 0
     pair_count = 0
     
-    for cls_id, cls_paths in tqdm(by_class.items(), desc="Processing impostor between"):
+    for cls_id, cls_paths in tqdm(by_class.items(), 
+                                  desc="Processing impostor between",
+                                  disable=not verbose):  # 🎾
         if pair_count >= max_pairs:
             break
         
@@ -837,11 +841,12 @@ def extract_scores_impostor_negref_tta(
     aug_strength: float = 0.5, aggregation: str = 'median',
     max_eval: int = 5000, img_size: int = 128, channels: int = 1,
     n_repeats: int = 1, repeat_aggregation: str = 'median',
-    verbose: bool = False, seed: int = 42
+    verbose: bool = False, seed: int = 42,
+    force_memory_save: bool = False  # 🎾 메모리 절약 강제 설정 추가
 ) -> np.ndarray:
     """
-    TTA negref impostor - NegRef는 반복 비활성화 (메모리 절약)
-    🔥 NegRef는 외부 데이터이므로 반복의 이득이 적음
+    TTA negref impostor - 설정 가능한 반복 지원
+    🎾 force_memory_save=True면 n_repeats를 1로 강제
     """
     paths, _ = load_paths_labels_from_txt(negref_file)
     if not paths:
@@ -855,48 +860,60 @@ def extract_scores_impostor_negref_tta(
     final_scores = []
     base_seed = seed
     
-    # 🔥 NegRef는 반복 강제 비활성화 (메모리 절약)
-    effective_repeats = 1  # NegRef는 항상 1번만
-    if verbose:
-        print(f"📌 NegRef: Forcing n_repeats=1 (was {n_repeats}) for memory efficiency")
+    # 🎾 메모리 절약 모드 체크
+    effective_repeats = n_repeats
+    if force_memory_save and n_repeats > 1:
+        effective_repeats = 1
+        if verbose:
+            print(f"📌 NegRef: Memory save mode - forcing n_repeats=1 (was {n_repeats})")
+    else:
+        # 🎾 사용자 설정 그대로 사용
+        if verbose and n_repeats > 1:
+            print(f"📌 NegRef: Using {n_repeats} repeat(s) as configured")
+            print(f"   ⚠️ Note: High repeat counts may use significant memory")
     
-    # 전체 뷰 수집 (반복 없이)
+    # 전체 뷰 수집
     all_views = []
     sample_info = []
     
-    for idx, path in enumerate(tqdm(paths[:max_eval], desc="Processing negref")):
+    for idx, path in enumerate(tqdm(paths[:max_eval], 
+                                    desc="Processing negref",
+                                    disable=not verbose)):  # 🎾
         try:
             img = _open_with_channels(path, channels)
         except:
             continue
         
-        # 🔥 반복 없이 1회만 처리
-        torch.manual_seed(base_seed + idx)
-        np.random.seed(base_seed + idx)
-        random.seed(base_seed + idx)
-        
-        light_aug = get_light_augmentation(aug_strength, img_size)
-        
-        # 뷰 생성 (반복 없음)
-        if include_original:
-            all_views.append(transform(img))
-            sample_info.append((idx, 0, 0))
+        # 🎾 설정된 반복 횟수만큼 처리
+        for repeat_idx in range(effective_repeats):
+            # 재현성 위한 시드 설정
+            seed_offset = idx * 1000 + repeat_idx
+            torch.manual_seed(base_seed + seed_offset)
+            np.random.seed(base_seed + seed_offset)
+            random.seed(base_seed + seed_offset)
             
-            for v_idx in range(1, n_views):
-                aug_img = light_aug(img)
-                all_views.append(transform(aug_img))
-                sample_info.append((idx, 0, v_idx))
-        else:
-            for v_idx in range(n_views):
-                aug_img = light_aug(img)
-                all_views.append(transform(aug_img))
-                sample_info.append((idx, 0, v_idx))
+            light_aug = get_light_augmentation(aug_strength, img_size)
+            
+            # 뷰 생성
+            if include_original and repeat_idx == 0:
+                all_views.append(transform(img))
+                sample_info.append((idx, repeat_idx, 0))
+                
+                for v_idx in range(1, n_views):
+                    aug_img = light_aug(img)
+                    all_views.append(transform(aug_img))
+                    sample_info.append((idx, repeat_idx, v_idx))
+            else:
+                for v_idx in range(n_views):
+                    aug_img = light_aug(img)
+                    all_views.append(transform(aug_img))
+                    sample_info.append((idx, repeat_idx, v_idx))
     
     if not all_views:
         return np.array([])
     
-    # 🔥 배치 처리 (메모리 효율적)
-    batch_size = 64  # NegRef는 반복이 없으므로 더 큰 배치 가능
+    # 🎾 배치 처리 (메모리 효율적)
+    batch_size = 64 if effective_repeats == 1 else 32  # 반복이 많으면 배치 크기 축소
     features_list = []
     
     for i in range(0, len(all_views), batch_size):
@@ -923,24 +940,60 @@ def extract_scores_impostor_negref_tta(
     features = torch.cat(features_list, dim=0)
     features = F.normalize(features, p=2, dim=1, eps=1e-12)
     
-    # 점수 계산 (반복 없음)
+    # 🎾 점수 계산 (반복 지원)
     current_sample_idx = -1
+    repeat_scores = []
     view_scores = []
     
-    for i, (s_idx, _, v_idx) in enumerate(sample_info):
+    for i, (s_idx, r_idx, v_idx) in enumerate(sample_info):
+        # 새로운 샘플 시작
         if s_idx != current_sample_idx:
-            if current_sample_idx >= 0 and view_scores:
-                # 뷰 집계
-                if aggregation == 'median':
-                    final_score = np.median(view_scores)
-                else:
-                    final_score = np.mean(view_scores)
-                final_scores.append(final_score)
+            # 이전 샘플 마무리
+            if current_sample_idx >= 0:
+                # 남은 뷰 점수 처리
+                if view_scores:
+                    if aggregation == 'median':
+                        repeat_score = np.median(view_scores)
+                    else:
+                        repeat_score = np.mean(view_scores)
+                    repeat_scores.append(repeat_score)
                 
-                if verbose and len(final_scores) <= 5:
-                    print(f"NegRef sample {current_sample_idx}: {final_score:.4f}")
+                # 최종 점수 계산
+                if repeat_scores:
+                    if effective_repeats > 1 and repeat_aggregation == 'median':
+                        final_score = np.median(repeat_scores)
+                    elif effective_repeats > 1:
+                        final_score = np.mean(repeat_scores)
+                    else:
+                        final_score = repeat_scores[0]  # 단일 반복
+                    
+                    final_scores.append(final_score)
+                    
+                    if verbose and len(final_scores) <= 5:
+                        if effective_repeats > 1:
+                            print(f"NegRef sample {current_sample_idx}:")
+                            for r_i, r_s in enumerate(repeat_scores):
+                                print(f"  Repeat {r_i+1}: {r_s:.4f}")
+                            print(f"  Final ({repeat_aggregation}): {final_score:.4f}")
+                        else:
+                            print(f"NegRef sample {current_sample_idx}: {final_score:.4f}")
             
             current_sample_idx = s_idx
+            repeat_scores = []
+            current_repeat_idx = -1
+            view_scores = []
+        
+        # 새로운 반복 시작
+        if r_idx != current_repeat_idx:
+            if current_repeat_idx >= 0 and view_scores:
+                # 이전 반복의 점수 계산
+                if aggregation == 'median':
+                    repeat_score = np.median(view_scores)
+                else:
+                    repeat_score = np.mean(view_scores)
+                repeat_scores.append(repeat_score)
+            
+            current_repeat_idx = r_idx
             view_scores = []
         
         # 점수 계산
@@ -958,9 +1011,19 @@ def extract_scores_impostor_negref_tta(
     # 마지막 샘플 처리
     if view_scores:
         if aggregation == 'median':
-            final_score = np.median(view_scores)
+            repeat_score = np.median(view_scores)
         else:
-            final_score = np.mean(view_scores)
+            repeat_score = np.mean(view_scores)
+        repeat_scores.append(repeat_score)
+    
+    if repeat_scores:
+        if effective_repeats > 1 and repeat_aggregation == 'median':
+            final_score = np.median(repeat_scores)
+        elif effective_repeats > 1:
+            final_score = np.mean(repeat_scores)
+        else:
+            final_score = repeat_scores[0]
+        
         final_scores.append(final_score)
     
     # 메모리 정리
@@ -968,7 +1031,9 @@ def extract_scores_impostor_negref_tta(
     torch.cuda.empty_cache()
     
     if verbose:
-        print(f"📊 NegRef processed: {len(final_scores)} samples (no repeats)")
+        print(f"📊 NegRef processed: {len(final_scores)} samples")
+        if effective_repeats > 1:
+            print(f"   with {effective_repeats} repeats per sample")
     
     return np.array(final_scores[:max_eval])
 
@@ -1107,10 +1172,19 @@ def extract_scores_impostor_negref(model, ncm, negref_file: str, transform, devi
     return np.array([])
 
 
+# 🪻 기존 함수 시그니처
+# def balance_impostor_scores(s_between: np.ndarray, s_unknown: np.ndarray, s_negref: np.ndarray,
+#                            ratio: Tuple[float, float, float] = (0.5, 0.0, 0.5),
+#                            total: int = 4000) -> np.ndarray:
+
+# 🎾 수정된 함수 - 동적 비율 지원
 def balance_impostor_scores(s_between: np.ndarray, s_unknown: np.ndarray, s_negref: np.ndarray,
                            ratio: Tuple[float, float, float] = (0.5, 0.0, 0.5),
                            total: int = 4000) -> np.ndarray:
-    """impostor 점수 균형 맞추기 - None 안전 버전"""
+    """
+    impostor 점수 균형 맞추기 - None 안전 버전
+    🎾 ratio 파라미터를 동적으로 받아서 처리
+    """
     
     sources = []
     weights = []
@@ -1156,6 +1230,16 @@ def balance_impostor_scores(s_between: np.ndarray, s_unknown: np.ndarray, s_negr
     
     if not out:
         return np.array([])
+    
+    # 🎾 실제 사용된 샘플 수 로그 (디버깅용)
+    actual_counts = [len(a) for a in out]
+    if sum(actual_counts) != total and len(actual_counts) > 1:
+        # 실제 비율이 목표와 다를 때만 출력
+        actual_ratio = [c/sum(actual_counts) for c in actual_counts]
+        if abs(actual_ratio[0] - normalized_weights[0]) > 0.05:  # 5% 이상 차이날 때
+            print(f"   📊 Actual impostor ratio: "
+                  f"Between={actual_counts[0]} ({actual_ratio[0]:.1%}), "
+                  f"NegRef={actual_counts[-1]} ({actual_ratio[-1]:.1%})")
     
     return np.concatenate(out)
 

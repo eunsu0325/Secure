@@ -294,9 +294,16 @@ class SCRTrainer:
                     print(f"   Include original: {self.openset_config.tta_include_original}")
                     print(f"   Augmentation: {self.openset_config.tta_augmentation_strength}")
                     print(f"   Aggregation: {self.openset_config.tta_aggregation}")
-                    # 🫐 반복 설정 출력 추가
-                    if getattr(self.openset_config, 'tta_n_repeats', 1) > 1:
-                        print(f"   Repeats: {self.openset_config.tta_n_repeats}")
+                    
+                    # 🎾 타입별 반복 설정 출력
+                    print(f"   Type-specific repeats:")
+                    print(f"     - Genuine: {self.openset_config.tta_n_repeats_genuine}")
+                    print(f"     - Between: {self.openset_config.tta_n_repeats_between}")
+                    print(f"     - NegRef: {self.openset_config.tta_n_repeats_negref}")
+                    
+                    # 🪻 기존 반복 설정 출력 삭제
+                    # if getattr(self.openset_config, 'tta_n_repeats', 1) > 1:
+                    #     print(f"   Repeats: {self.openset_config.tta_n_repeats}")
                 else:
                     print("⚠️ TTA requested but functions not available")
                     self.use_tta = False
@@ -711,14 +718,20 @@ class SCRTrainer:
     
     @torch.no_grad()
     def _calibrate_threshold(self):
-        """임계치 캘리브레이션 (🎯 TTA 지원, 🔧 channels 전달)"""
+        """임계치 캘리브레이션 (🎾 타입별 독립 TTA 반복, 동적 비율)"""
         
         # ⭐️ 스코어 모드 확인
         score_mode = getattr(self.openset_config, 'score_mode', 'max')
         use_tta = self.use_tta and TTA_FUNCTIONS_AVAILABLE  # 🥩 TTA 체크
         
-        # 🫐 TTA 반복 설정 가져오기
-        n_repeats = getattr(self.openset_config, 'tta_n_repeats', 1)
+        # 🎾 타입별 독립적인 TTA 반복 설정 가져오기
+        n_repeats_genuine = getattr(self.openset_config, 'tta_n_repeats_genuine', 1)
+        n_repeats_between = getattr(self.openset_config, 'tta_n_repeats_between', 1)
+        n_repeats_negref = getattr(self.openset_config, 'tta_n_repeats_negref', 1)
+        
+        # 🪻 기존 통합 반복 설정 삭제
+        # n_repeats = getattr(self.openset_config, 'tta_n_repeats', 1)
+        
         repeat_agg = getattr(self.openset_config, 'tta_repeat_aggregation', 'median')
         tta_verbose = getattr(self.openset_config, 'tta_verbose', False)
         
@@ -732,7 +745,8 @@ class SCRTrainer:
         # 🥩 모드 표시
         mode_str = f"{'ENERGY' if score_mode == 'energy' else 'MAX'}"
         if use_tta:
-            mode_str += f" + TTA(n={self.openset_config.tta_n_views}, repeats={n_repeats})"
+            # 🎾 타입별 반복 정보 표시
+            mode_str += f" + TTA(views={self.openset_config.tta_n_views})"
         
         # ⭐️ 모드별 설정
         if score_mode == 'energy' and self.use_energy_score and ENERGY_FUNCTIONS_AVAILABLE:
@@ -743,11 +757,13 @@ class SCRTrainer:
             self.ncm.use_energy = False
             print(f"📊 Using MAX scores for calibration {mode_str}")
         
-        # 🫐 반복 설정 출력
-        if use_tta and n_repeats > 1:
-            print(f"🔄 TTA with {n_repeats} repeats enabled")
-            print(f"   Total evaluations per sample: {self.openset_config.tta_n_views * n_repeats}")
-            print(f"   Repeat aggregation: {repeat_agg}")
+        # 🎾 타입별 반복 설정 출력
+        if use_tta:
+            print(f"🔄 TTA with type-specific repeats:")
+            print(f"   Genuine: {self.openset_config.tta_n_views} views × {n_repeats_genuine} repeats = {self.openset_config.tta_n_views * n_repeats_genuine} evals")
+            print(f"   Between: {self.openset_config.tta_n_views} views × {n_repeats_between} repeats = {self.openset_config.tta_n_views * n_repeats_between} evals")
+            print(f"   NegRef: {self.openset_config.tta_n_views} views × {n_repeats_negref} repeats = {self.openset_config.tta_n_views * n_repeats_negref} evals")
+            print(f"   Aggregation: {repeat_agg}")
         
         print(f"\n📊 Extracting scores for {self.openset_config.threshold_mode.upper()} calibration...")
         
@@ -760,7 +776,7 @@ class SCRTrainer:
         
         # 🥩 TTA 모드에 따른 점수 추출
         if use_tta:
-            # TTA 버전 사용
+            # 🎾 타입별 독립적인 반복 횟수 사용
             s_genuine = extract_scores_genuine_tta(
                 self.model, self.ncm,
                 all_dev_paths, all_dev_labels,
@@ -771,10 +787,10 @@ class SCRTrainer:
                 aggregation=self.openset_config.tta_aggregation,
                 img_size=img_size,
                 channels=channels,
-                n_repeats=n_repeats,  # 🫐 추가
-                repeat_aggregation=repeat_agg,  # 🫐 추가
-                verbose=tta_verbose,  # 🫐 추가
-                seed=seed  # 🫐 추가
+                n_repeats=n_repeats_genuine,  # 🎾 타입별 설정
+                repeat_aggregation=repeat_agg,
+                verbose=tta_verbose,
+                seed=seed
             )
             
             s_imp_between = extract_scores_impostor_between_tta(
@@ -788,11 +804,16 @@ class SCRTrainer:
                 max_pairs=2000,
                 img_size=img_size,
                 channels=channels,
-                n_repeats=n_repeats,  # 🫐 추가
-                repeat_aggregation=repeat_agg,  # 🫐 추가
-                verbose=tta_verbose,  # 🫐 추가
-                seed=seed  # 🫐 추가
+                n_repeats=n_repeats_between,  # 🎾 타입별 설정
+                repeat_aggregation=repeat_agg,
+                verbose=tta_verbose,
+                seed=seed
             )
+            
+            # 🎾 NegRef에는 force_memory_save 옵션 추가 가능
+            force_memory_save = n_repeats_negref > 3  # 3회 초과시 메모리 절약 권장
+            if force_memory_save and n_repeats_negref > 1:
+                print(f"   ⚠️ NegRef repeats={n_repeats_negref} may use significant memory")
             
             s_imp_negref = extract_scores_impostor_negref_tta(
                 self.model, self.ncm,
@@ -805,10 +826,11 @@ class SCRTrainer:
                 max_eval=self.openset_config.negref_max_eval,
                 img_size=img_size,
                 channels=channels,
-                n_repeats=n_repeats,  # 🫐 추가
-                repeat_aggregation=repeat_agg,  # 🫐 추가
-                verbose=tta_verbose,  # 🫐 추가
-                seed=seed  # 🫐 추가
+                n_repeats=n_repeats_negref,  # 🎾 타입별 설정
+                repeat_aggregation=repeat_agg,
+                verbose=tta_verbose,
+                seed=seed,
+                force_memory_save=False  # 🎾 사용자 설정 그대로 사용
             )
         else:
             # ⭐️ 단일뷰 - 모드에 따른 점수 추출
@@ -861,22 +883,36 @@ class SCRTrainer:
                     channels=channels
                 )
         
-        # 균형 맞추기
+        # 🎾 동적 비율로 균형 맞추기
+        impostor_ratio = (
+            self.openset_config.impostor_ratio_between,
+            self.openset_config.impostor_ratio_unknown,
+            self.openset_config.impostor_ratio_negref
+        )
+        
         s_impostor = balance_impostor_scores(
             s_imp_between,
             None,  # Unknown 제거
             s_imp_negref,
-            ratio=(0.3, 0.0, 0.7)
+            ratio=impostor_ratio,  # 🎾 동적 비율 사용
+            total=self.openset_config.impostor_balance_total  # 🎾 설정 가능한 총 샘플 수
         )
         
+        # 🪻 기존 고정 비율 삭제
+        # s_impostor = balance_impostor_scores(
+        #     s_imp_between,
+        #     None,  # Unknown 제거
+        #     s_imp_negref,
+        #     ratio=(0.3, 0.0, 0.7)
+        # )
+        
         print(f"   Genuine: {len(s_genuine)} scores")
-        print(f"   Impostor: {len(s_impostor)} scores (Between + NegRef)")
+        print(f"   Impostor: {len(s_impostor)} scores")
+        print(f"     - Target ratio: Between={impostor_ratio[0]:.0%}, NegRef={impostor_ratio[2]:.0%}")
+        
         # 🥩 TTA 정보 추가
         if use_tta:
             print(f"   TTA aggregation: {self.openset_config.tta_aggregation}")
-            # 🫐 반복 정보 추가
-            if n_repeats > 1:
-                print(f"   TTA repeats: {n_repeats}")
         
         # 캘리브레이션
         if len(s_genuine) >= 10 and len(s_impostor) >= 10:
@@ -1238,4 +1274,4 @@ class SCRTrainer:
             openset_data = checkpoint['openset_data']
             self.ncm.tau_s = openset_data.get('tau_s')
             self.registered_users = set(openset_data.get('registered_users', []))
-            self.evaluation_history = openset_data.get('evaluation_history', [])  
+            self.evaluation_history = openset_data.get('evaluation_history', [])

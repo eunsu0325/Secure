@@ -6,6 +6,7 @@ CCNet + SCR for Continual Learning
 ⭐️ Energy Score Support Added
 🎯 TTA Support Added
 🫐 TTA Repeats Support Added
+🎾 Type-specific TTA Repeats & Impostor Ratios Added
 """
 
 import os
@@ -399,19 +400,26 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
         if use_tta:
             openset_metrics['tta_enabled'] = True
             openset_metrics['tta_views'] = config.openset.tta_n_views
-            # 🫐 TTA 반복 정보 추가
-            if hasattr(config.openset, 'tta_n_repeats') and config.openset.tta_n_repeats > 1:
-                openset_metrics['tta_repeats'] = config.openset.tta_n_repeats
-                openset_metrics['tta_repeat_aggregation'] = config.openset.tta_repeat_aggregation
+            
+            # 🪻 기존 통합 반복 정보 삭제
+            # if hasattr(config.openset, 'tta_n_repeats') and config.openset.tta_n_repeats > 1:
+            #     openset_metrics['tta_repeats'] = config.openset.tta_n_repeats
+            #     openset_metrics['tta_repeat_aggregation'] = config.openset.tta_repeat_aggregation
+            
+            # 🎾 타입별 반복 정보 추가
+            openset_metrics['tta_repeats_genuine'] = config.openset.tta_n_repeats_genuine
+            openset_metrics['tta_repeats_between'] = config.openset.tta_n_repeats_between
+            openset_metrics['tta_repeats_negref'] = config.openset.tta_n_repeats_negref
+            openset_metrics['tta_repeat_aggregation'] = config.openset.tta_repeat_aggregation
         else:
             openset_metrics['tta_enabled'] = False
         
         print(f"Evaluating on {len(known_indices)} known + {len(unknown_indices)} unknown samples")
         if use_tta:
             print(f"   🎯 Using TTA with {config.openset.tta_n_views} views")
-            # 🫐 반복 정보 출력
-            if hasattr(config.openset, 'tta_n_repeats') and config.openset.tta_n_repeats > 1:
-                print(f"   🔄 TTA repeats: {config.openset.tta_n_repeats}")
+            # 🎾 타입별 반복 정보 출력
+            print(f"   🔄 Type-specific repeats: G={config.openset.tta_n_repeats_genuine}, "
+                  f"B={config.openset.tta_n_repeats_between}, N={config.openset.tta_n_repeats_negref}")
         
         return accuracy, openset_metrics
     
@@ -476,11 +484,24 @@ def main(args):
             print(f"      Augmentation: {config_obj.openset.tta_augmentation_strength}")
             print(f"      Aggregation: {config_obj.openset.tta_aggregation}")
             
-            # 🫐 TTA 반복 정보 추가
-            if hasattr(config_obj.openset, 'tta_n_repeats') and config_obj.openset.tta_n_repeats > 1:
-                print(f"   🔄 TTA Repeats: {config_obj.openset.tta_n_repeats}")
-                print(f"      Repeat aggregation: {config_obj.openset.tta_repeat_aggregation}")
-                print(f"      Total evaluations per sample: {config_obj.openset.tta_n_views * config_obj.openset.tta_n_repeats}")
+            # 🪻 기존 통합 반복 정보 삭제
+            # if hasattr(config_obj.openset, 'tta_n_repeats') and config_obj.openset.tta_n_repeats > 1:
+            #     print(f"   🔄 TTA Repeats: {config_obj.openset.tta_n_repeats}")
+            #     print(f"      Repeat aggregation: {config_obj.openset.tta_repeat_aggregation}")
+            
+            # 🎾 타입별 TTA 반복 정보 추가
+            print(f"   🔄 Type-specific TTA Repeats:")
+            print(f"      Genuine: {config_obj.openset.tta_n_repeats_genuine} repeats")
+            print(f"      Between: {config_obj.openset.tta_n_repeats_between} repeats")
+            print(f"      NegRef: {config_obj.openset.tta_n_repeats_negref} repeats")
+            print(f"      Repeat aggregation: {config_obj.openset.tta_repeat_aggregation}")
+        
+        # 🎾 Impostor 비율 정보 추가
+        print(f"   📊 Impostor Ratios:")
+        print(f"      Between: {config_obj.openset.impostor_ratio_between*100:.0f}%")
+        print(f"      Unknown: {config_obj.openset.impostor_ratio_unknown*100:.0f}%")
+        print(f"      NegRef: {config_obj.openset.impostor_ratio_negref*100:.0f}%")
+        print(f"      Total samples: {config_obj.openset.impostor_balance_total}")
         
         # FAR/EER 모드 표시
         if config_obj.openset.threshold_mode == 'far':
@@ -632,9 +653,23 @@ def main(args):
             'augmentation_strength': config_obj.openset.tta_augmentation_strength,
             'aggregation': config_obj.openset.tta_aggregation,
             'agree_k': config_obj.openset.tta_agree_k,
-            # 🫐 TTA 반복 설정 추가
-            'n_repeats': getattr(config_obj.openset, 'tta_n_repeats', 1),
-            'repeat_aggregation': getattr(config_obj.openset, 'tta_repeat_aggregation', 'median')
+            
+            # 🪻 기존 통합 반복 설정 삭제
+            # 'n_repeats': getattr(config_obj.openset, 'tta_n_repeats', 1),
+            
+            # 🎾 타입별 반복 설정 추가
+            'n_repeats_genuine': config_obj.openset.tta_n_repeats_genuine,
+            'n_repeats_between': config_obj.openset.tta_n_repeats_between,
+            'n_repeats_negref': config_obj.openset.tta_n_repeats_negref,
+            'repeat_aggregation': config_obj.openset.tta_repeat_aggregation
+        } if openset_enabled else None,
+        
+        # 🎾 Impostor 비율 설정 저장
+        'impostor_ratio_config': {
+            'between': config_obj.openset.impostor_ratio_between,
+            'unknown': config_obj.openset.impostor_ratio_unknown,
+            'negref': config_obj.openset.impostor_ratio_negref,
+            'total_samples': config_obj.openset.impostor_balance_total
         } if openset_enabled else None
     }
     
@@ -757,9 +792,12 @@ def main(args):
                 # 🥩 TTA 정보 출력
                 if openset_metrics.get('tta_enabled'):
                     print(f"   🎯 TTA: {openset_metrics.get('tta_views', 1)} views")
-                    # 🫐 TTA 반복 정보 출력
-                    if openset_metrics.get('tta_repeats', 1) > 1:
-                        print(f"   🔄 TTA repeats: {openset_metrics.get('tta_repeats', 1)}")
+                    
+                    # 🎾 타입별 반복 정보 출력
+                    print(f"   🔄 Type-specific repeats:")
+                    print(f"      Genuine: {openset_metrics.get('tta_repeats_genuine', 1)}")
+                    print(f"      Between: {openset_metrics.get('tta_repeats_between', 1)}")
+                    print(f"      NegRef: {openset_metrics.get('tta_repeats_negref', 1)}")
             
             # Trainer의 오픈셋 평가 히스토리도 저장
             if hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
@@ -825,10 +863,13 @@ def main(args):
         # 🥩 TTA 최종 정보
         if final_result.get('tta_enabled'):
             print(f"   🎯 TTA: Enabled ({final_result.get('tta_views', 1)} views)")
-            # 🫐 TTA 반복 최종 정보
-            if final_result.get('tta_repeats', 1) > 1:
-                print(f"   🔄 TTA Repeats: {final_result.get('tta_repeats', 1)}")
-                print(f"      Repeat aggregation: {final_result.get('tta_repeat_aggregation', 'median')}")
+            
+            # 🎾 타입별 반복 최종 정보
+            print(f"   🔄 Type-specific Repeats:")
+            print(f"      Genuine: {final_result.get('tta_repeats_genuine', 1)}")
+            print(f"      Between: {final_result.get('tta_repeats_between', 1)}")
+            print(f"      NegRef: {final_result.get('tta_repeats_negref', 1)}")
+            print(f"      Aggregation: {final_result.get('tta_repeat_aggregation', 'median')}")
     
     print(f"\nTotal Training Time: {(time.time() - start_time)/60:.1f} minutes")
     
@@ -869,10 +910,21 @@ def main(args):
             summary['final_openset']['tta_config'] = {
                 'n_views': final_result.get('tta_views', 1),
                 'aggregation': config_obj.openset.tta_aggregation,
-                # 🫐 TTA 반복 정보 추가
-                'n_repeats': final_result.get('tta_repeats', 1),
+                
+                # 🎾 타입별 반복 설정 추가
+                'n_repeats_genuine': final_result.get('tta_repeats_genuine', 1),
+                'n_repeats_between': final_result.get('tta_repeats_between', 1),
+                'n_repeats_negref': final_result.get('tta_repeats_negref', 1),
                 'repeat_aggregation': final_result.get('tta_repeat_aggregation', 'median')
             }
+        
+        # 🎾 Impostor 비율 설정 추가
+        summary['final_openset']['impostor_ratios'] = {
+            'between': config_obj.openset.impostor_ratio_between,
+            'unknown': config_obj.openset.impostor_ratio_unknown,
+            'negref': config_obj.openset.impostor_ratio_negref,
+            'total_samples': config_obj.openset.impostor_balance_total
+        }
     
     summary_path = os.path.join(results_dir, 'summary.json')
     with open(summary_path, 'w') as f:
@@ -882,7 +934,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='SCR Training for CCNet with Open-set Support (Energy Score + TTA + Repeats)')
+    parser = argparse.ArgumentParser(description='SCR Training for CCNet with Open-set Support (Energy Score + TTA + Type-specific Repeats)')
     parser.add_argument('--config', type=str, default='config/config.yaml',
                         help='Path to config file')
     parser.add_argument('--seed', type=int, default=42,

@@ -84,7 +84,7 @@ Openset:
   
   # 데이터 분할
   dev_ratio: 0.3             # Dev 세트 비율
-  negref_max_eval: 6000      # NegRef 최대 샘플
+  negref_max_eval: 2000      # NegRef 최대 샘플
   
   # 로깅
   verbose_calibration: true  # 상세 출력
@@ -97,12 +97,26 @@ Openset:
   tta_include_original: true  # 원본 포함 권장
   tta_agree_k: 0  # 0=과반 자동, 2=2개 이상 동의
   tta_augmentation_strength: 1.0  # 0.3~0.7 권장
-  tta_aggregation: 'median'  # 'median' or 'mean'
+  tta_aggregation: 'mean'  # 'median' or 'mean'
   
-  # 🫐 TTA 반복 설정 추가
-  tta_n_repeats: 3  # TTA 반복 횟수
-  tta_repeat_aggregation: 'median'  # 반복 간 집계 방법
-  tta_verbose: false  # TTA 디버깅 출력
+  # 🪻 기존 TTA 반복 설정
+  # tta_n_repeats: 3  # TTA 반복 횟수
+  
+  # 🎾 타입별 독립적인 TTA 반복 설정
+  tta_n_repeats_genuine: 3      # Genuine 점수: 3번 반복 (정확도 중요)
+  tta_n_repeats_between: 3      # Between impostor: 2번 반복 (균형)
+  tta_n_repeats_negref: 1       # NegRef: 1번 (메모리 절약)
+  tta_repeat_aggregation: 'mean'  # 반복 간 집계 방법
+  tta_verbose: true  # TTA 디버깅 출력
+  
+  # 🎾 Impostor 점수 비율 설정 (합이 1.0이 되어야 함)
+  impostor_ratio_between: 0.7    # Between impostor 30%
+  impostor_ratio_unknown: 0.0    # Unknown 0% (현재 미사용)
+  impostor_ratio_negref: 0.3     # NegRef 70%
+  impostor_balance_total: 4000   # 균형 맞출 총 샘플 수
+  
+  # (선택) 전체 기본값 - 타입별 설정이 없을 때 사용
+  # tta_n_repeats: 3  # 비활성화 (타입별 설정 우선)
 
 # 🔥 네거티브 샘플 설정
 Negative:
