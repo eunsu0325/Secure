@@ -88,6 +88,38 @@ except ImportError:
         TTA_FUNCTIONS_AVAILABLE = False
 
 
+# 🍖 새로운 함수 추가: 공평한 반복 샘플링
+def get_balanced_indices(n_samples: int, target_size: int, seed_offset: int = 0) -> np.ndarray:
+    """
+    공평한 반복 샘플링
+    예: 5장 → 32개 인덱스 (각 이미지 6-7번씩)
+    
+    Args:
+        n_samples: 실제 데이터 개수 (예: 5)
+        target_size: 목표 배치 크기 (예: 32)
+        seed_offset: 재현성을 위한 시드 오프셋
+        
+    Returns:
+        공평하게 분배된 인덱스 배열
+    """
+    if n_samples >= target_size:
+        # 충분하면 기존 방식 그대로
+        return np.random.choice(n_samples, target_size, replace=False)
+    
+    # 공평한 반복 계산
+    repeat = target_size // n_samples
+    remainder = target_size % n_samples
+    
+    indices = []
+    for i in range(n_samples):
+        count = repeat + (1 if i < remainder else 0)
+        indices.extend([i] * count)
+    
+    # 재현 가능한 셔플
+    np.random.shuffle(indices)
+    return np.array(indices)
+
+
 class MemoryDataset(Dataset):
     def __init__(self, paths: List[str], labels: List[int], transform, 
                  train=True, dual_views=None, channels: int = 1):  # 🥩 channels 추가
@@ -513,13 +545,32 @@ class SCRTrainer:
             
             for iteration in range(self.config.training.iterations_per_epoch):
                 
-                # 1. 현재 데이터에서 B_n 샘플링
-                current_indices = np.random.choice(
+                # ♟️ 기존 코드 주석 처리
+                # # 1. 현재 데이터에서 B_n 샘플링
+                # current_indices = np.random.choice(
+                #     len(current_dataset),
+                #     size=min(len(current_dataset), self.config.training.scr_batch_size),
+                #     replace=False
+                # )
+                # current_subset = Subset(current_dataset, current_indices)
+                
+                # 🍖 새로운 코드: 공평한 반복 샘플링
+                # 1. 현재 데이터에서 B_n 샘플링 (공평한 반복)
+                current_indices = get_balanced_indices(
                     len(current_dataset),
-                    size=min(len(current_dataset), self.config.training.scr_batch_size),
-                    replace=False
+                    self.config.training.scr_batch_size,
+                    self.experience_count * 1000 + epoch * 100 + iteration  # 재현성을 위한 고유 시드
                 )
                 current_subset = Subset(current_dataset, current_indices)
+                
+                # 🍖 디버그 출력 (선택사항)
+                if iteration == 0 and epoch == 0:
+                    n_current = len(current_dataset)
+                    if n_current < self.config.training.scr_batch_size:
+                        print(f"📌 Upsampling {n_current} samples to {self.config.training.scr_batch_size}")
+                        # 🍖 공평성 확인 출력
+                        unique, counts = np.unique(current_indices, return_counts=True)
+                        print(f"   Sample distribution: {dict(zip(unique, counts))}")
                 
                 # 2. 메모리에서 B_M 샘플링
                 if len(self.memory_buffer) > 0:
@@ -556,6 +607,7 @@ class SCRTrainer:
                     
                     neg_in_mem = sum(1 for l in memory_labels if int(l) >= self.base_id)
                     if iteration == 0 and epoch == 0:
+                        # 🍖 수정: current_indices의 길이가 아닌 실제 subset 크기 출력
                         print(f"[DEBUG][exp{self.experience_count}] cur={len(current_indices)}, mem={len(memory_paths)}, neg_in_mem={neg_in_mem}, r0={self.r0}")
                     
                     if memory_paths:
