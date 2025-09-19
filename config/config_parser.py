@@ -102,9 +102,6 @@ class ConfigParser:
                 openset_dict['target_far'] = 0.01
             if 'verbose_calibration' not in openset_dict:
                 openset_dict['verbose_calibration'] = True
-            # ⭐️ 스코어 모드 기본값
-            if 'score_mode' not in openset_dict:
-                openset_dict['score_mode'] = 'energy'
             
             # 🥩 TTA 기본값 추가
             if 'tta_n_views' not in openset_dict:

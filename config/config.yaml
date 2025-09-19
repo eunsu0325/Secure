@@ -20,13 +20,13 @@ Model:
   projection_dim: 128
 
 Training:
-  scr_batch_size: 10
-  memory_batch_size: 16
+  scr_batch_size: 32
+  memory_batch_size: 96
   num_experiences: 100
   memory_size: 1000
   min_samples_per_class: 15
-  scr_epochs: 3
-  iterations_per_epoch: 15
+  scr_epochs: 5
+  iterations_per_epoch: 10
   num_epochs: 3000  # (사용 안 함)
   num_workers: 8
   learning_rate: 0.0001
@@ -35,8 +35,8 @@ Training:
   temperature: 0.07  # SupConLoss용
   save_interval: 1000  # (사용 안 함)
   test_interval: 5  # ⭐ 평가 및 캘리브레이션 주기
-  checkpoint_path: /content/drive/MyDrive/scr_proxy_MAX_TTA
-  results_path: /content/drive/MyDrive/scr_proxy_MAX_TTA
+  checkpoint_path: /content/drive/MyDrive/cvc
+  results_path: /content/drive/MyDrive/cvc
   gpu_ids: "0"
   ncm_momentum: 0.9
   seed: 42  # 🥩 추가!
@@ -47,7 +47,7 @@ Training:
   proxy_margin: 0.1        # Proxy Anchor margin δ
   proxy_alpha: 32          # Proxy Anchor scaling α
   proxy_lr_ratio: 10       # 프록시 학습률 배수 (백본의 10배)
-  proxy_lambda: 0.3        # 🦈 고정 가중치 (0.3 = 30% ProxyAnchor, 70% SupCon)
+  proxy_lambda: 0.4        # 🦈 고정 가중치 (0.3 = 30% ProxyAnchor, 70% SupCon)
 
 # 🐋 오픈셋 인식 설정
 Openset:
@@ -65,13 +65,10 @@ Openset:
   
   # 데이터 분할
   dev_ratio: 0.3             # Dev 세트 비율
-  negref_max_eval: 2000      # NegRef 최대 샘플
+  negref_max_eval: 100      # NegRef 최대 샘플
   
   # 로깅
   verbose_calibration: true  # 상세 출력
-
-  # ⭐️ 스코어 모드
-  score_mode: 'max'  # 'max' or 'energy'
 
   # 🥩 TTA 설정 (Test-Time Augmentation)
   tta_n_views: 3  # 1=비활성, 2~3 권장
@@ -86,15 +83,15 @@ Openset:
   # 🎾 타입별 독립적인 TTA 반복 설정
   tta_n_repeats_genuine: 3      # Genuine 점수: 3번 반복 (정확도 중요)
   tta_n_repeats_between: 3      # Between impostor: 2번 반복 (균형)
-  tta_n_repeats_negref: 1       # NegRef: 1번 (메모리 절약)
+  tta_n_repeats_negref: 0       # NegRef: 1번 (메모리 절약)
   tta_repeat_aggregation: 'mean'  # 반복 간 집계 방법
   tta_verbose: true  # TTA 디버깅 출력
   
   # 🎾 Impostor 점수 비율 설정 (합이 1.0이 되어야 함)
-  impostor_ratio_between: 0.7    # Between impostor 30%
+  impostor_ratio_between: 1.0    # Between impostor 30%
   impostor_ratio_unknown: 0.0    # Unknown 0% (현재 미사용)
-  impostor_ratio_negref: 0.3     # NegRef 70%
-  impostor_balance_total: 4000   # 균형 맞출 총 샘플 수
+  impostor_ratio_negref: 0.0     # NegRef 70%
+  impostor_balance_total: 100   # 균형 맞출 총 샘플 수
   
   # (선택) 전체 기본값 - 타입별 설정이 없을 때 사용
   # tta_n_repeats: 3  # 비활성화 (타입별 설정 우선)

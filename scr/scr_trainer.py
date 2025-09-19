@@ -9,8 +9,9 @@ from typing import Dict, List, Tuple, Optional, Set
 from tqdm import tqdm
 from PIL import Image
 import torch.nn.functional as F
+import copy
 
-from loss import SupConLoss, ProxyAnchorLoss  # 수정: ProxyContrastLoss → ProxyAnchorLoss
+from loss import SupConLoss, ProxyAnchorLoss
 from models import get_scr_transforms
 from utils.util import AverageMeter
 from utils.pretrained_loader import PretrainedLoader
@@ -189,27 +190,25 @@ class SCRTrainer:
             self.proxy_anchor_loss = None
             self.proxy_lambda = 0.0
         
-        # 옵티마이저 (프록시 파라미터 포함)
-        if self.use_proxy_anchor:
-            base_lr = config.training.learning_rate
-            proxy_lr_ratio = getattr(config.training, 'proxy_lr_ratio', 10)
-            
-            self.optimizer = optim.Adam([
-                {'params': model.parameters(), 'lr': base_lr},
-                {'params': [], 'lr': base_lr * proxy_lr_ratio}
-            ])
-        else:
-            self.optimizer = optim.Adam(
-                model.parameters(),
-                lr=config.training.learning_rate
-            )
+        # 🔥 핵심 수정: 옵티마이저 관리 개선
+        self.base_lr = config.training.learning_rate
+        self.proxy_lr_ratio = getattr(config.training, 'proxy_lr_ratio', 10) if self.use_proxy_anchor else 1
         
-        # Scheduler
+        # 초기 옵티마이저 (백본만)
+        self.optimizer = optim.Adam(
+            self.model.parameters(),
+            lr=self.base_lr
+        )
+        
+        # 스케줄러
         self.scheduler = lr_scheduler.StepLR(
             self.optimizer,
             step_size=config.training.scheduler_step_size,
             gamma=config.training.scheduler_gamma
         )
+        
+        # 옵티마이저 재생성 추적
+        self.last_num_proxies = 0
         
         # Transform
         self.train_transform = get_scr_transforms(
@@ -318,6 +317,79 @@ class SCRTrainer:
         else:
             print(f"🎲 SCRTrainer initialized with random weights")
 
+    def _recreate_optimizer_with_proxies(self):
+        """🔥 핵심: 프록시 추가 시 옵티마이저 안전 재생성"""
+        if not self.use_proxy_anchor or self.proxy_anchor_loss.proxies is None:
+            return
+        
+        current_num_proxies = self.proxy_anchor_loss.num_classes
+        
+        # 프록시 수가 변경된 경우에만 재생성
+        if current_num_proxies != self.last_num_proxies:
+            # 기존 옵티마이저 상태 백업
+            old_state_dict = None
+            try:
+                old_state_dict = copy.deepcopy(self.optimizer.state_dict())
+            except:
+                print("Warning: Could not backup optimizer state")
+            
+            # 새 옵티마이저 생성
+            param_groups = [
+                {'params': self.model.parameters(), 'lr': self.base_lr}
+            ]
+            
+            if self.proxy_anchor_loss.proxies is not None:
+                param_groups.append({
+                    'params': [self.proxy_anchor_loss.proxies], 
+                    'lr': self.base_lr * self.proxy_lr_ratio
+                })
+            
+            self.optimizer = optim.Adam(param_groups)
+            
+            # 백본 네트워크 상태 복원 시도
+            if old_state_dict is not None:
+                try:
+                    new_state_dict = self.optimizer.state_dict()
+                    
+                    # 백본 파라미터 상태만 복원
+                    backbone_params = list(self.model.parameters())
+                    for i, param in enumerate(backbone_params):
+                        param_id = id(param)
+                        
+                        # 이전 상태에서 해당 파라미터 찾기
+                        for old_param_id, old_state in old_state_dict['state'].items():
+                            if i < len(old_state_dict['param_groups'][0]['params']):
+                                new_state_dict['state'][param_id] = old_state
+                                break
+                    
+                    self.optimizer.load_state_dict(new_state_dict)
+                    print(f"✅ Optimizer state restored for backbone parameters")
+                    
+                except Exception as e:
+                    print(f"Warning: Could not restore optimizer state: {e}")
+            
+            # 스케줄러 재생성
+            old_scheduler_state = None
+            try:
+                old_scheduler_state = self.scheduler.state_dict()
+            except:
+                pass
+                
+            self.scheduler = lr_scheduler.StepLR(
+                self.optimizer,
+                step_size=self.config.training.scheduler_step_size,
+                gamma=self.config.training.scheduler_gamma
+            )
+            
+            if old_scheduler_state is not None:
+                try:
+                    self.scheduler.load_state_dict(old_scheduler_state)
+                except:
+                    pass
+            
+            self.last_num_proxies = current_num_proxies
+            print(f"🔄 Optimizer recreated with {current_num_proxies} proxies")
+
     def _dedup_negative_classes(self, paths, labels, max_per_class=1):
         """네거티브 클래스 중복 제거"""
         out_p, out_l, seen = [], [], set()
@@ -342,15 +414,14 @@ class SCRTrainer:
         
         print(f"\n=== Training Experience {self.experience_count}: User {user_id} ===")
         
-        # 프록시 추가 (새 클래스)
+        # 🔥 핵심 수정: 프록시 추가 및 옵티마이저 재생성
         if self.use_proxy_anchor:
             unique_labels = set(labels)
             real_classes = [l for l in unique_labels if l < self.base_id]
-            self.proxy_anchor_loss.add_classes(real_classes)
             
-            # 옵티마이저 업데이트
-            if self.proxy_anchor_loss.proxies is not None:
-                self.optimizer.param_groups[1]['params'] = [self.proxy_anchor_loss.proxies]
+            if real_classes:
+                self.proxy_anchor_loss.add_classes(real_classes)
+                self._recreate_optimizer_with_proxies()
         
         # 원본 labels를 보존
         original_labels = labels.copy()
@@ -463,22 +534,14 @@ class SCRTrainer:
                     
                     self.optimizer.zero_grad()
                     
-                    # Forward
+                    # Forward: CCNet이 알아서 처리 (projection 포함)
                     features_all = self.model(x)
                     
                     f1 = features_all[:batch_size]
                     f2 = features_all[batch_size:]
                     
-                    # Projection to 128D
-                    if self.model.use_projection:
-                        z_all = self.model.projection_head(F.normalize(features_all, dim=-1))
-                        z_all = F.normalize(z_all, dim=-1)
-                        
-                        z1 = z_all[:batch_size]
-                        z2 = z_all[batch_size:]
-                        features_paired = torch.stack([z1, z2], dim=1)
-                    else:
-                        features_paired = torch.stack([f1, f2], dim=1)
+                    # CCNet 결과 그대로 사용
+                    features_paired = torch.stack([f1, f2], dim=1)
                     
                     # SupConLoss
                     loss_supcon = self.criterion(features_paired, batch_labels)
@@ -486,7 +549,7 @@ class SCRTrainer:
                     # ProxyAnchorLoss 추가
                     if self.use_proxy_anchor and self.proxy_anchor_loss.proxies is not None:
                         all_labels = batch_labels.repeat(2)
-                        loss_proxy = self.proxy_anchor_loss(z_all, all_labels)
+                        loss_proxy = self.proxy_anchor_loss(features_all, all_labels)
                         
                         # 고정 가중치로 결합
                         loss = (1 - self.proxy_lambda) * loss_supcon + self.proxy_lambda * loss_proxy
@@ -500,11 +563,14 @@ class SCRTrainer:
                     
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    if self.use_proxy_anchor and self.proxy_anchor_loss.proxies is not None:
+                        torch.nn.utils.clip_grad_norm_(self.proxy_anchor_loss.proxies, max_norm=1.0)
+                    
                     self.optimizer.step()
                     
                     epoch_loss += loss.item()
             
-            if (epoch + 1) % 5 == 0:
+            if (epoch + 1) % 1 == 0:
                 avg_loss = epoch_loss / self.config.training.iterations_per_epoch
                 print(f"  Epoch [{epoch+1}/{self.config.training.scr_epochs}] Loss: {avg_loss:.4f}")
 
@@ -984,31 +1050,42 @@ class SCRTrainer:
         return accuracy
     
     def save_checkpoint(self, path: str):
-        """체크포인트 저장"""
+        """🔥 안전한 체크포인트 저장"""
         checkpoint_dict = {
             'model_state_dict': self.model.state_dict(),
             'ncm_state_dict': self.ncm.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
             'experience_count': self.experience_count,
             'memory_buffer_size': len(self.memory_buffer)
         }
         
+        # 옵티마이저 상태 안전 저장
+        try:
+            checkpoint_dict['optimizer_state_dict'] = self.optimizer.state_dict()
+            checkpoint_dict['scheduler_state_dict'] = self.scheduler.state_dict()
+        except Exception as e:
+            print(f"Warning: Could not save optimizer/scheduler state: {e}")
+        
         # ProxyAnchorLoss 관련 저장
-        if self.use_proxy_anchor:
-            checkpoint_dict['proxy_anchor_data'] = {
-                'proxies': self.proxy_anchor_loss.proxies,
-                'class_to_idx': self.proxy_anchor_loss.class_to_idx,
-                'num_classes': self.proxy_anchor_loss.num_classes
-            }
+        if self.use_proxy_anchor and self.proxy_anchor_loss.proxies is not None:
+            try:
+                checkpoint_dict['proxy_anchor_data'] = {
+                    'proxies': self.proxy_anchor_loss.proxies.detach().cpu(),
+                    'class_to_idx': self.proxy_anchor_loss.class_to_idx.copy(),
+                    'num_classes': self.proxy_anchor_loss.num_classes
+                }
+            except Exception as e:
+                print(f"Warning: Could not save proxy anchor data: {e}")
         
         # 오픈셋 관련 추가 저장
         if self.openset_enabled:
-            checkpoint_dict['openset_data'] = {
-                'tau_s': self.ncm.tau_s,
-                'registered_users': list(self.registered_users),
-                'evaluation_history': self.evaluation_history
-            }
+            try:
+                checkpoint_dict['openset_data'] = {
+                    'tau_s': self.ncm.tau_s,
+                    'registered_users': list(self.registered_users),
+                    'evaluation_history': self.evaluation_history
+                }
+            except Exception as e:
+                print(f"Warning: Could not save openset data: {e}")
         
         torch.save(checkpoint_dict, path)
     
@@ -1017,20 +1094,38 @@ class SCRTrainer:
         checkpoint = torch.load(path)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.ncm.load_state_dict(checkpoint['ncm_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         self.experience_count = checkpoint['experience_count']
+        
+        # 옵티마이저 상태 복원 시도
+        if 'optimizer_state_dict' in checkpoint:
+            try:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            except Exception as e:
+                print(f"Warning: Could not restore optimizer state: {e}")
+        
+        if 'scheduler_state_dict' in checkpoint:
+            try:
+                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            except Exception as e:
+                print(f"Warning: Could not restore scheduler state: {e}")
         
         # ProxyAnchorLoss 관련 복원
         if 'proxy_anchor_data' in checkpoint and self.use_proxy_anchor:
-            proxy_data = checkpoint['proxy_anchor_data']
-            self.proxy_anchor_loss.proxies = proxy_data.get('proxies')
-            self.proxy_anchor_loss.class_to_idx = proxy_data.get('class_to_idx', {})
-            self.proxy_anchor_loss.num_classes = proxy_data.get('num_classes', 0)
+            try:
+                proxy_data = checkpoint['proxy_anchor_data']
+                self.proxy_anchor_loss.proxies = nn.Parameter(proxy_data['proxies'].to(self.device))
+                self.proxy_anchor_loss.class_to_idx = proxy_data.get('class_to_idx', {})
+                self.proxy_anchor_loss.num_classes = proxy_data.get('num_classes', 0)
+                self.last_num_proxies = self.proxy_anchor_loss.num_classes
+            except Exception as e:
+                print(f"Warning: Could not restore proxy anchor data: {e}")
         
         # 오픈셋 관련 복원
         if 'openset_data' in checkpoint and self.openset_enabled:
-            openset_data = checkpoint['openset_data']
-            self.ncm.tau_s = openset_data.get('tau_s')
-            self.registered_users = set(openset_data.get('registered_users', []))
-            self.evaluation_history = openset_data.get('evaluation_history', [])
+            try:
+                openset_data = checkpoint['openset_data']
+                self.ncm.tau_s = openset_data.get('tau_s')
+                self.registered_users = set(openset_data.get('registered_users', []))
+                self.evaluation_history = openset_data.get('evaluation_history', [])
+            except Exception as e:
+                print(f"Warning: Could not restore openset data: {e}")

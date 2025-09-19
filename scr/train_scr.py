@@ -623,14 +623,6 @@ def main(args):
             'lambda': config_obj.training.proxy_lambda
         } if hasattr(config_obj.training, 'use_proxy_anchor') and config_obj.training.use_proxy_anchor else None,
         
-        # ⭐️ 에너지 스코어 설정 저장
-        'energy_score_config': {
-            'enabled': hasattr(config_obj.openset, 'score_mode') and config_obj.openset.score_mode == 'energy',
-            'temperature': getattr(config_obj.training, 'energy_temperature', None),
-            'k_mode': getattr(config_obj.training, 'energy_k_mode', None),
-            'k_fixed': getattr(config_obj.training, 'energy_k_fixed', None)
-        } if openset_enabled else None,
-        
         # 🥩 TTA 설정 저장
         'tta_config': {
             'enabled': config_obj.openset.tta_n_views > 1,
@@ -914,7 +906,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='SCR Training with ProxyAnchorLoss, Energy Score & TTA Support')
+    parser = argparse.ArgumentParser(description='SCR Training with ProxyAnchorLoss, TTA Support')
     parser.add_argument('--config', type=str, default='config/config.yaml',
                         help='Path to config file')
     parser.add_argument('--seed', type=int, default=42,
