@@ -41,11 +41,6 @@ Training:
   ncm_momentum: 0.9
   seed: 42  # 🥩 추가!
 
-  # ⭐️ 에너지 스코어 설정
-  use_energy_score: false
-  energy_temperature: 0.15
-  energy_k_mode: 'sqrt'  # 'sqrt', 'fixed', 'log'
-  energy_k_fixed: 10
 
   # 🦈 ProxyAnchorLoss 설정 추가
   use_proxy_anchor: true

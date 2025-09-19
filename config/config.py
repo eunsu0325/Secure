@@ -55,12 +55,7 @@ class Training:
     proxy_lr_ratio: float = 10       # 프록시 학습률 배수
     proxy_lambda: float = 0.3        # 🦈 고정 가중치 (SupCon: 0.7, ProxyAnchor: 0.3)
     
-    # ⭐️ 에너지 스코어 설정 추가
-    use_energy_score: bool = False
-    energy_temperature: float = 0.15
-    energy_k_mode: str = 'sqrt'  # 'sqrt', 'fixed', 'log'
-    energy_k_fixed: int = 10
-    
+
     def __post_init__(self):
         """💎 Lambda 스케줄 기본값 설정"""
         if self.proxy_lambda_schedule is None and self.use_proxy_loss:

@@ -80,24 +80,8 @@ class ConfigParser:
             if 'proxy_lambda' not in training_dict:
                 training_dict['proxy_lambda'] = 0.3  # 🦈 고정 가중치 기본값
                 
-            # ⭐️ 에너지 스코어 기본값
-            if 'use_energy_score' not in training_dict:
-                training_dict['use_energy_score'] = False
-            if 'energy_temperature' not in training_dict:
-                training_dict['energy_temperature'] = 0.15
-            if 'energy_k_mode' not in training_dict:
-                training_dict['energy_k_mode'] = 'sqrt'
-            if 'energy_k_fixed' not in training_dict:
-                training_dict['energy_k_fixed'] = 10
-                
             self.training = Training(**training_dict)
             
-            # ⭐️ 에너지 설정 출력
-            if self.training.use_energy_score:
-                print(f"⚡ Energy Score configuration loaded:")
-                print(f"   Temperature: {self.training.energy_temperature}")
-                print(f"   K mode: {self.training.energy_k_mode}")
-
             # 🦈 ProxyAnchorLoss 설정 출력
             if self.training.use_proxy_anchor:
                 print(f"🦈 ProxyAnchorLoss configuration loaded:")

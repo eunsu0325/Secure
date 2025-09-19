@@ -1,4 +1,4 @@
-#scr/scr_trainer.py
+# scr/scr_trainer.py
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -10,7 +10,7 @@ from tqdm import tqdm
 from PIL import Image
 import torch.nn.functional as F
 
-from loss import SupConLoss, ProxyContrastLoss
+from loss import SupConLoss, ProxyAnchorLoss  # 수정: ProxyContrastLoss → ProxyAnchorLoss
 from models import get_scr_transforms
 from utils.util import AverageMeter
 from utils.pretrained_loader import PretrainedLoader
@@ -18,7 +18,7 @@ from utils.pretrained_loader import PretrainedLoader
 # 오픈셋 관련 import
 from scr.threshold_calculator import ThresholdCalibrator
 
-# ⭐️ 에너지 버전 함수들 추가
+# 오픈셋 유틸리티 함수들
 try:
     from utils.utils_openset import (
         split_user_data,
@@ -29,81 +29,44 @@ try:
         balance_impostor_scores,
         predict_batch,
         load_paths_labels_from_txt,
-        # ⭐️ 에너지 버전들 (있으면 import)
-        extract_scores_genuine_energy,
-        extract_scores_impostor_between_energy,
-        extract_scores_impostor_negref_energy,
-        # 🥩 TTA 관련 추가
+        # TTA 관련
         predict_batch_tta,
         extract_scores_genuine_tta,
         extract_scores_impostor_between_tta,
         extract_scores_impostor_negref_tta,
         set_seed,
-        _open_with_channels  # 🥩 채널 헬퍼 추가
+        _open_with_channels
     )
-    ENERGY_FUNCTIONS_AVAILABLE = True
     TTA_FUNCTIONS_AVAILABLE = True
 except ImportError:
-    try:
-        from utils.utils_openset import (
-            split_user_data,
-            extract_scores_genuine,
-            extract_scores_impostor_between,
-            extract_scores_impostor_unknown,
-            extract_scores_impostor_negref,
-            balance_impostor_scores,
-            predict_batch,
-            load_paths_labels_from_txt,
-            set_seed
-        )
-        ENERGY_FUNCTIONS_AVAILABLE = False
-        TTA_FUNCTIONS_AVAILABLE = False
-        print("⚠️ Energy/TTA functions not available, using max score only")
-        
-        # 🥩 _open_with_channels fallback
-        def _open_with_channels(path: str, channels: int):
-            img = Image.open(path)
-            if channels == 1:
-                return img.convert('L')
-            else:
-                return img.convert('RGB')
-    except ImportError:
-        # set_seed도 없으면 간단히 구현
-        def set_seed(seed=42):
-            import random
-            random.seed(seed)
-            np.random.seed(seed)
-            torch.manual_seed(seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(seed)
-        
-        def _open_with_channels(path: str, channels: int):
-            img = Image.open(path)
-            if channels == 1:
-                return img.convert('L')
-            else:
-                return img.convert('RGB')
-        
-        ENERGY_FUNCTIONS_AVAILABLE = False
-        TTA_FUNCTIONS_AVAILABLE = False
+    from utils.utils_openset import (
+        split_user_data,
+        extract_scores_genuine,
+        extract_scores_impostor_between,
+        extract_scores_impostor_unknown,
+        extract_scores_impostor_negref,
+        balance_impostor_scores,
+        predict_batch,
+        load_paths_labels_from_txt,
+        set_seed
+    )
+    TTA_FUNCTIONS_AVAILABLE = False
+    print("⚠️ TTA functions not available, using max score only")
+    
+    def _open_with_channels(path: str, channels: int):
+        img = Image.open(path)
+        if channels == 1:
+            return img.convert('L')
+        else:
+            return img.convert('RGB')
 
 
-# 🍖 새로운 함수 추가: 공평한 반복 샘플링
 def get_balanced_indices(n_samples: int, target_size: int, seed_offset: int = 0) -> np.ndarray:
     """
     공평한 반복 샘플링
     예: 5장 → 32개 인덱스 (각 이미지 6-7번씩)
-    
-    Args:
-        n_samples: 실제 데이터 개수 (예: 5)
-        target_size: 목표 배치 크기 (예: 32)
-        seed_offset: 재현성을 위한 시드 오프셋
-        
-    Returns:
-        공평하게 분배된 인덱스 배열
     """
     if n_samples >= target_size:
-        # 충분하면 기존 방식 그대로
         return np.random.choice(n_samples, target_size, replace=False)
     
     # 공평한 반복 계산
@@ -115,14 +78,13 @@ def get_balanced_indices(n_samples: int, target_size: int, seed_offset: int = 0)
         count = repeat + (1 if i < remainder else 0)
         indices.extend([i] * count)
     
-    # 재현 가능한 셔플
     np.random.shuffle(indices)
     return np.array(indices)
 
 
 class MemoryDataset(Dataset):
     def __init__(self, paths: List[str], labels: List[int], transform, 
-                 train=True, dual_views=None, channels: int = 1):  # 🥩 channels 추가
+                 train=True, dual_views=None, channels: int = 1):
         self.paths = paths
         
         if torch.is_tensor(labels):
@@ -133,7 +95,7 @@ class MemoryDataset(Dataset):
         self.transform = transform
         self.train = train
         self.dual_views = dual_views if dual_views is not None else train
-        self.channels = channels  # 🥩 저장
+        self.channels = channels
         
     def __len__(self):
         return len(self.paths)
@@ -142,7 +104,7 @@ class MemoryDataset(Dataset):
         path = self.paths[index]
         label = self.labels[index]
         
-        img = _open_with_channels(path, self.channels)  # 🥩 채널 유연성
+        img = _open_with_channels(path, self.channels)
         
         if self.dual_views:
             data1 = self.transform(img)
@@ -156,8 +118,7 @@ class MemoryDataset(Dataset):
 class SCRTrainer:
     """
     Supervised Contrastive Replay Trainer with Open-set Support.
-    ⭐️ Energy Score Support Added
-    🎯 TTA Support Added
+    TTA Support Added
     """
     
     def __init__(self,
@@ -167,12 +128,12 @@ class SCRTrainer:
                  config,
                  device='cuda'):
         
-        # 🥩 시드 설정 (config에서 가져오기)
+        # 시드 설정
         seed = getattr(config.training, 'seed', 42) if hasattr(config, 'training') else 42
         set_seed(seed)
         print(f"🎲 Random seed set to {seed}")
         
-        # 🥩 모델/NCM 디바이스 이동
+        # 모델/NCM 디바이스 이동
         self.device = device
         model = model.to(device)
         if hasattr(ncm_classifier, 'to'):
@@ -208,17 +169,16 @@ class SCRTrainer:
             base_temperature=config.training.temperature
         )
         
-        # 🦈 ProxyAnchorLoss 초기화
+        # ProxyAnchorLoss 초기화
         self.use_proxy_anchor = getattr(config.training, 'use_proxy_anchor', True)
         
         if self.use_proxy_anchor:
             self.proxy_anchor_loss = ProxyAnchorLoss(
-                embedding_size=128,  # projection space
+                embedding_size=128,
                 margin=getattr(config.training, 'proxy_margin', 0.1),
                 alpha=getattr(config.training, 'proxy_alpha', 32)
             ).to(device)
             
-            # 🦈 고정 lambda 값 사용
             self.proxy_lambda = getattr(config.training, 'proxy_lambda', 0.3)
             
             print(f"🦈 ProxyAnchorLoss enabled:")
@@ -229,14 +189,14 @@ class SCRTrainer:
             self.proxy_anchor_loss = None
             self.proxy_lambda = 0.0
         
-        # 🦈 옵티마이저 (프록시 파라미터 포함)
+        # 옵티마이저 (프록시 파라미터 포함)
         if self.use_proxy_anchor:
             base_lr = config.training.learning_rate
             proxy_lr_ratio = getattr(config.training, 'proxy_lr_ratio', 10)
             
             self.optimizer = optim.Adam([
                 {'params': model.parameters(), 'lr': base_lr},
-                {'params': [], 'lr': base_lr * proxy_lr_ratio}  # 동적 추가 예정
+                {'params': [], 'lr': base_lr * proxy_lr_ratio}
             ])
         else:
             self.optimizer = optim.Adam(
@@ -264,10 +224,6 @@ class SCRTrainer:
             channels=config.dataset.channels
         )
         
-        # 메모리 데이터셋 캐시
-        self._full_memory_dataset = None
-        self._memory_size_at_last_update = 0
-        
         # === 오픈셋 관련 초기화 ===
         self.openset_enabled = hasattr(config, 'openset') and config.openset.enabled
         
@@ -275,34 +231,7 @@ class SCRTrainer:
             self.openset_config = config.openset
             self._first_calibration_done = False
             
-            # ⭐️ 에너지 스코어 설정 확인
-            self.use_energy_score = getattr(config.openset, 'score_mode', 'max') == 'energy'
-            if self.use_energy_score and ENERGY_FUNCTIONS_AVAILABLE:
-                # 🥩 NCM 메서드 존재 체크
-                if hasattr(self.ncm, 'set_energy_config'):
-                    self.ncm.set_energy_config(
-                        use_energy=True,
-                        T=getattr(config.training, 'energy_temperature', 0.15),
-                        k_mode=getattr(config.training, 'energy_k_mode', 'sqrt'),
-                        k_fixed=getattr(config.training, 'energy_k_fixed', 10)
-                    )
-                else:
-                    # 🥩 합리적 fallback
-                    self.ncm.use_energy = True
-                    self.ncm.energy_T = getattr(config.training, 'energy_temperature', 0.15)
-                    self.ncm.energy_k_mode = getattr(config.training, 'energy_k_mode', 'sqrt')
-                    self.ncm.energy_k_fixed = getattr(config.training, 'energy_k_fixed', 10)
-                
-                print(f"⭐️ Energy Score Mode Enabled:")
-                print(f"   Temperature: {getattr(self.ncm, 'energy_T', 'N/A')}")
-                print(f"   K mode: {getattr(self.ncm, 'energy_k_mode', 'N/A')}")
-                if getattr(self.ncm, 'energy_k_mode', None) == 'fixed':
-                    print(f"   K fixed: {getattr(self.ncm, 'energy_k_fixed', 'N/A')}")
-            elif self.use_energy_score and not ENERGY_FUNCTIONS_AVAILABLE:
-                print("⚠️ Energy score requested but functions not available, using max score")
-                self.use_energy_score = False
-            
-            # 🎯 TTA 설정 확인
+            # TTA 설정 확인
             self.use_tta = self.openset_config.tta_n_views > 1
             if self.use_tta:
                 if TTA_FUNCTIONS_AVAILABLE:
@@ -312,7 +241,7 @@ class SCRTrainer:
                     print(f"   Augmentation: {self.openset_config.tta_augmentation_strength}")
                     print(f"   Aggregation: {self.openset_config.tta_aggregation}")
                     
-                    # 🎾 타입별 반복 설정 출력
+                    # 타입별 반복 설정 출력
                     print(f"   Type-specific repeats:")
                     print(f"     - Genuine: {self.openset_config.tta_n_repeats_genuine}")
                     print(f"     - Between: {self.openset_config.tta_n_repeats_between}")
@@ -321,15 +250,9 @@ class SCRTrainer:
                     print("⚠️ TTA requested but functions not available")
                     self.use_tta = False
             
-            # 🥩 모드 조합 로그
-            mode_summary = []
-            if self.use_energy_score:
-                mode_summary.append("Energy")
-            else:
-                mode_summary.append("Max")
-            if self.use_tta:
-                mode_summary.append(f"TTA({self.openset_config.tta_n_views})")
-            print(f"🔧 Open-set mode: {' + '.join(mode_summary)}")
+            # 모드 로그
+            mode_str = f"MAX + TTA({self.openset_config.tta_n_views})" if self.use_tta else "MAX"
+            print(f"🔧 Open-set mode: {mode_str}")
             
             # ThresholdCalibrator 초기화
             self.threshold_calibrator = ThresholdCalibrator(
@@ -339,8 +262,6 @@ class SCRTrainer:
                 alpha=config.openset.threshold_alpha,
                 max_delta=config.openset.threshold_max_delta,
                 clip_range=(-1.0, 1.0),
-                use_auto_margin=False,  # 🥩 명시적으로 False
-                far_target=None,
                 min_samples=10,
                 verbose=config.openset.verbose_calibration
             )
@@ -353,7 +274,7 @@ class SCRTrainer:
             # 평가 히스토리
             self.evaluation_history = []
             
-            # 🥩 초기 임계치 설정 (메서드 체크)
+            # 초기 임계치 설정
             initial_tau = config.openset.initial_tau
             if hasattr(self.ncm, 'set_thresholds'):
                 self.ncm.set_thresholds(tau_s=initial_tau)
@@ -362,15 +283,14 @@ class SCRTrainer:
             
             # 모드별 초기값 조정
             if config.openset.threshold_mode == 'far':
-                print("🎯 FAR Target mode enabled")
+                print(f"🎯 FAR Target mode enabled")
                 print(f"   Target FAR: {config.openset.target_far*100:.1f}%")
             else:
-                print("🐋 EER mode enabled")
+                print(f"🐋 EER mode enabled")
             
             print(f"   Initial τ_s: {initial_tau}")
         else:
             self.registered_users = set()
-            self.use_energy_score = False
             self.use_tta = False
             print("📌 Open-set mode disabled")
         
@@ -386,9 +306,8 @@ class SCRTrainer:
         self.r0 = float(config.negative.r0) if hasattr(config, 'negative') else 0.5
         self.max_neg_per_class = int(config.negative.max_per_batch) if hasattr(config, 'negative') else 1
         
-        # 🥩 CuDNN 최적화 (재현성 옵션 추가)
+        # CuDNN 최적화
         if torch.backends.cudnn.is_available():
-            # 속도 우선 (기본값)
             torch.backends.cudnn.benchmark = True
             torch.backends.cudnn.deterministic = False
             print("🚀 CuDNN benchmark enabled (speed priority)")
@@ -423,7 +342,7 @@ class SCRTrainer:
         
         print(f"\n=== Training Experience {self.experience_count}: User {user_id} ===")
         
-        # 🦈 프록시 추가 (새 클래스)
+        # 프록시 추가 (새 클래스)
         if self.use_proxy_anchor:
             unique_labels = set(labels)
             real_classes = [l for l in unique_labels if l < self.base_id]
@@ -433,7 +352,7 @@ class SCRTrainer:
             if self.proxy_anchor_loss.proxies is not None:
                 self.optimizer.param_groups[1]['params'] = [self.proxy_anchor_loss.proxies]
         
-        # 원본 labels를 보존 (중요!)
+        # 원본 labels를 보존
         original_labels = labels.copy()
         
         # Step 1: Dev/Train 분리 (오픈셋 모드인 경우)
@@ -455,13 +374,13 @@ class SCRTrainer:
         
         self.registered_users.add(user_id)
         
-        # 🥩 현재 사용자 데이터셋 생성 (channels 전달)
+        # 현재 사용자 데이터셋 생성
         current_dataset = MemoryDataset(
             paths=train_paths,
             labels=train_labels,
             transform=self.train_transform,
             train=True,
-            channels=self.config.dataset.channels  # 🥩 추가
+            channels=self.config.dataset.channels
         )
         
         # 학습 통계
@@ -475,25 +394,16 @@ class SCRTrainer:
             
             for iteration in range(self.config.training.iterations_per_epoch):
                 
-                # 🍖 공평한 반복 샘플링
+                # 공평한 반복 샘플링
                 current_indices = get_balanced_indices(
                     len(current_dataset),
                     self.config.training.scr_batch_size,
-                    self.experience_count * 1000 + epoch * 100 + iteration  # 재현성을 위한 고유 시드
+                    self.experience_count * 1000 + epoch * 100 + iteration
                 )
                 current_subset = Subset(current_dataset, current_indices)
                 
-                # 🍖 디버그 출력 (선택사항)
-                if iteration == 0 and epoch == 0:
-                    n_current = len(current_dataset)
-                    if n_current < self.config.training.scr_batch_size:
-                        print(f"📌 Upsampling {n_current} samples to {self.config.training.scr_batch_size}")
-                        unique, counts = np.unique(current_indices, return_counts=True)
-                        print(f"   Sample distribution: {dict(zip(unique, counts))}")
-                
-                # 2. 메모리에서 B_M 샘플링
+                # 메모리에서 샘플링
                 if len(self.memory_buffer) > 0:
-                    # 💤 커버리지 샘플링 제거 (ProxyContrastLoss 전용)
                     memory_paths, memory_labels = self.memory_buffer.sample(
                         self.config.training.memory_batch_size
                     )
@@ -516,29 +426,22 @@ class SCRTrainer:
                         kept = [(p, l) for p, l in zip(memory_paths, memory_labels) if int(l) < self.base_id]
                         memory_paths, memory_labels = (list(map(list, zip(*kept))) if kept else ([], []))
                     
-                    neg_in_mem = sum(1 for l in memory_labels if int(l) >= self.base_id)
-                    if iteration == 0 and epoch == 0:
-                        print(f"[DEBUG][exp{self.experience_count}] cur={len(current_indices)}, mem={len(memory_paths)}, neg_in_mem={neg_in_mem}, r0={self.r0}")
-                    
                     if memory_paths:
-                        # 🥩 메모리 데이터셋도 channels 전달
                         memory_dataset = MemoryDataset(
                             paths=memory_paths,
                             labels=memory_labels,
                             transform=self.train_transform,
                             train=True,
-                            channels=self.config.dataset.channels  # 🥩 추가
+                            channels=self.config.dataset.channels
                         )
                         
                         combined_dataset = ConcatDataset([current_subset, memory_dataset])
                     else:
                         combined_dataset = current_subset
-                        if self.experience_count == self.warmup_T:
-                            print("📌 First post-warmup experience: memory empty, using current only")
                 else:
                     combined_dataset = current_subset
                 
-                # 4. DataLoader로 배치 생성
+                # DataLoader로 배치 생성
                 batch_loader = DataLoader(
                     combined_dataset,
                     batch_size=len(combined_dataset),
@@ -548,7 +451,7 @@ class SCRTrainer:
                     persistent_workers=False
                 )
                 
-                # 5. 학습
+                # 학습
                 for data, batch_labels in batch_loader:
                     batch_size = len(batch_labels)
                     
@@ -560,13 +463,13 @@ class SCRTrainer:
                     
                     self.optimizer.zero_grad()
                     
-                    # Forward (6144D)
+                    # Forward
                     features_all = self.model(x)
                     
                     f1 = features_all[:batch_size]
                     f2 = features_all[batch_size:]
                     
-                    # 🦈 Projection to 128D
+                    # Projection to 128D
                     if self.model.use_projection:
                         z_all = self.model.projection_head(F.normalize(features_all, dim=-1))
                         z_all = F.normalize(z_all, dim=-1)
@@ -580,7 +483,7 @@ class SCRTrainer:
                     # SupConLoss
                     loss_supcon = self.criterion(features_paired, batch_labels)
                     
-                    # 🦈 ProxyAnchorLoss 추가
+                    # ProxyAnchorLoss 추가
                     if self.use_proxy_anchor and self.proxy_anchor_loss.proxies is not None:
                         all_labels = batch_labels.repeat(2)
                         loss_proxy = self.proxy_anchor_loss(z_all, all_labels)
@@ -606,12 +509,7 @@ class SCRTrainer:
                 print(f"  Epoch [{epoch+1}/{self.config.training.scr_epochs}] Loss: {avg_loss:.4f}")
 
         # 메모리 버퍼 업데이트
-        print(f"\n=== Before buffer update ===")
-        print(f"Buffer size: {len(self.memory_buffer)}")
-        print(f"Buffer seen classes: {self.memory_buffer.seen_classes if hasattr(self.memory_buffer, 'seen_classes') else 'N/A'}")
-        
         self.memory_buffer.update_from_dataset(train_paths, train_labels)
-        self._full_memory_dataset = None
         print(f"Memory buffer size after update: {len(self.memory_buffer)}")
         
         # NCM 업데이트
@@ -657,58 +555,37 @@ class SCRTrainer:
             'user_id': user_id,
             'loss': loss_avg.avg,
             'memory_size': len(self.memory_buffer),
-            'num_registered': len(self.registered_users),
-            'neg_in_batch': neg_in_mem if 'neg_in_mem' in locals() else 0
+            'num_registered': len(self.registered_users)
         }
     
     @torch.no_grad()
     def _calibrate_threshold(self):
-        """임계치 캘리브레이션 (🎾 타입별 독립 TTA 반복, 동적 비율)"""
+        """임계치 캘리브레이션 (타입별 독립 TTA 반복, 동적 비율)"""
         
-        # ⭐️ 스코어 모드 확인
-        score_mode = getattr(self.openset_config, 'score_mode', 'max')
-        use_tta = self.use_tta and TTA_FUNCTIONS_AVAILABLE  # 🥩 TTA 체크
+        use_tta = self.use_tta and TTA_FUNCTIONS_AVAILABLE
         
-        # 🎾 타입별 독립적인 TTA 반복 설정 가져오기
+        # 타입별 독립적인 TTA 반복 설정
         n_repeats_genuine = getattr(self.openset_config, 'tta_n_repeats_genuine', 1)
         n_repeats_between = getattr(self.openset_config, 'tta_n_repeats_between', 1)
         n_repeats_negref = getattr(self.openset_config, 'tta_n_repeats_negref', 1)
         
-        # 🪻 기존 통합 반복 설정 삭제
-        # n_repeats = getattr(self.openset_config, 'tta_n_repeats', 1)
-        
         repeat_agg = getattr(self.openset_config, 'tta_repeat_aggregation', 'median')
         tta_verbose = getattr(self.openset_config, 'tta_verbose', False)
         
-        # 🫐 시드 가져오기
         seed = getattr(self.config.training, 'seed', 42)
-        
-        # 🥩 이미지 크기와 채널 가져오기
         img_size = self.config.dataset.height
-        channels = self.config.dataset.channels  # 🥩 추가
+        channels = self.config.dataset.channels
         
-        # 🥩 모드 표시
-        mode_str = f"{'ENERGY' if score_mode == 'energy' else 'MAX'}"
-        if use_tta:
-            # 🎾 타입별 반복 정보 표시
-            mode_str += f" + TTA(views={self.openset_config.tta_n_views})"
+        # 모드 표시
+        mode_str = f"MAX + TTA(views={self.openset_config.tta_n_views})" if use_tta else "MAX"
+        print(f"📊 Using {mode_str} scores for calibration")
         
-        # ⭐️ 모드별 설정
-        if score_mode == 'energy' and self.use_energy_score and ENERGY_FUNCTIONS_AVAILABLE:
-            self.ncm.use_energy = True
-            print(f"⭐️ Using ENERGY scores for calibration {mode_str}")
-            print(f"   T={self.ncm.energy_T}, k_mode={self.ncm.energy_k_mode}")
-        else:
-            self.ncm.use_energy = False
-            print(f"📊 Using MAX scores for calibration {mode_str}")
-        
-        # 🎾 타입별 반복 설정 출력
+        # 타입별 반복 설정 출력
         if use_tta:
             print(f"🔄 TTA with type-specific repeats:")
-            print(f"   Genuine: {self.openset_config.tta_n_views} views × {n_repeats_genuine} repeats = {self.openset_config.tta_n_views * n_repeats_genuine} evals")
-            print(f"   Between: {self.openset_config.tta_n_views} views × {n_repeats_between} repeats = {self.openset_config.tta_n_views * n_repeats_between} evals")
-            print(f"   NegRef: {self.openset_config.tta_n_views} views × {n_repeats_negref} repeats = {self.openset_config.tta_n_views * n_repeats_negref} evals")
-            print(f"   Aggregation: {repeat_agg}")
+            print(f"   Genuine: {self.openset_config.tta_n_views} views × {n_repeats_genuine} repeats")
+            print(f"   Between: {self.openset_config.tta_n_views} views × {n_repeats_between} repeats")
+            print(f"   NegRef: {self.openset_config.tta_n_views} views × {n_repeats_negref} repeats")
         
         print(f"\n📊 Extracting scores for {self.openset_config.threshold_mode.upper()} calibration...")
         
@@ -719,9 +596,8 @@ class SCRTrainer:
             all_dev_paths.extend(paths)
             all_dev_labels.extend([uid] * len(paths))
         
-        # 🥩 TTA 모드에 따른 점수 추출
+        # TTA 모드에 따른 점수 추출
         if use_tta:
-            # 🎾 타입별 독립적인 반복 횟수 사용
             s_genuine = extract_scores_genuine_tta(
                 self.model, self.ncm,
                 all_dev_paths, all_dev_labels,
@@ -732,7 +608,7 @@ class SCRTrainer:
                 aggregation=self.openset_config.tta_aggregation,
                 img_size=img_size,
                 channels=channels,
-                n_repeats=n_repeats_genuine,  # 🎾 타입별 설정
+                n_repeats=n_repeats_genuine,
                 repeat_aggregation=repeat_agg,
                 verbose=tta_verbose,
                 seed=seed
@@ -749,16 +625,11 @@ class SCRTrainer:
                 max_pairs=2000,
                 img_size=img_size,
                 channels=channels,
-                n_repeats=n_repeats_between,  # 🎾 타입별 설정
+                n_repeats=n_repeats_between,
                 repeat_aggregation=repeat_agg,
                 verbose=tta_verbose,
                 seed=seed
             )
-            
-            # 🎾 NegRef에는 force_memory_save 옵션 추가 가능
-            force_memory_save = n_repeats_negref > 3  # 3회 초과시 메모리 절약 권장
-            if force_memory_save and n_repeats_negref > 1:
-                print(f"   ⚠️ NegRef repeats={n_repeats_negref} may use significant memory")
             
             s_imp_negref = extract_scores_impostor_negref_tta(
                 self.model, self.ncm,
@@ -771,64 +642,38 @@ class SCRTrainer:
                 max_eval=self.openset_config.negref_max_eval,
                 img_size=img_size,
                 channels=channels,
-                n_repeats=n_repeats_negref,  # 🎾 타입별 설정
+                n_repeats=n_repeats_negref,
                 repeat_aggregation=repeat_agg,
                 verbose=tta_verbose,
                 seed=seed,
-                force_memory_save=False  # 🎾 사용자 설정 그대로 사용
+                force_memory_save=False
             )
         else:
-            # ⭐️ 단일뷰 - 모드에 따른 점수 추출
-            if score_mode == 'energy' and self.use_energy_score and ENERGY_FUNCTIONS_AVAILABLE:
-                # 에너지 버전 사용
-                s_genuine = extract_scores_genuine_energy(
-                    self.model, self.ncm,
-                    all_dev_paths, all_dev_labels,
-                    self.test_transform, self.device,
-                    channels=channels
-                )
-                
-                s_imp_between = extract_scores_impostor_between_energy(
-                    self.model, self.ncm,
-                    all_dev_paths, all_dev_labels,
-                    self.test_transform, self.device,
-                    max_pairs=2000,
-                    channels=channels
-                )
-                
-                s_imp_negref = extract_scores_impostor_negref_energy(
-                    self.model, self.ncm,
-                    self.config.dataset.negative_samples_file,
-                    self.test_transform, self.device,
-                    max_eval=self.openset_config.negref_max_eval,
-                    channels=channels
-                )
-            else:
-                # 기존 최댓값 버전
-                s_genuine = extract_scores_genuine(
-                    self.model, self.ncm,
-                    all_dev_paths, all_dev_labels,
-                    self.test_transform, self.device,
-                    channels=channels
-                )
-                
-                s_imp_between = extract_scores_impostor_between(
-                    self.model, self.ncm,
-                    all_dev_paths, all_dev_labels,
-                    self.test_transform, self.device,
-                    max_pairs=2000,
-                    channels=channels
-                )
-                
-                s_imp_negref = extract_scores_impostor_negref(
-                    self.model, self.ncm,
-                    self.config.dataset.negative_samples_file,
-                    self.test_transform, self.device,
-                    max_eval=self.openset_config.negref_max_eval,
-                    channels=channels
-                )
+            # 단일뷰 - 최댓값 버전
+            s_genuine = extract_scores_genuine(
+                self.model, self.ncm,
+                all_dev_paths, all_dev_labels,
+                self.test_transform, self.device,
+                channels=channels
+            )
+            
+            s_imp_between = extract_scores_impostor_between(
+                self.model, self.ncm,
+                all_dev_paths, all_dev_labels,
+                self.test_transform, self.device,
+                max_pairs=2000,
+                channels=channels
+            )
+            
+            s_imp_negref = extract_scores_impostor_negref(
+                self.model, self.ncm,
+                self.config.dataset.negative_samples_file,
+                self.test_transform, self.device,
+                max_eval=self.openset_config.negref_max_eval,
+                channels=channels
+            )
         
-        # 🎾 동적 비율로 균형 맞추기
+        # 동적 비율로 균형 맞추기
         impostor_ratio = (
             self.openset_config.impostor_ratio_between,
             self.openset_config.impostor_ratio_unknown,
@@ -839,25 +684,13 @@ class SCRTrainer:
             s_imp_between,
             None,  # Unknown 제거
             s_imp_negref,
-            ratio=impostor_ratio,  # 🎾 동적 비율 사용
-            total=self.openset_config.impostor_balance_total  # 🎾 설정 가능한 총 샘플 수
+            ratio=impostor_ratio,
+            total=self.openset_config.impostor_balance_total
         )
-        
-        # 🪻 기존 고정 비율 삭제
-        # s_impostor = balance_impostor_scores(
-        #     s_imp_between,
-        #     None,  # Unknown 제거
-        #     s_imp_negref,
-        #     ratio=(0.3, 0.0, 0.7)
-        # )
         
         print(f"   Genuine: {len(s_genuine)} scores")
         print(f"   Impostor: {len(s_impostor)} scores")
         print(f"     - Target ratio: Between={impostor_ratio[0]:.0%}, NegRef={impostor_ratio[2]:.0%}")
-        
-        # 🥩 TTA 정보 추가
-        if use_tta:
-            print(f"   TTA aggregation: {self.openset_config.tta_aggregation}")
         
         # 캘리브레이션
         if len(s_genuine) >= 10 and len(s_impostor) >= 10:
@@ -868,7 +701,7 @@ class SCRTrainer:
             )
             self._first_calibration_done = True
             
-            # 🥩 NCM에 적용 (메서드 체크)
+            # NCM에 적용
             new_tau = result['tau_smoothed']
             if hasattr(self.ncm, 'set_thresholds'):
                 self.ncm.set_thresholds(tau_s=new_tau)
@@ -885,18 +718,13 @@ class SCRTrainer:
                 print(f"   Target FAR: {self.openset_config.target_far*100:.1f}%")
                 print(f"   Achieved FAR: {result.get('current_far', 0)*100:.1f}%")
                 print(f"   Threshold: {result['tau_smoothed']:.4f}")
-            
-            # ⭐️ 에너지 모드면 추가 정보
-            if score_mode == 'energy' and self.use_energy_score:
-                print(f"   ⭐️ Energy params: T={self.ncm.energy_T}, k_mode={self.ncm.energy_k_mode}")
         else:
             print("⚠️ Not enough samples for calibration")
     
     @torch.no_grad()
     def _evaluate_openset(self):
-        """오픈셋 평가 (🥩 TTA 지원, 🔧 channels 전달)"""
+        """오픈셋 평가 (TTA 지원)"""
         
-        # 🥩 TTA 설정
         use_tta = self.use_tta and TTA_FUNCTIONS_AVAILABLE
         img_size = self.config.dataset.height
         channels = self.config.dataset.channels
@@ -906,7 +734,7 @@ class SCRTrainer:
         else:
             print("\n📈 Open-set Evaluation (Single View):")
         
-        # 🥚 변수 초기화 (중요!)
+        # 변수 초기화
         TAR = FRR = 0.0
         TRR_u = FAR_u = 0.0
         TRR_n = FAR_n = None
@@ -920,7 +748,6 @@ class SCRTrainer:
         
         if all_dev_paths:
             if use_tta:
-                # 🥩 TTA 예측
                 preds, details = predict_batch_tta(
                     self.model, self.ncm,
                     all_dev_paths, self.test_transform, self.device,
@@ -930,27 +757,25 @@ class SCRTrainer:
                     aug_strength=self.openset_config.tta_augmentation_strength,
                     return_details=True,
                     img_size=img_size,
-                    channels=channels  # 🔧 channels 전달
+                    channels=channels
                 )
                 
-                # 🥩 TTA 통계 출력
+                # TTA 통계 출력
                 if details:
                     reject_reasons = [d.get('reject_reason') for d in details if d.get('reject_reason')]
                     if reject_reasons:
                         from collections import Counter
                         reason_counts = Counter(reject_reasons)
-                        gate_rejects = reason_counts.get('gate', 0)
-                        class_rejects = reason_counts.get('class', 0)
-                        both_rejects = reason_counts.get('both', 0)
-                        print(f"   TTA Reject reasons: gate={gate_rejects}, class={class_rejects}, both={both_rejects}")
+                        print(f"   TTA Reject reasons: gate={reason_counts.get('gate', 0)}, "
+                              f"class={reason_counts.get('class', 0)}, both={reason_counts.get('both', 0)}")
             else:
                 preds = predict_batch(
                     self.model, self.ncm,
                     all_dev_paths, self.test_transform, self.device,
-                    channels=channels  # 🔧 channels 전달
+                    channels=channels
                 )
             
-            # 🥚 TAR/FRR 계산
+            # TAR/FRR 계산
             correct = sum(1 for p, l in zip(preds, all_dev_labels) if p == l)
             rejected = sum(1 for p in preds if p == -1)
             
@@ -971,7 +796,6 @@ class SCRTrainer:
             unknown_filtered = np.random.choice(unknown_filtered, 1000, replace=False).tolist()
         
         if unknown_filtered:
-            # 🥚 TTA 지원 추가
             if use_tta:
                 preds_unk = predict_batch_tta(
                     self.model, self.ncm,
@@ -981,18 +805,18 @@ class SCRTrainer:
                     agree_k=self.openset_config.tta_agree_k,
                     aug_strength=self.openset_config.tta_augmentation_strength,
                     img_size=img_size,
-                    channels=channels  # 🔧 channels 전달
+                    channels=channels
                 )
             else:
                 preds_unk = predict_batch(
                     self.model, self.ncm,
                     unknown_filtered, self.test_transform, self.device,
-                    channels=channels  # 🥚 channels 추가
+                    channels=channels
                 )
             TRR_u = sum(1 for p in preds_unk if p == -1) / len(preds_unk)
             FAR_u = 1 - TRR_u
         
-        # 3. NegRef (선택)
+        # 3. NegRef
         negref_paths, _ = load_paths_labels_from_txt(
             self.config.dataset.negative_samples_file
         )
@@ -1001,7 +825,6 @@ class SCRTrainer:
             negref_paths = np.random.choice(negref_paths, 1000, replace=False).tolist()
         
         if negref_paths:
-            # 🥚 TTA 지원 추가
             if use_tta:
                 preds_neg = predict_batch_tta(
                     self.model, self.ncm,
@@ -1011,13 +834,13 @@ class SCRTrainer:
                     agree_k=self.openset_config.tta_agree_k,
                     aug_strength=self.openset_config.tta_augmentation_strength,
                     img_size=img_size,
-                    channels=channels  # 🔧 channels 전달
+                    channels=channels
                 )
             else:
                 preds_neg = predict_batch(
                     self.model, self.ncm,
                     negref_paths, self.test_transform, self.device,
-                    channels=channels  # 🥚 channels 추가
+                    channels=channels
                 )
             TRR_n = sum(1 for p in preds_neg if p == -1) / len(preds_neg)
             FAR_n = 1 - TRR_n
@@ -1035,13 +858,8 @@ class SCRTrainer:
         else:
             print(f"   Mode: EER")
         
-        # ⭐️ 에너지 모드 표시
-        if hasattr(self, 'use_energy_score') and self.use_energy_score:
-            print(f"   ⭐️ Score: Energy (T={self.ncm.energy_T})")
-        else:
-            print(f"   Score: Max")
+        print(f"   Score: Max")
         
-        # 🥚 TTA 정보 추가
         if use_tta:
             print(f"   🎯 TTA: {self.openset_config.tta_n_views} views, agree_k={self.openset_config.tta_agree_k}")
         
@@ -1050,9 +868,9 @@ class SCRTrainer:
             'TRR_unknown': TRR_u, 'FAR_unknown': FAR_u,
             'TRR_negref': TRR_n, 'FAR_negref': FAR_n,
             'mode': self.openset_config.threshold_mode,
-            'score_type': 'energy' if self.use_energy_score else 'max',
-            'tta_enabled': use_tta,  # 🥚
-            'tta_views': self.openset_config.tta_n_views if use_tta else 1  # 🥚
+            'score_type': 'max',
+            'tta_enabled': use_tta,
+            'tta_views': self.openset_config.tta_n_views if use_tta else 1
         }
     
     @torch.no_grad()
@@ -1086,13 +904,13 @@ class SCRTrainer:
         if fake_count > 0:
             print(f"🍄 NCM update: {len(real_paths)} real samples ({fake_count} fake samples filtered out)")
         
-        # 🥩 데이터셋 생성시 channels 전달
+        # 데이터셋 생성
         dataset = MemoryDataset(
             paths=real_paths,
             labels=real_labels,
             transform=self.test_transform,
             train=False,
-            channels=self.config.dataset.channels  # 🥩 추가
+            channels=self.config.dataset.channels
         )
         
         dataloader = DataLoader(
@@ -1108,7 +926,6 @@ class SCRTrainer:
         class_features = {}
         
         for data, labels in dataloader:
-            # 🥩 dual_views=False이므로 단일 뷰
             data = data.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
             
@@ -1154,7 +971,6 @@ class SCRTrainer:
         
         with torch.no_grad():
             for data, labels in dataloader:
-                # 🥩 단일 뷰 처리
                 data = data.to(self.device, non_blocking=True)
                 labels = labels.to(self.device, non_blocking=True)
                 
@@ -1178,7 +994,7 @@ class SCRTrainer:
             'memory_buffer_size': len(self.memory_buffer)
         }
         
-        # 🦈 ProxyAnchorLoss 관련 저장
+        # ProxyAnchorLoss 관련 저장
         if self.use_proxy_anchor:
             checkpoint_dict['proxy_anchor_data'] = {
                 'proxies': self.proxy_anchor_loss.proxies,
@@ -1205,7 +1021,7 @@ class SCRTrainer:
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         self.experience_count = checkpoint['experience_count']
         
-        # 🦈 ProxyAnchorLoss 관련 복원
+        # ProxyAnchorLoss 관련 복원
         if 'proxy_anchor_data' in checkpoint and self.use_proxy_anchor:
             proxy_data = checkpoint['proxy_anchor_data']
             self.proxy_anchor_loss.proxies = proxy_data.get('proxies')

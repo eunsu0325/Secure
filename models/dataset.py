@@ -152,27 +152,6 @@ class MyDataset(data.Dataset):
             data2 = self.transforms(img)
             data = [data1, data2]
             
-            # 😶‍🌫️ 방법 2: 같은 클래스의 다른 샘플 (기존 방식) - 필요시 주석 해제
-            # # 🌈 캐시된 인덱스 사용 (빠름!)
-            # same_class_indices = self.class_to_indices[label]
-            # 
-            # if self.train and len(same_class_indices) > 1:
-            #     idx2 = index
-            #     while idx2 == index:
-            #         idx2 = np.random.choice(same_class_indices)
-            # else:
-            #     idx2 = index
-            # 
-            # img_path2 = self.images_path[idx2]
-            # 
-            # data1 = Image.open(img_path).convert('L')
-            # data1 = self.transforms(data1)
-            # 
-            # data2 = Image.open(img_path2).convert('L')
-            # data2 = self.transforms(data2)
-            # 
-            # data = [data1, data2]
-            
         else:
             # 🌈 1뷰만 생성 (평가용)
             img = Image.open(img_path).convert('L')
