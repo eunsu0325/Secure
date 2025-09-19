@@ -68,37 +68,17 @@ class ConfigParser:
             if 'batch_size' not in training_dict:
                 training_dict['batch_size'] = 128
                 
-            # 💎 ProxyLoss 기본값 설정
-            if 'use_proxy_loss' not in training_dict:
-                training_dict['use_proxy_loss'] = True
+            # 🦈 ProxyAnchorLoss 기본값
+            if 'use_proxy_anchor' not in training_dict:
+                training_dict['use_proxy_anchor'] = True
+            if 'proxy_margin' not in training_dict:
+                training_dict['proxy_margin'] = 0.1
+            if 'proxy_alpha' not in training_dict:
+                training_dict['proxy_alpha'] = 32
+            if 'proxy_lr_ratio' not in training_dict:
+                training_dict['proxy_lr_ratio'] = 10
             if 'proxy_lambda' not in training_dict:
-                training_dict['proxy_lambda'] = 0.3
-            if 'proxy_temperature' not in training_dict:
-                training_dict['proxy_temperature'] = 0.15
-            if 'proxy_topk' not in training_dict:
-                training_dict['proxy_topk'] = 30
-            if 'proxy_full_until' not in training_dict:
-                training_dict['proxy_full_until'] = 100
-            if 'proxy_warmup_classes' not in training_dict:
-                training_dict['proxy_warmup_classes'] = 5
-                
-            # 💎 Lambda 스케줄 파싱
-            if 'proxy_lambda_schedule' in training_dict:
-                # YAML에서 dict로 파싱됨
-                pass
-            else:
-                # 기본 스케줄 설정 (Training.__post_init__에서 처리)
-                training_dict['proxy_lambda_schedule'] = None
-            
-            # 💎 커버리지 샘플링 기본값
-            if 'use_coverage_sampling' not in training_dict:
-                training_dict['use_coverage_sampling'] = True
-            if 'coverage_k_per_class' not in training_dict:
-                training_dict['coverage_k_per_class'] = 2
-            
-            # 💎 프로토타입 설정
-            if 'prototype_beta' not in training_dict:
-                training_dict['prototype_beta'] = 0.05
+                training_dict['proxy_lambda'] = 0.3  # 🦈 고정 가중치 기본값
                 
             # ⭐️ 에너지 스코어 기본값
             if 'use_energy_score' not in training_dict:
@@ -118,12 +98,13 @@ class ConfigParser:
                 print(f"   Temperature: {self.training.energy_temperature}")
                 print(f"   K mode: {self.training.energy_k_mode}")
 
-            # 💎 ProxyLoss 설정 출력
-            if self.training.use_proxy_loss:
-                print(f"💎 ProxyContrastLoss configuration loaded:")
-                print(f"   Lambda: {self.training.proxy_lambda}")
-                print(f"   Temperature: {self.training.proxy_temperature}")
-                print(f"   Schedule: {self.training.proxy_lambda_schedule}")
+            # 🦈 ProxyAnchorLoss 설정 출력
+            if self.training.use_proxy_anchor:
+                print(f"🦈 ProxyAnchorLoss configuration loaded:")
+                print(f"   Margin (δ): {self.training.proxy_margin}")
+                print(f"   Alpha (α): {self.training.proxy_alpha}")
+                print(f"   LR ratio: {self.training.proxy_lr_ratio}x")
+                print(f"   Lambda (fixed): {self.training.proxy_lambda}")  # 🦈 고정값
         
         # Parse Openset section
         if 'Openset' in self.config_dict:

@@ -109,110 +109,116 @@ class SupConLoss(nn.Module):
 
         return loss
 
-
-# 💎 ProxyContrastLoss 추가 - 프로토타입 기반 대조 학습
-class ProxyContrastLoss(nn.Module):
+class ProxyAnchorLoss(nn.Module):
     """
-    💎 Prototype-based Contrastive Loss for Continual Learning
+    Proxy Anchor Loss for Deep Metric Learning (CVPR 2020)
     
-    프로토타입(클래스 대표점)과의 대조 학습으로 catastrophic forgetting 방지
-    - 고정된 앵커 역할로 드리프트 감소
-    - Top-K 선택으로 계산 효율성 확보
-    - 정답 클래스 강제 포함으로 안정성 보장
-    
-    Args:
-        temperature: 소프트맥스 온도 (높을수록 부드러운 분포)
-        lambda_proxy: 손실 가중치
-        topk: 비교할 최대 클래스 수
-        full_until: 이 수 이하면 모든 클래스 사용
+    프록시를 앵커로 사용하여 data-to-data relations를 활용하는 손실 함수
+    Continual Learning을 위한 동적 프록시 추가 지원
     """
-    def __init__(self, temperature=0.15, lambda_proxy=0.3, topk=30, full_until=100):
+    def __init__(self, embedding_size=128, margin=0.1, alpha=32):
         super().__init__()
-        self.temperature = temperature  # 💎 SupCon보다 높은 온도 (0.15 vs 0.07)
-        self.lambda_proxy = lambda_proxy
-        self.topk = topk
-        self.full_until = full_until
-    
-    def forward(self, z, y, proto_cache_P, proto_cache_ids):
-        """
-        💎 Forward pass
+        self.embedding_size = embedding_size
+        self.margin = margin
+        self.alpha = alpha
         
+        # 동적 프록시 관리
+        self.proxies = None
+        self.class_to_idx = {}
+        self.num_classes = 0
+    
+    @torch.no_grad()
+    def add_classes(self, class_ids):
+        """새 클래스 프록시 추가 (gradient 계산 없음)"""
+        new_ids = [c for c in class_ids if c not in self.class_to_idx]
+        if not new_ids:
+            return
+        
+        n_new = len(new_ids)
+        device = (self.proxies.device if self.proxies is not None 
+                  else torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+        
+        # 새 프록시 초기화 (kaiming_normal)
+        new_p = torch.randn(n_new, self.embedding_size, device=device)
+        nn.init.kaiming_normal_(new_p, mode='fan_out')
+        
+        if self.proxies is None:
+            self.proxies = nn.Parameter(new_p)
+        else:
+            combined = torch.cat([self.proxies.data, new_p], dim=0)
+            self.proxies = nn.Parameter(combined)
+        
+        # 매핑 업데이트
+        for i, cid in enumerate(new_ids):
+            self.class_to_idx[cid] = self.num_classes + i
+        self.num_classes += n_new
+        
+        print(f"ProxyAnchor: Added {n_new} proxies, Total: {self.num_classes}")
+        
+    def forward(self, X, T):
+        """
         Args:
-            z: [B, D] 배치 임베딩 (L2 정규화됨)
-            y: [B] 라벨
-            proto_cache_P: [C, D] 프로토타입 텐서 (L2 정규화됨)
-            proto_cache_ids: 정렬된 클래스 ID 리스트
-            
+            X: [B, D] 임베딩 벡터
+            T: [B] 레이블
         Returns:
             스칼라 손실값
         """
-        # 💎 프로토타입이 없으면 0 반환 (초기 상태)
-        if proto_cache_P is None or len(proto_cache_ids) == 0:
-            return torch.tensor(0.0, device=z.device)
+        # 프록시 없으면 0 반환 (디바이스 안전)
+        if self.proxies is None:
+            return torch.zeros([], device=X.device, dtype=X.dtype)
         
-        B = z.size(0)  # 배치 크기
-        C = proto_cache_P.size(0)  # 클래스 수
+        # L2 정규화
+        X = F.normalize(X, p=2, dim=1)
+        P = F.normalize(self.proxies, p=2, dim=1)
         
-        # 💎 클래스 ID → 인덱스 매핑
-        id2idx = {cid: i for i, cid in enumerate(proto_cache_ids)}
+        # 코사인 유사도 (명확한 @ 연산)
+        sim = X @ P.T  # [B, C]
         
-        # 💎 코사인 유사도 계산 (이미 정규화된 벡터들)
-        # AMP 대응
-        if z.dtype == torch.float16:
-            sim = (z.float() @ proto_cache_P.float().t()) / self.temperature
-        else:
-            sim = (z @ proto_cache_P.t()) / self.temperature  # [B, C]
+        # 벡터화된 one-hot 생성
+        labels = T.to(dtype=torch.long, device=sim.device)
+        known_mask = torch.tensor(
+            [int(y.item()) in self.class_to_idx for y in labels],
+            device=sim.device, dtype=torch.bool
+        )
         
-        # 💎 Top-K 선택 또는 전체 사용
-        if C <= self.full_until or self.topk >= C:
-            # 클래스가 적으면 전체 사용
-            sel_idx = torch.arange(C, device=z.device).unsqueeze(0).expand(B, -1)  # [B, C]
-            sel_sim = sim
-        else:
-            # 💎 Top-K 클래스만 선택 (계산 효율성)
-            sel_sim, sel_idx = sim.topk(self.topk, dim=1)  # [B, K]
-            
-            # 💎 정답 클래스 강제 포함 (중요!)
-            for i in range(B):
-                true_label = y[i].item()
-                if true_label in id2idx:
-                    true_idx = id2idx[true_label]
-                    
-                    # 💎 텐서 in 연산 버그 방지 - .any() 사용
-                    exists = (sel_idx[i] == true_idx).any()
-                    if not exists:
-                        # Top-K에 없으면 마지막 자리를 정답으로 교체
-                        sel_sim[i, -1] = sim[i, true_idx]
-                        sel_idx[i, -1] = true_idx
+        # 알려진 클래스가 없으면 0 반환
+        if not known_mask.any():
+            return torch.zeros([], device=X.device, dtype=X.dtype)
         
-        # 💎 Cross Entropy 손실 계산
-        losses = []
-        for i in range(B):
-            true_label = y[i].item()
-            
-            # 프로토타입이 없는 새 클래스는 스킵
-            if true_label not in id2idx:
-                continue
-            
-            true_idx = id2idx[true_label]
-            
-            # 💎 선택된 클래스 중 정답 위치 찾기
-            pos_mask = (sel_idx[i] == true_idx)
-            if not pos_mask.any():
-                continue  # 정답이 없으면 스킵 (방어 코드)
-            
-            pos_in_topk = pos_mask.nonzero(as_tuple=True)[0][0]
-            
-            # 💎 Softmax cross entropy
-            log_probs = sel_sim[i].log_softmax(dim=0)  # [K or C]
-            losses.append(-log_probs[pos_in_topk])
+        # 알려진 클래스만 처리
+        valid_labels = labels[known_mask]
+        valid_sim = sim[known_mask]  # [B', C]
         
-        # 💎 평균 손실 반환
-        if losses:
-            return self.lambda_proxy * torch.stack(losses).mean()
-        else:
-            return torch.tensor(0.0, device=z.device)
+        # 프록시 인덱스 매핑
+        proxy_indices = torch.tensor(
+            [self.class_to_idx[int(y.item())] for y in valid_labels],
+            device=sim.device, dtype=torch.long
+        )
+        
+        # One-hot 인코딩
+        P_one_hot = F.one_hot(proxy_indices, num_classes=self.num_classes).to(valid_sim.dtype)
+        N_one_hot = 1 - P_one_hot
+        
+        # Exponentials (수치 안정성)
+        pos_exp = torch.exp(-self.alpha * (valid_sim - self.margin))
+        neg_exp = torch.exp(self.alpha * (valid_sim + self.margin))
+        
+        # dim=0 집계 - 프록시가 앵커!
+        P_sim_sum = (pos_exp * P_one_hot).sum(dim=0)  # [C]
+        N_sim_sum = (neg_exp * N_one_hot).sum(dim=0)  # [C]
+        
+        # Positive 항: 양성 샘플이 실제로 존재하는 프록시만
+        with_pos = (P_one_hot.sum(dim=0) > 0)
+        num_valid = with_pos.sum().clamp_min(1)
+        
+        # 수치 안정성: log1p + clamp_min
+        pos_term = torch.log1p(P_sim_sum[with_pos].clamp_min(1e-12)).sum() / num_valid
+        neg_term = torch.log1p(N_sim_sum.clamp_min(1e-12)).sum() / self.num_classes
+        
+        return pos_term + neg_term
     
-    def update_lambda(self, new_lambda):
-        """💎 Lambda 값 동적 업데이트 (스케줄링용)"""
-        self.lambda_proxy = new_lambda
+    def get_proxies(self):
+        """정규화된 프록시 반환"""
+        if self.proxies is None:
+            return None
+        return F.normalize(self.proxies, p=2, dim=1)

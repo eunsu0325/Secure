@@ -3,6 +3,7 @@
 """
 Supervised Contrastive Replay (SCR) Training Script with Open-set Support
 CCNet + SCR for Continual Learning
+🦈 ProxyAnchorLoss Support Added
 ⭐️ Energy Score Support Added
 🎯 TTA Support Added
 🫐 TTA Repeats Support Added
@@ -401,11 +402,6 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
             openset_metrics['tta_enabled'] = True
             openset_metrics['tta_views'] = config.openset.tta_n_views
             
-            # 🪻 기존 통합 반복 정보 삭제
-            # if hasattr(config.openset, 'tta_n_repeats') and config.openset.tta_n_repeats > 1:
-            #     openset_metrics['tta_repeats'] = config.openset.tta_n_repeats
-            #     openset_metrics['tta_repeat_aggregation'] = config.openset.tta_repeat_aggregation
-            
             # 🎾 타입별 반복 정보 추가
             openset_metrics['tta_repeats_genuine'] = config.openset.tta_n_repeats_genuine
             openset_metrics['tta_repeats_between'] = config.openset.tta_n_repeats_between
@@ -484,11 +480,6 @@ def main(args):
             print(f"      Augmentation: {config_obj.openset.tta_augmentation_strength}")
             print(f"      Aggregation: {config_obj.openset.tta_aggregation}")
             
-            # 🪻 기존 통합 반복 정보 삭제
-            # if hasattr(config_obj.openset, 'tta_n_repeats') and config_obj.openset.tta_n_repeats > 1:
-            #     print(f"   🔄 TTA Repeats: {config_obj.openset.tta_n_repeats}")
-            #     print(f"      Repeat aggregation: {config_obj.openset.tta_repeat_aggregation}")
-            
             # 🎾 타입별 TTA 반복 정보 추가
             print(f"   🔄 Type-specific TTA Repeats:")
             print(f"      Genuine: {config_obj.openset.tta_n_repeats_genuine} repeats")
@@ -510,6 +501,15 @@ def main(args):
             print(f"   Threshold mode: EER")
         
         print("🐋 =========================================\n")
+    
+    # 🦈 ProxyAnchorLoss 설정 확인
+    if hasattr(config_obj.training, 'use_proxy_anchor') and config_obj.training.use_proxy_anchor:
+        print("\n🦈 ========== PROXY ANCHOR LOSS ENABLED ==========")
+        print(f"   Margin (δ): {config_obj.training.proxy_margin}")
+        print(f"   Alpha (α): {config_obj.training.proxy_alpha}")
+        print(f"   LR Ratio: {config_obj.training.proxy_lr_ratio}x")
+        print(f"   Lambda (fixed): {config_obj.training.proxy_lambda}")
+        print("🦈 ===============================================\n")
     
     # GPU 설정
     device = torch.device(
@@ -638,6 +638,16 @@ def main(args):
         'pretrained_path': str(config_obj.model.pretrained_path) if config_obj.model.pretrained_path else None,
         'openset_enabled': openset_enabled,
         'seed': config_obj.training.seed,  # 🥩 seed 정보 저장
+        
+        # 🦈 ProxyAnchorLoss 설정 저장
+        'proxy_anchor_config': {
+            'enabled': config_obj.training.use_proxy_anchor,
+            'margin': config_obj.training.proxy_margin,
+            'alpha': config_obj.training.proxy_alpha,
+            'lr_ratio': config_obj.training.proxy_lr_ratio,
+            'lambda': config_obj.training.proxy_lambda
+        } if hasattr(config_obj.training, 'use_proxy_anchor') and config_obj.training.use_proxy_anchor else None,
+        
         # ⭐️ 에너지 스코어 설정 저장
         'energy_score_config': {
             'enabled': hasattr(config_obj.openset, 'score_mode') and config_obj.openset.score_mode == 'energy',
@@ -645,6 +655,7 @@ def main(args):
             'k_mode': getattr(config_obj.training, 'energy_k_mode', None),
             'k_fixed': getattr(config_obj.training, 'energy_k_fixed', None)
         } if openset_enabled else None,
+        
         # 🥩 TTA 설정 저장
         'tta_config': {
             'enabled': config_obj.openset.tta_n_views > 1,
@@ -653,9 +664,6 @@ def main(args):
             'augmentation_strength': config_obj.openset.tta_augmentation_strength,
             'aggregation': config_obj.openset.tta_aggregation,
             'agree_k': config_obj.openset.tta_agree_k,
-            
-            # 🪻 기존 통합 반복 설정 삭제
-            # 'n_repeats': getattr(config_obj.openset, 'tta_n_repeats', 1),
             
             # 🎾 타입별 반복 설정 추가
             'n_repeats_genuine': config_obj.openset.tta_n_repeats_genuine,
@@ -846,6 +854,13 @@ def main(args):
     print(f"Final Average Accuracy: {final_avg_acc:.2f}%")
     print(f"Final Forgetting Measure: {final_forget:.2f}%")
     
+    # 🦈 ProxyAnchorLoss 최종 정보
+    if hasattr(config_obj.training, 'use_proxy_anchor') and config_obj.training.use_proxy_anchor:
+        print(f"\n🦈 Proxy Anchor Loss Configuration:")
+        print(f"   Margin: {config_obj.training.proxy_margin}")
+        print(f"   Alpha: {config_obj.training.proxy_alpha}")
+        print(f"   Lambda: {config_obj.training.proxy_lambda}")
+    
     # 최종 오픈셋 메트릭
     if openset_enabled and 'TAR' in final_result:
         print(f"\n🐋 Final Open-set Performance:")
@@ -884,7 +899,16 @@ def main(args):
         'total_time_minutes': (time.time() - start_time) / 60,
         'negative_removal_history': training_history['negative_removal_history'],
         'openset_enabled': openset_enabled,
-        'seed': config_obj.training.seed  # 🥩 seed 저장
+        'seed': config_obj.training.seed,  # 🥩 seed 저장
+        
+        # 🦈 ProxyAnchorLoss 설정 추가
+        'proxy_anchor_config': {
+            'enabled': config_obj.training.use_proxy_anchor,
+            'margin': config_obj.training.proxy_margin,
+            'alpha': config_obj.training.proxy_alpha,
+            'lr_ratio': config_obj.training.proxy_lr_ratio,
+            'lambda': config_obj.training.proxy_lambda
+        } if hasattr(config_obj.training, 'use_proxy_anchor') and config_obj.training.use_proxy_anchor else None
     }
     
     # 오픈셋 요약 추가
@@ -934,7 +958,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='SCR Training for CCNet with Open-set Support (Energy Score + TTA + Type-specific Repeats)')
+    parser = argparse.ArgumentParser(description='SCR Training with ProxyAnchorLoss, Energy Score & TTA Support')
     parser.add_argument('--config', type=str, default='config/config.yaml',
                         help='Path to config file')
     parser.add_argument('--seed', type=int, default=42,

@@ -48,23 +48,12 @@ class Training:
     batch_size: int = 128
     seed: int = 42  # 🥩 추가!
     
-    # 💎 ProxyContrastLoss 설정 추가
-    use_proxy_loss: bool = True
-    proxy_lambda: float = 0.3
-    proxy_temperature: float = 0.15  # SupCon보다 높게!
-    proxy_topk: int = 30
-    proxy_full_until: int = 100
-    proxy_warmup_classes: int = 5
-    
-    # 💎 Lambda 스케줄링 (Optional)
-    proxy_lambda_schedule: Optional[Dict[str, float]] = None
-    
-    # 💎 커버리지 샘플링 설정
-    use_coverage_sampling: bool = True
-    coverage_k_per_class: int = 2
-    
-    # 💎 프로토타입 설정
-    prototype_beta: float = 0.05  # EMA 계수 (현재는 미사용)
+    # 🦈 ProxyAnchorLoss 설정 추가
+    use_proxy_anchor: bool = True
+    proxy_margin: float = 0.1        # Proxy Anchor margin δ
+    proxy_alpha: float = 32          # Proxy Anchor scaling α  
+    proxy_lr_ratio: float = 10       # 프록시 학습률 배수
+    proxy_lambda: float = 0.3        # 🦈 고정 가중치 (SupCon: 0.7, ProxyAnchor: 0.3)
     
     # ⭐️ 에너지 스코어 설정 추가
     use_energy_score: bool = False

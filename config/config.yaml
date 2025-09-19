@@ -47,26 +47,12 @@ Training:
   energy_k_mode: 'sqrt'  # 'sqrt', 'fixed', 'log'
   energy_k_fixed: 10
 
-  # 💎 ProxyContrastLoss 설정
-  use_proxy_loss: true
-  proxy_lambda: 0.3  # 손실 가중치
-  proxy_temperature: 0.20  # SupCon(0.07)보다 높게!
-  proxy_topk: 30  # Top-K 클래스
-  proxy_full_until: 100  # 100개 이하면 전체 사용
-  proxy_warmup_classes: 5  # 최소 클래스 수
-  
-  # 💎 Lambda 스케줄링 (점진적 증가)
-  proxy_lambda_schedule:
-    warmup: 0.1      # warmup 직후
-    warmup_10: 0.2   # warmup + 10 exp
-    warmup_20: 0.3   # warmup + 20 exp
-  
-  # 💎 커버리지 샘플링
-  use_coverage_sampling: true
-  coverage_k_per_class: 2  # 클래스당 샘플 수
-  
-  # 💎 프로토타입 설정
-  prototype_beta: 0.05  # EMA 계수 (미래 확장용)
+  # 🦈 ProxyAnchorLoss 설정 추가
+  use_proxy_anchor: true
+  proxy_margin: 0.1        # Proxy Anchor margin δ
+  proxy_alpha: 32          # Proxy Anchor scaling α
+  proxy_lr_ratio: 10       # 프록시 학습률 배수 (백본의 10배)
+  proxy_lambda: 0.3        # 🦈 고정 가중치 (0.3 = 30% ProxyAnchor, 70% SupCon)
 
 # 🐋 오픈셋 인식 설정
 Openset:
