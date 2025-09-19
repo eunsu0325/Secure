@@ -54,16 +54,6 @@ class Training:
     proxy_alpha: float = 32          # Proxy Anchor scaling α  
     proxy_lr_ratio: float = 10       # 프록시 학습률 배수
     proxy_lambda: float = 0.3        # 🦈 고정 가중치 (SupCon: 0.7, ProxyAnchor: 0.3)
-    
-
-    def __post_init__(self):
-        """💎 Lambda 스케줄 기본값 설정"""
-        if self.proxy_lambda_schedule is None and self.use_proxy_loss:
-            self.proxy_lambda_schedule = {
-                'warmup': 0.1,
-                'warmup_10': 0.2,
-                'warmup_20': 0.3
-            }
 
 @dataclasses.dataclass
 class Openset:
@@ -80,9 +70,6 @@ class Openset:
     dev_ratio: float = 0.2
     negref_max_eval: int = 5000
     
-    # ⭐️ 스코어 모드 추가
-    score_mode: str = 'energy'  # 'max' or 'energy'
-    
     # 🍎 추가 옵션
     verbose_calibration: bool = True      # 상세 출력
     
@@ -93,12 +80,7 @@ class Openset:
     tta_augmentation_strength: float = 0.5  # 증강 강도 (0.0~1.0)
     tta_aggregation: str = 'median'  # 'median' or 'mean' for scores
     
-    # 🪻 기존 TTA 반복 설정 (backward compatibility)
-    # tta_n_repeats: int = 1  # TTA 반복 횟수 (기본값 1)
-    # tta_repeat_aggregation: str = 'median'  # 반복 간 집계 방법 'median' or 'mean'
-    # tta_verbose: bool = False  # TTA 디버깅 출력
-    
-    # 🎾 TTA 반복 설정 (기존 필드는 backward compatibility 유지)
+    # 🎾 TTA 반복 설정
     tta_n_repeats: int = 1  # 전체 기본값 (타입별 설정이 없을 때 사용)
     tta_repeat_aggregation: str = 'median'  # 반복 간 집계 방법
     tta_verbose: bool = False  # TTA 디버깅 출력
