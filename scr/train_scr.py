@@ -389,14 +389,6 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
         
         openset_metrics['tau_s'] = trainer.ncm.tau_s
         
-        # ⭐️ 에너지 모드 정보 추가
-        if hasattr(trainer.ncm, 'use_energy') and trainer.ncm.use_energy:
-            openset_metrics['score_mode'] = 'energy'
-            openset_metrics['energy_T'] = trainer.ncm.energy_T
-            openset_metrics['energy_k_mode'] = trainer.ncm.energy_k_mode
-        else:
-            openset_metrics['score_mode'] = 'max'
-        
         # 🥩 TTA 정보 추가
         if use_tta:
             openset_metrics['tta_enabled'] = True
@@ -463,16 +455,6 @@ def main(args):
         print(f"   Warmup users: {config_obj.openset.warmup_users}")
         print(f"   Initial tau: {config_obj.openset.initial_tau}")
         
-        # ⭐️ 에너지 모드 확인
-        if hasattr(config_obj.openset, 'score_mode') and config_obj.openset.score_mode == 'energy':
-            print(f"   ⭐️ Score mode: ENERGY")
-            print(f"      Temperature: {getattr(config_obj.training, 'energy_temperature', 0.15)}")
-            print(f"      K mode: {getattr(config_obj.training, 'energy_k_mode', 'sqrt')}")
-            if getattr(config_obj.training, 'energy_k_mode', 'sqrt') == 'fixed':
-                print(f"      K fixed: {getattr(config_obj.training, 'energy_k_fixed', 10)}")
-        else:
-            print(f"   Score mode: MAX")
-        
         # 🥩 TTA 정보 추가
         if config_obj.openset.tta_n_views > 1:
             print(f"   🎯 TTA: {config_obj.openset.tta_n_views} views")
@@ -521,13 +503,6 @@ def main(args):
     
     # 2. 결과 저장 디렉토리 생성
     results_dir = os.path.join(config_obj.training.results_path, 'scr_results')
-    if openset_enabled:
-        # ⭐️ 에너지 모드면 디렉토리 이름에 표시
-        if hasattr(config_obj.openset, 'score_mode') and config_obj.openset.score_mode == 'energy':
-            results_dir = os.path.join(config_obj.training.results_path, 'scr_openset_energy_results')
-        else:
-            results_dir = os.path.join(config_obj.training.results_path, 'scr_openset_results')
-    os.makedirs(results_dir, exist_ok=True)
     
     # 3. 데이터 스트림 초기화
     print("\n=== Initializing Data Stream ===")
@@ -791,12 +766,6 @@ def main(args):
                     print(f"   TRR_unknown: {openset_metrics['TRR_unknown']:.3f}, FAR_unknown: {openset_metrics['FAR_unknown']:.3f}")
                 print(f"   τ_s: {openset_metrics.get('tau_s', 0):.4f}")
                 
-                # ⭐️ 에너지 모드 정보 출력
-                if openset_metrics.get('score_mode') == 'energy':
-                    print(f"   ⭐️ Mode: Energy (T={openset_metrics.get('energy_T', 0):.2f}, k={openset_metrics.get('energy_k_mode', 'N/A')})")
-                else:
-                    print(f"   Mode: Max")
-                
                 # 🥩 TTA 정보 출력
                 if openset_metrics.get('tta_enabled'):
                     print(f"   🎯 TTA: {openset_metrics.get('tta_views', 1)} views")
@@ -869,12 +838,6 @@ def main(args):
         print(f"   FAR (Unknown): {final_result.get('FAR_unknown', 0):.3f}")
         print(f"   Final τ_s: {final_result.get('tau_s', 0):.4f}")
         
-        # ⭐️ 에너지 모드 최종 정보
-        if final_result.get('score_mode') == 'energy':
-            print(f"   ⭐️ Score Mode: Energy")
-            print(f"      Final T: {final_result.get('energy_T', 0):.2f}")
-            print(f"      Final k mode: {final_result.get('energy_k_mode', 'N/A')}")
-        
         # 🥩 TTA 최종 정보
         if final_result.get('tta_enabled'):
             print(f"   🎯 TTA: Enabled ({final_result.get('tta_views', 1)} views)")
@@ -921,13 +884,6 @@ def main(args):
             'score_mode': final_result.get('score_mode', 'max'),
             'tta_enabled': final_result.get('tta_enabled', False)  # 🥩 TTA 추가
         }
-        
-        # ⭐️ 에너지 설정 추가
-        if final_result.get('score_mode') == 'energy':
-            summary['final_openset']['energy_config'] = {
-                'temperature': final_result.get('energy_T', 0),
-                'k_mode': final_result.get('energy_k_mode', 'N/A')
-            }
         
         # 🥩 TTA 설정 추가
         if final_result.get('tta_enabled'):
