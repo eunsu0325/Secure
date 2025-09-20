@@ -10,6 +10,7 @@ from tqdm import tqdm
 from PIL import Image
 import torch.nn.functional as F
 import copy
+import os  # 추가
 
 from loss import SupConLoss, ProxyAnchorLoss
 from models import get_scr_transforms
@@ -318,7 +319,7 @@ class SCRTrainer:
             print(f"🎲 SCRTrainer initialized with random weights")
 
     def _recreate_optimizer_with_proxies(self):
-        """🔥 핵심: 프록시 추가 시 옵티마이저 안전 재생성"""
+        """🔥 핵심 수정: 프록시 추가 시 옵티마이저 안전 재생성 (상태 복원 제거)"""
         if not self.use_proxy_anchor or self.proxy_anchor_loss.proxies is None:
             return
         
@@ -326,14 +327,7 @@ class SCRTrainer:
         
         # 프록시 수가 변경된 경우에만 재생성
         if current_num_proxies != self.last_num_proxies:
-            # 기존 옵티마이저 상태 백업
-            old_state_dict = None
-            try:
-                old_state_dict = copy.deepcopy(self.optimizer.state_dict())
-            except:
-                print("Warning: Could not backup optimizer state")
-            
-            # 새 옵티마이저 생성
+            # 새 옵티마이저 생성 (상태 복원 없이)
             param_groups = [
                 {'params': self.model.parameters(), 'lr': self.base_lr}
             ]
@@ -346,49 +340,15 @@ class SCRTrainer:
             
             self.optimizer = optim.Adam(param_groups)
             
-            # 백본 네트워크 상태 복원 시도
-            if old_state_dict is not None:
-                try:
-                    new_state_dict = self.optimizer.state_dict()
-                    
-                    # 백본 파라미터 상태만 복원
-                    backbone_params = list(self.model.parameters())
-                    for i, param in enumerate(backbone_params):
-                        param_id = id(param)
-                        
-                        # 이전 상태에서 해당 파라미터 찾기
-                        for old_param_id, old_state in old_state_dict['state'].items():
-                            if i < len(old_state_dict['param_groups'][0]['params']):
-                                new_state_dict['state'][param_id] = old_state
-                                break
-                    
-                    self.optimizer.load_state_dict(new_state_dict)
-                    print(f"✅ Optimizer state restored for backbone parameters")
-                    
-                except Exception as e:
-                    print(f"Warning: Could not restore optimizer state: {e}")
-            
             # 스케줄러 재생성
-            old_scheduler_state = None
-            try:
-                old_scheduler_state = self.scheduler.state_dict()
-            except:
-                pass
-                
             self.scheduler = lr_scheduler.StepLR(
                 self.optimizer,
                 step_size=self.config.training.scheduler_step_size,
                 gamma=self.config.training.scheduler_gamma
             )
             
-            if old_scheduler_state is not None:
-                try:
-                    self.scheduler.load_state_dict(old_scheduler_state)
-                except:
-                    pass
-            
             self.last_num_proxies = current_num_proxies
-            print(f"🔄 Optimizer recreated with {current_num_proxies} proxies")
+            print(f"🔄 Optimizer recreated with {current_num_proxies} proxies (fresh state)")
 
     def _dedup_negative_classes(self, paths, labels, max_per_class=1):
         """네거티브 클래스 중복 제거"""
@@ -1050,7 +1010,12 @@ class SCRTrainer:
         return accuracy
     
     def save_checkpoint(self, path: str):
-        """🔥 안전한 체크포인트 저장"""
+        """🔥 안전한 체크포인트 저장 (디렉토리 생성 추가)"""
+        # 디렉토리 생성
+        save_dir = os.path.dirname(path)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+        
         checkpoint_dict = {
             'model_state_dict': self.model.state_dict(),
             'ncm_state_dict': self.ncm.state_dict(),
@@ -1088,6 +1053,7 @@ class SCRTrainer:
                 print(f"Warning: Could not save openset data: {e}")
         
         torch.save(checkpoint_dict, path)
+        print(f"✅ Checkpoint saved to: {path}")
     
     def load_checkpoint(self, path: str):
         """체크포인트 로드"""

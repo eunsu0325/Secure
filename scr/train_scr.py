@@ -503,7 +503,7 @@ def main(args):
     
     # 2. 결과 저장 디렉토리 생성
     results_dir = os.path.join(config_obj.training.results_path, 'scr_results')
-    
+    os.makedirs(results_dir, exist_ok=True)
     # 3. 데이터 스트림 초기화
     print("\n=== Initializing Data Stream ===")
     data_stream = ExperienceStream(
@@ -915,4 +915,4 @@ if __name__ == "__main__":
                         help='Disable CUDA')
     
     args = parser.parse_args()
-    main(args)
+    main(args)  
