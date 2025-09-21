@@ -17,7 +17,6 @@ Model:
   pretrained_path: /content/drive/MyDrive/net_params1.pth
   # 🧀 프로젝션 헤드 설정
   use_projection: true
-  projection_dim: 128
 
 Training:
   scr_batch_size: 32

@@ -22,6 +22,10 @@ def set_seed(seed: int = 42):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
+    # 완전한 재현성을 위한 추가 설정
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 
 # 🥩 === 채널 처리 헬퍼 ===
 def _open_with_channels(path: str, channels: int) -> Image.Image:

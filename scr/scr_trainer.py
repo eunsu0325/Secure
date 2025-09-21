@@ -176,7 +176,7 @@ class SCRTrainer:
     
         if self.use_proxy_anchor:
             self.proxy_anchor_loss = ProxyAnchorLoss(
-                embedding_size= config.model.projection_dim,
+                embedding_size=config.model.projection_dim,  # 256D로 올바르게 설정
                 margin=getattr(config.training, 'proxy_margin', 0.1),
                 alpha=getattr(config.training, 'proxy_alpha', 32)
             ).to(device)
@@ -989,6 +989,8 @@ class SCRTrainer:
         if len(self.memory_buffer) < 20:  # 최소 샘플 수 확인
             return
 
+        # 현재 모델 모드 저장
+        was_training = self.model.training
         self.model.eval()
 
         # 메모리 버퍼에서 모든 데이터 가져오기 (실제 사용자만)
@@ -1004,6 +1006,9 @@ class SCRTrainer:
                 real_labels.append(label_int)
 
         if len(real_paths) < 10:
+            # 모드 복원 후 리턴
+            if was_training:
+                self.model.train()
             return
 
         # 샘플링 (너무 많으면 일부만)
@@ -1012,54 +1017,80 @@ class SCRTrainer:
             real_paths = [real_paths[i] for i in indices]
             real_labels = [real_labels[i] for i in indices]
 
-        # 특징 추출
-        features = []
-        labels = []
-
-        batch_size = 32
-        for i in range(0, len(real_paths), batch_size):
-            batch_paths = real_paths[i:i+batch_size]
-            batch_labels = real_labels[i:i+batch_size]
-
-            imgs = []
-            for path in batch_paths:
-                img = _open_with_channels(path, self.config.dataset.channels)
-                imgs.append(self.test_transform(img))
-
-            if imgs:
-                batch_tensor = torch.stack(imgs).to(self.device)
-                batch_features = self.model.getFeatureCode(batch_tensor)
-                features.append(batch_features.cpu())
-                labels.extend(batch_labels)
-
-        if not features:
-            return
-
-        all_features = torch.cat(features, dim=0)
-        all_labels = torch.tensor(labels)
-
-        # 정규화 (코사인 유사도 계산용)
-        all_features_norm = F.normalize(all_features, p=2, dim=1)
-
-        # Genuine vs Impostor 코사인 유사도 계산
+        # 🎯 기존 방식과 동일한 NCM 기반 스코어 계산
         genuine_scores = []
         impostor_scores = []
 
-        # 효율적인 샘플링
-        n_samples = min(len(all_features), 50)
-        sample_indices = np.random.choice(len(all_features), n_samples, replace=False)
+        # 클래스별로 데이터 분류
+        from collections import defaultdict
+        by_class = defaultdict(list)
+        for path, label in zip(real_paths, real_labels):
+            by_class[int(label)].append(path)
 
-        for i in sample_indices:
-            for j in sample_indices:
-                if i >= j:
-                    continue
+        # Genuine 스코어 계산 (같은 클래스 내)
+        for cls_id, cls_paths in by_class.items():
+            if len(cls_paths) < 2:
+                continue
 
-                cos_sim = torch.dot(all_features_norm[i], all_features_norm[j]).item()
+            # 클래스 내에서 샘플링
+            sample_paths = cls_paths[:min(5, len(cls_paths))]
 
-                if all_labels[i] == all_labels[j]:
-                    genuine_scores.append(cos_sim)
-                else:
-                    impostor_scores.append(cos_sim)
+            for path in sample_paths:
+                # 특징 추출
+                img = _open_with_channels(path, self.config.dataset.channels)
+                img_tensor = self.test_transform(img).unsqueeze(0).to(self.device)
+
+                # NCM 점수 계산 (6144D 특징 사용)
+                feat = self.model.getFeatureCode(img_tensor)
+                ncm_scores = self.ncm.forward(feat)
+
+                if ncm_scores.numel() > 0:
+                    # 🔧 수정: 클래스 ID를 직접 인덱스로 사용
+                    if cls_id in self.ncm.class_means_dict and cls_id < ncm_scores.shape[1]:
+                        genuine_score = ncm_scores[0, cls_id].item()
+                        genuine_scores.append(genuine_score)
+
+        # Impostor 스코어 계산 (다른 클래스들)
+        max_impostor_samples = 50
+        impostor_count = 0
+
+        for cls_id, cls_paths in by_class.items():
+            if impostor_count >= max_impostor_samples:
+                break
+
+            # 클래스당 최대 3개 샘플
+            sample_paths = cls_paths[:min(3, len(cls_paths))]
+
+            for path in sample_paths:
+                if impostor_count >= max_impostor_samples:
+                    break
+
+                # 특징 추출
+                img = _open_with_channels(path, self.config.dataset.channels)
+                img_tensor = self.test_transform(img).unsqueeze(0).to(self.device)
+
+                # NCM 점수 계산
+                feat = self.model.getFeatureCode(img_tensor)
+                ncm_scores = self.ncm.forward(feat)
+
+                if ncm_scores.numel() > 0:
+                    # 유효한 클래스만으로 Impostor 점수 계산
+                    valid_ids = sorted(self.ncm.class_means_dict.keys())
+                    if len(valid_ids) > 1:  # 최소 2개 클래스 필요
+                        scores_valid = ncm_scores[:, valid_ids].clone()
+                        own_col = valid_ids.index(cls_id) if cls_id in valid_ids else None
+                        if own_col is not None:
+                            scores_valid[0, own_col] = -1e9
+
+                        max_score = scores_valid.max(dim=1).values.item()
+                        if max_score > -1e9:
+                            impostor_scores.append(max_score)
+                            impostor_count += 1
+
+        # 🐛 디버깅: NCM과 메모리 버퍼 동기화 확인
+        print(f"\n🔍 NCM Classes: {sorted(list(self.ncm.class_means_dict.keys()))}")
+        print(f"🔍 Memory Classes: {sorted(list(set(real_labels)))}")
+        print(f"🔍 Sample count - Genuine: {len(genuine_scores)}, Impostor: {len(impostor_scores)}")
 
         # 통계 계산 및 출력
         if genuine_scores and impostor_scores:
@@ -1069,22 +1100,26 @@ class SCRTrainer:
             impostor_std = np.std(impostor_scores)
             separation = genuine_mean - impostor_mean
 
-            print(f"    📊 Cosine Similarity Distribution:")
+            print(f"    📊 NCM Score Distribution (like EER Calculation):")
             print(f"       Genuine:  {genuine_mean:.3f} ± {genuine_std:.3f} (n={len(genuine_scores)})")
             print(f"       Impostor: {impostor_mean:.3f} ± {impostor_std:.3f} (n={len(impostor_scores)})")
             print(f"       Separation: {separation:.3f}")
 
-            # 성능 평가
-            if separation > 0.6:
+            # NCM 스코어 기준 성능 평가 (코사인 유사도와 다른 기준)
+            if separation > 0.3:
                 print(f"       Status: 🟢 Excellent separation")
-            elif separation > 0.4:
-                print(f"       Status: 🟡 Good separation")
             elif separation > 0.2:
+                print(f"       Status: 🟡 Good separation")
+            elif separation > 0.1:
                 print(f"       Status: 🟠 Moderate separation")
             else:
                 print(f"       Status: 🔴 Poor separation")
 
-        self.model.train()
+        # 원래 모델 모드 복원
+        if was_training:
+            self.model.train()
+        else:
+            self.model.eval()
 
     def evaluate(self, test_dataset: Dataset) -> float:
         """NCM을 사용하여 정확도를 평가합니다."""
