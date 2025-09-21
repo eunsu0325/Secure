@@ -173,10 +173,10 @@ class SCRTrainer:
         
         # ProxyAnchorLoss 초기화
         self.use_proxy_anchor = getattr(config.training, 'use_proxy_anchor', True)
-        
+    
         if self.use_proxy_anchor:
             self.proxy_anchor_loss = ProxyAnchorLoss(
-                embedding_size=128,
+                embedding_size= config.model.projection_dim,
                 margin=getattr(config.training, 'proxy_margin', 0.1),
                 alpha=getattr(config.training, 'proxy_alpha', 32)
             ).to(device)
@@ -648,7 +648,7 @@ class SCRTrainer:
                 include_original=self.openset_config.tta_include_original,
                 aug_strength=self.openset_config.tta_augmentation_strength,
                 aggregation=self.openset_config.tta_aggregation,
-                max_pairs=2000,
+                max_pairs=6000,
                 img_size=img_size,
                 channels=channels,
                 n_repeats=n_repeats_between,

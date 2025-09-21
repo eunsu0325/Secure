@@ -25,8 +25,8 @@ Training:
   num_experiences: 100
   memory_size: 1000
   min_samples_per_class: 15
-  scr_epochs: 5
-  iterations_per_epoch: 10
+  scr_epochs: 10
+  iterations_per_epoch: 8
   num_epochs: 3000  # (사용 안 함)
   num_workers: 8
   learning_rate: 0.0001
@@ -38,16 +38,16 @@ Training:
   checkpoint_path: /content/drive/MyDrive/cvc
   results_path: /content/drive/MyDrive/cvc
   gpu_ids: "0"
-  ncm_momentum: 0.9
+  ncm_momentum: 1.0
   seed: 42  # 🥩 추가!
 
 
   # 🦈 ProxyAnchorLoss 설정 추가
   use_proxy_anchor: true
   proxy_margin: 0.1        # Proxy Anchor margin δ
-  proxy_alpha: 32          # Proxy Anchor scaling α
+  proxy_alpha: 16          # Proxy Anchor scaling α
   proxy_lr_ratio: 10       # 프록시 학습률 배수 (백본의 10배)
-  proxy_lambda: 0.4        # 🦈 고정 가중치 (0.3 = 30% ProxyAnchor, 70% SupCon)
+  proxy_lambda: 0.5        # 🦈 고정 가중치 (0.3 = 30% ProxyAnchor, 70% SupCon)
 
 # 🐋 오픈셋 인식 설정
 Openset:
@@ -56,7 +56,7 @@ Openset:
   # ☄️ 임계치 설정
   threshold_mode: 'far'      # 'eer' or 'far'
   target_far: 0.01           # FAR 타겟 1%
-  threshold_alpha: 0.9       # EMA 스무딩 계수
+  threshold_alpha: 1.0       # EMA 스무딩 계수
   threshold_max_delta: 1.0  # 최대 변화폭
   
   # 초기값 및 워밍업
@@ -98,6 +98,6 @@ Openset:
 
 # 🔥 네거티브 샘플 설정
 Negative:
-  warmup_experiences: 4
+  warmup_experiences: 10
   max_per_batch: 1
   r0: 0.5

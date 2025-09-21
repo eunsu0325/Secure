@@ -316,7 +316,7 @@ class ccnet(torch.nn.Module):
             fe_norm = F.normalize(fe, dim=-1)
             z = self.projection_head(fe_norm)
             z = F.normalize(z, dim=-1)
-            return z  # 128D 반환
+            return z  # 예시 128D 반환
         else:
             # 평가 모드: 원본 특징
             return F.normalize(fe, dim=-1)  # 6144D 반환
