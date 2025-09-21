@@ -17,7 +17,6 @@ Model:
   pretrained_path: /content/drive/MyDrive/net_params1.pth
   # 🧀 프로젝션 헤드 설정
   use_projection: true
-  projection_dim: 256
 
 Training:
   scr_batch_size: 32
@@ -48,14 +47,6 @@ Training:
   proxy_alpha: 16          # Proxy Anchor scaling α
   proxy_lr_ratio: 10       # 프록시 학습률 배수 (백본의 10배)
   proxy_lambda: 0.5        # 🦈 고정 가중치 (0.3 = 30% ProxyAnchor, 70% SupCon)
-
-  # 🌀 구면 기하 최적화 설정
-  proxy_init_method: 'fps'    # 'random', 'fps', 'etf'
-  proxy_repulsion_lambda: 1e-5  # 반발 정규화 강도
-  proxy_repulsion_target: -0.004  # 목표 코사인 (≈ -1/256)
-  proxy_redistrib_epoch: 10   # 재분산 주기 (에폭)
-  proxy_redistrib_steps: 5    # 재분산 스텝 수
-  proxy_redistrib_eta: 1e-3   # Thomson 스텝 크기
 
 # 🐋 오픈셋 인식 설정
 Openset:

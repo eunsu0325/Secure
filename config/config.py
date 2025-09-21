@@ -51,17 +51,9 @@ class Training:
     # 🦈 ProxyAnchorLoss 설정 추가
     use_proxy_anchor: bool = True
     proxy_margin: float = 0.1        # Proxy Anchor margin δ
-    proxy_alpha: float = 32          # Proxy Anchor scaling α
+    proxy_alpha: float = 32          # Proxy Anchor scaling α  
     proxy_lr_ratio: float = 10       # 프록시 학습률 배수
     proxy_lambda: float = 0.3        # 🦈 고정 가중치 (SupCon: 0.7, ProxyAnchor: 0.3)
-
-    # 🌀 구면 기하 최적화 설정
-    proxy_init_method: str = 'fps'           # 'random', 'fps', 'etf'
-    proxy_repulsion_lambda: float = 1e-5     # 반발 정규화 강도
-    proxy_repulsion_target: Optional[float] = None  # 목표 코사인 (None이면 자동)
-    proxy_redistrib_epoch: int = 10          # 재분산 주기 (에폭)
-    proxy_redistrib_steps: int = 5           # 재분산 스텝 수
-    proxy_redistrib_eta: float = 1e-3        # Thomson 스텝 크기
 
 @dataclasses.dataclass
 class Openset:
