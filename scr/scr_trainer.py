@@ -178,15 +178,23 @@ class SCRTrainer:
             self.proxy_anchor_loss = ProxyAnchorLoss(
                 embedding_size=config.model.projection_dim,  # 256D로 올바르게 설정
                 margin=getattr(config.training, 'proxy_margin', 0.1),
-                alpha=getattr(config.training, 'proxy_alpha', 32)
+                alpha=getattr(config.training, 'proxy_alpha', 32),
+                # 🌀 구면 기하 최적화 설정 추가
+                init_method=getattr(config.training, 'proxy_init_method', 'fps'),
+                repulsion_lambda=float(getattr(config.training, 'proxy_repulsion_lambda', 1e-5)),
+                repulsion_target=getattr(config.training, 'proxy_repulsion_target', None)
             ).to(device)
-            
+
             self.proxy_lambda = getattr(config.training, 'proxy_lambda', 0.3)
-            
+
             print(f"🦈 ProxyAnchorLoss enabled:")
             print(f"   Margin (δ): {self.proxy_anchor_loss.margin}")
             print(f"   Alpha (α): {self.proxy_anchor_loss.alpha}")
             print(f"   Lambda (fixed): {self.proxy_lambda}")
+            print(f"🌀 Spherical Geometry Optimization:")
+            print(f"   Init Method: {self.proxy_anchor_loss.init_method}")
+            print(f"   Repulsion λ: {self.proxy_anchor_loss.repulsion_lambda}")
+            print(f"   Target Cos: {self.proxy_anchor_loss.repulsion_target}")
         else:
             self.proxy_anchor_loss = None
             self.proxy_lambda = 0.0

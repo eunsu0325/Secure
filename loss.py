@@ -7,6 +7,7 @@ from __future__ import print_function
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from utils.utils_openset import init_proxies_fps, init_proxies_etf, proxy_repulsion_loss
 
 class SupConLoss(nn.Module):
     """Supervised Contrastive Learning: https://arxiv.org/pdf/2004.11362.pdf.
@@ -109,12 +110,18 @@ class ProxyAnchorLoss(nn.Module):
     프록시를 앵커로 사용하여 data-to-data relations를 활용하는 손실 함수
     Continual Learning을 위한 동적 프록시 추가 지원
     """
-    def __init__(self, embedding_size=128, margin=0.1, alpha=32):
+    def __init__(self, embedding_size=128, margin=0.1, alpha=32,
+                 init_method='fps', repulsion_lambda=1e-5, repulsion_target=None):
         super().__init__()
         self.embedding_size = embedding_size
         self.margin = margin
         self.alpha = alpha
-        
+
+        # 🌀 구면 기하 최적화 설정
+        self.init_method = init_method  # 'fps', 'etf', 'random'
+        self.repulsion_lambda = repulsion_lambda
+        self.repulsion_target = repulsion_target
+
         # 동적 프록시 관리
         self.proxies = None
         self.class_to_idx = {}
@@ -122,31 +129,55 @@ class ProxyAnchorLoss(nn.Module):
     
     @torch.no_grad()
     def add_classes(self, class_ids):
-        """새 클래스 프록시 추가 (gradient 계산 없음)"""
+        """새 클래스 프록시 추가 - 구면 기하 최적화 적용"""
         new_ids = [c for c in class_ids if c not in self.class_to_idx]
         if not new_ids:
             return
-        
-        n_new = len(new_ids)
-        device = (self.proxies.device if self.proxies is not None 
+
+        device = (self.proxies.device if self.proxies is not None
                   else torch.device("cuda" if torch.cuda.is_available() else "cpu"))
-        
-        # 새 프록시 초기화 (kaiming_normal)
-        new_p = torch.randn(n_new, self.embedding_size, device=device)
-        nn.init.kaiming_normal_(new_p, mode='fan_out')
-        
+
+        # 기존 프록시가 없으면 전체 재초기화
         if self.proxies is None:
-            self.proxies = nn.Parameter(new_p)
+            total_classes = len(new_ids)
+            if self.init_method == 'fps':
+                new_proxies = init_proxies_fps(total_classes, self.embedding_size, device=device)
+                print(f"🌀 Initialized {total_classes} proxies with FPS")
+            elif self.init_method == 'etf':
+                new_proxies = init_proxies_etf(total_classes, self.embedding_size, device=device)
+                print(f"🌀 Initialized {total_classes} proxies with ETF")
+            else:  # random
+                new_proxies = torch.randn(total_classes, self.embedding_size, device=device)
+                new_proxies = F.normalize(new_proxies, p=2, dim=1)
+                print(f"🌀 Initialized {total_classes} proxies with Random")
+
+            self.proxies = nn.Parameter(new_proxies)
         else:
+            # 기존 프록시에 새 프록시 추가
+            n_new = len(new_ids)
+            total_classes = self.num_classes + n_new
+
+            if self.init_method == 'fps':
+                # 새 프록시만 FPS로 추가
+                new_p = init_proxies_fps(n_new, self.embedding_size, device=device)
+                print(f"🌀 Added {n_new} new proxies with FPS")
+            elif self.init_method == 'etf':
+                new_p = init_proxies_etf(n_new, self.embedding_size, device=device)
+                print(f"🌀 Added {n_new} new proxies with ETF")
+            else:
+                new_p = torch.randn(n_new, self.embedding_size, device=device)
+                new_p = F.normalize(new_p, p=2, dim=1)
+                print(f"🌀 Added {n_new} new proxies with Random")
+
             combined = torch.cat([self.proxies.data, new_p], dim=0)
             self.proxies = nn.Parameter(combined)
-        
+
         # 매핑 업데이트
         for i, cid in enumerate(new_ids):
             self.class_to_idx[cid] = self.num_classes + i
-        self.num_classes += n_new
-        
-        print(f"ProxyAnchor: Added {n_new} proxies, Total: {self.num_classes}")
+        self.num_classes += len(new_ids)
+
+        print(f"ProxyAnchor: Added {len(new_ids)} proxies, Total: {self.num_classes}")
         
     def forward(self, X, T):
         """
@@ -207,8 +238,18 @@ class ProxyAnchorLoss(nn.Module):
         # 수치 안정성: log1p + clamp_min
         pos_term = torch.log1p(P_sim_sum[with_pos].clamp_min(1e-12)).sum() / num_valid
         neg_term = torch.log1p(N_sim_sum.clamp_min(1e-12)).sum() / self.num_classes
-        
-        return pos_term + neg_term
+
+        # 🌀 구면 기하 최적화: Repulsion Loss 추가
+        anchor_loss = pos_term + neg_term
+        if self.repulsion_lambda > 0 and self.proxies is not None and self.num_classes > 1:
+            repulsion_loss = proxy_repulsion_loss(
+                F.normalize(self.proxies, p=2, dim=1),
+                target_cos=self.repulsion_target,
+                lambda_rep=self.repulsion_lambda
+            )
+            return anchor_loss + repulsion_loss
+        else:
+            return anchor_loss
     
     def get_proxies(self):
         """정규화된 프록시 반환"""

@@ -4,6 +4,7 @@
 import numpy as np
 import torch
 import torch.nn.functional as F
+import math
 from PIL import Image
 from typing import List, Tuple, Set, Dict, Optional, Union
 import os
@@ -12,6 +13,143 @@ from torchvision import transforms as T
 from torchvision.transforms import InterpolationMode
 import random
 from tqdm import tqdm
+
+# 🌀 === 구면 기하 최적화 ===
+@torch.no_grad()
+def init_proxies_fps(num_classes: int, dim: int, num_cands: int = 10000, device: str = 'cpu'):
+    """Farthest Point Sampling으로 프록시 초기화"""
+    if num_classes <= 1:
+        return torch.randn(num_classes, dim, device=device)
+
+    # 후보군 생성
+    U = torch.randn(num_cands, dim, device=device)
+    U = F.normalize(U, p=2, dim=1)
+
+    # 첫 번째 프록시 랜덤 선택
+    idx = torch.randint(0, num_cands, (1,), device=device).item()
+    P = [U[idx]]
+    mask = torch.ones(num_cands, dtype=torch.bool, device=device)
+    mask[idx] = False
+
+    # 나머지 프록시들을 FPS로 선택
+    for _ in range(1, num_classes):
+        if mask.sum() == 0:  # 후보 소진
+            break
+
+        # 기존 프록시들과의 코사인 유사도 계산
+        S = torch.stack(P, dim=0)  # (t, d)
+        candidates = U[mask]       # (M, d)
+        cos_matrix = candidates @ S.T  # (M, t)
+
+        # 각 후보의 '가장 가까운' 기존 프록시와의 코사인 = min_cos
+        # 가장 멀리 떨어진 후보를 고르려면 min_cos가 가장 '작은' 걸 택하는 게 직관적
+        min_cos, _ = cos_matrix.min(dim=1)
+        pick_rel = torch.argmin(min_cos)  # 가장 멀리 떨어진 점 선택
+        pick_idx = torch.arange(num_cands, device=device)[mask][pick_rel]
+
+        P.append(U[pick_idx])
+        mask[pick_idx] = False
+
+    P = torch.stack(P, dim=0)  # (K, d)
+    return F.normalize(P, p=2, dim=1)
+
+@torch.no_grad()
+def init_proxies_etf(num_classes: int, dim: int, device: str = 'cpu'):
+    """
+    ETF (Equiangular Tight Frame) 초기화 - 수학적으로 견고한 버전
+    K개 클래스를 구면 상에 등각에 가깝게 배치.
+    - K <= dim+1이면 정규 심플렉스(d차원 안)로 정확히 가능
+    - K > dim+1이면 임의 직교투영으로 근사 (ETF-like)
+    """
+    K = num_classes
+    if K == 1:
+        v = torch.randn(1, dim, device=device)
+        return F.normalize(v, p=2, dim=1)
+
+    # 1) R^K에서 정규 심플렉스(컬럼별 평균 0, 쌍별 내적 일정)
+    I = torch.eye(K, device=device)
+    one = torch.ones(K, K, device=device) / K
+    V = I - one          # (K, K), 컬럼들이 심플렉스 꼭짓점(평균 0)
+
+    # 2) d차원으로 투영: Q는 (d x K) 직교 행렬의 상위 d행
+    #    -> K > d+1이면 근사 ETF가 됨
+    A = torch.randn(dim, K, device=device)
+    Q, _ = torch.linalg.qr(A.T, mode='reduced')   # (K x dim)
+    Q = Q.T                                       # (dim x K)
+
+    P = Q @ V                                     # (dim x K)
+    P = P.T                                       # (K x dim)
+    return F.normalize(P, p=2, dim=1)
+
+def proxy_repulsion_loss(proxies: torch.Tensor, target_cos: float = None, lambda_rep: float = 1e-5):
+    """프록시 간 반발 정규화 손실"""
+    if proxies.size(0) <= 1:
+        return torch.tensor(0.0, device=proxies.device)
+
+    dim = proxies.size(1)
+    if target_cos is None:
+        target_cos = -1.0 / dim  # 차원에 따른 자동 조정
+
+    # 프록시 간 코사인 유사도 계산
+    cos_matrix = proxies @ proxies.T  # (K, K)
+
+    # 대각선 제외한 상삼각 부분만 사용
+    mask = torch.triu(torch.ones_like(cos_matrix), diagonal=1).bool()
+    cos_pairs = cos_matrix[mask]
+
+    # 목표값보다 큰 코사인에만 페널티
+    violations = (cos_pairs - target_cos).clamp_min(0)
+
+    return lambda_rep * violations.mean()
+
+@torch.no_grad()
+def thomson_step(proxies: torch.Tensor, eta: float = 5e-4, alpha: float = 1.0):
+    """
+    Thomson 문제 기반 프록시 재분산 한 스텝
+    주의: 매우 작은 eta로, 드물게만 사용해야 함
+    """
+    K, d = proxies.shape
+    if K <= 1:
+        return proxies
+
+    gradients = torch.zeros_like(proxies)
+
+    for i in range(K):
+        # i번째 프록시에 대한 다른 프록시들로부터의 반발력
+        diff = proxies[i].unsqueeze(0) - proxies  # (K, d)
+        distances = diff.norm(p=2, dim=1).clamp_min(1e-6)  # 0 나누기 방지
+
+        # 자기 자신 제외
+        mask = torch.arange(K, device=proxies.device) != i
+        diff = diff[mask]
+        distances = distances[mask]
+
+        # 반발력 계산: 1/r^α 비례
+        weights = (1.0 / (distances ** alpha)).unsqueeze(1)
+        gradients[i] = (weights * diff).sum(dim=0)
+
+    # 그래디언트 방향으로 업데이트
+    new_proxies = proxies + eta * gradients
+
+    # 구면 위로 재정규화
+    return F.normalize(new_proxies, p=2, dim=1)
+
+@torch.no_grad()
+def redistribute_proxies(proxy_parameter, steps: int = 5, eta: float = 5e-4):
+    """
+    프록시 재분산 유틸리티 - 파라미터 안전하게 업데이트
+    새 클래스 추가시에만 사용 권장
+    """
+    if proxy_parameter is None or proxy_parameter.size(0) <= 1:
+        return
+
+    current_proxies = F.normalize(proxy_parameter.data, p=2, dim=1)
+
+    for _ in range(steps):
+        current_proxies = thomson_step(current_proxies, eta=eta, alpha=1.0)
+
+    # 안전한 파라미터 업데이트
+    proxy_parameter.data.copy_(current_proxies)
 
 # 🥩 시드 고정 (재현성)
 def set_seed(seed: int = 42):
