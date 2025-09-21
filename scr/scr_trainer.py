@@ -534,6 +534,10 @@ class SCRTrainer:
                 avg_loss = epoch_loss / self.config.training.iterations_per_epoch
                 print(f"  Epoch [{epoch+1}/{self.config.training.scr_epochs}] Loss: {avg_loss:.4f}")
 
+                # 📊 에포크마다 코사인 유사도 분포 분석
+                if (epoch + 1) % 5 == 0 or epoch == self.config.training.scr_epochs - 1:
+                    self._analyze_cosine_distribution_epoch()
+
         # 메모리 버퍼 업데이트
         self.memory_buffer.update_from_dataset(train_paths, train_labels)
         print(f"Memory buffer size after update: {len(self.memory_buffer)}")
@@ -977,6 +981,109 @@ class SCRTrainer:
         real_classes = [k for k in class_means.keys() if k < self.base_id]
         print(f"🍄 Updated NCM with {len(real_classes)} real classes (no fake contamination)")
         
+        self.model.train()
+
+    @torch.no_grad()
+    def _analyze_cosine_distribution_epoch(self):
+        """📊 에포크마다 코사인 유사도 분포 분석"""
+        if len(self.memory_buffer) < 20:  # 최소 샘플 수 확인
+            return
+
+        self.model.eval()
+
+        # 메모리 버퍼에서 모든 데이터 가져오기 (실제 사용자만)
+        all_paths, all_labels = self.memory_buffer.get_all_data()
+
+        # 가짜 클래스 필터링
+        real_paths = []
+        real_labels = []
+        for path, label in zip(all_paths, all_labels):
+            label_int = int(label) if not isinstance(label, int) else label
+            if label_int < self.base_id:
+                real_paths.append(path)
+                real_labels.append(label_int)
+
+        if len(real_paths) < 10:
+            return
+
+        # 샘플링 (너무 많으면 일부만)
+        if len(real_paths) > 200:
+            indices = np.random.choice(len(real_paths), 200, replace=False)
+            real_paths = [real_paths[i] for i in indices]
+            real_labels = [real_labels[i] for i in indices]
+
+        # 특징 추출
+        features = []
+        labels = []
+
+        batch_size = 32
+        for i in range(0, len(real_paths), batch_size):
+            batch_paths = real_paths[i:i+batch_size]
+            batch_labels = real_labels[i:i+batch_size]
+
+            imgs = []
+            for path in batch_paths:
+                img = _open_with_channels(path, self.config.dataset.channels)
+                imgs.append(self.test_transform(img))
+
+            if imgs:
+                batch_tensor = torch.stack(imgs).to(self.device)
+                batch_features = self.model.getFeatureCode(batch_tensor)
+                features.append(batch_features.cpu())
+                labels.extend(batch_labels)
+
+        if not features:
+            return
+
+        all_features = torch.cat(features, dim=0)
+        all_labels = torch.tensor(labels)
+
+        # 정규화 (코사인 유사도 계산용)
+        all_features_norm = F.normalize(all_features, p=2, dim=1)
+
+        # Genuine vs Impostor 코사인 유사도 계산
+        genuine_scores = []
+        impostor_scores = []
+
+        # 효율적인 샘플링
+        n_samples = min(len(all_features), 50)
+        sample_indices = np.random.choice(len(all_features), n_samples, replace=False)
+
+        for i in sample_indices:
+            for j in sample_indices:
+                if i >= j:
+                    continue
+
+                cos_sim = torch.dot(all_features_norm[i], all_features_norm[j]).item()
+
+                if all_labels[i] == all_labels[j]:
+                    genuine_scores.append(cos_sim)
+                else:
+                    impostor_scores.append(cos_sim)
+
+        # 통계 계산 및 출력
+        if genuine_scores and impostor_scores:
+            genuine_mean = np.mean(genuine_scores)
+            genuine_std = np.std(genuine_scores)
+            impostor_mean = np.mean(impostor_scores)
+            impostor_std = np.std(impostor_scores)
+            separation = genuine_mean - impostor_mean
+
+            print(f"    📊 Cosine Similarity Distribution:")
+            print(f"       Genuine:  {genuine_mean:.3f} ± {genuine_std:.3f} (n={len(genuine_scores)})")
+            print(f"       Impostor: {impostor_mean:.3f} ± {impostor_std:.3f} (n={len(impostor_scores)})")
+            print(f"       Separation: {separation:.3f}")
+
+            # 성능 평가
+            if separation > 0.6:
+                print(f"       Status: 🟢 Excellent separation")
+            elif separation > 0.4:
+                print(f"       Status: 🟡 Good separation")
+            elif separation > 0.2:
+                print(f"       Status: 🟠 Moderate separation")
+            else:
+                print(f"       Status: 🔴 Poor separation")
+
         self.model.train()
 
     def evaluate(self, test_dataset: Dataset) -> float:
