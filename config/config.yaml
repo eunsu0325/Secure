@@ -16,6 +16,7 @@ Model:
   use_pretrained: true
   pretrained_path: /content/drive/MyDrive/net_params1.pth
   # 🧀 프로젝션 헤드 설정
+  projection_dim: 1024
   use_projection: true
 
 Training:
@@ -83,7 +84,7 @@ Openset:
   tta_n_repeats_genuine: 3      # Genuine 점수: 3번 반복 (정확도 중요)
   tta_n_repeats_between: 3      # Between impostor: 2번 반복 (균형)
   tta_n_repeats_negref: 0       # NegRef: 1번 (메모리 절약)
-  tta_repeat_aggregation: 'median'  # 반복 간 집계 방법
+  tta_repeat_aggregation: 'mean'  # 반복 간 집계 방법
   tta_verbose: true  # TTA 디버깅 출력
   
   # 🎾 Impostor 점수 비율 설정 (합이 1.0이 되어야 함)

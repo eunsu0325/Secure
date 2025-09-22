@@ -248,16 +248,16 @@ class ArcMarginProduct(nn.Module):
 class ProjectionHead(nn.Module):
     """
     🧀 논문 기본 구조: 2층 + LayerNorm
-    6144 -> 2048 (LayerNorm) -> ReLU -> projection_dim (LayerNorm)
+    2048 -> 1024 (LayerNorm) -> ReLU -> projection_dim (LayerNorm)
     """
-    def __init__(self, input_dim: int = 6144, projection_dim: int = 128):
+    def __init__(self, input_dim: int = 2048, projection_dim: int = 128):
         super().__init__()
         
         # 2층 구조 고정
-        self.fc1 = nn.Linear(input_dim, 2048)
-        self.ln1 = nn.LayerNorm(2048)
+        self.fc1 = nn.Linear(input_dim, 1024)
+        self.ln1 = nn.LayerNorm(1024)
         self.relu = nn.ReLU(inplace=True)
-        self.fc2 = nn.Linear(2048, projection_dim)
+        self.fc2 = nn.Linear(1024, projection_dim)
         self.ln2 = nn.LayerNorm(projection_dim)
     
     def forward(self, x):
@@ -292,8 +292,8 @@ class ccnet(torch.nn.Module):
         # 🧀 프로젝션 헤드 추가
         self.use_projection = use_projection
         if use_projection:
-            self.projection_head = ProjectionHead(input_dim=6144, projection_dim=projection_dim)
-            print(f"🧀 Projection Head enabled: 6144 -> 2048 -> {projection_dim}D")
+            self.projection_head = ProjectionHead(input_dim=2048, projection_dim=projection_dim)
+            print(f"🧀 Projection Head enabled: 2048 -> 1024 -> {projection_dim}D")
             print(f"   Structure: 2 layers with LayerNorm (논문 기본)")
 
 
@@ -306,20 +306,20 @@ class ccnet(torch.nn.Module):
 
         x1 = self.fc(x)
         x = self.fc1(x1)
-        fe = torch.cat((x1,x),dim=1) # 4096D + 2048D = 6144D Feature Embedding
-        # x = self.drop(x) 🔥
+        #fe = torch.cat((x1,x),dim=1) # 4096D + 2048D = 6144D Feature Embedding
+        #x = self.drop(x) 
         # x = self.arclayer_(x, y) 🔥
 
         # 🔥 핵심 수정: 프로젝션 헤드 적용
         if self.training and self.use_projection:
             # 학습 모드: 프로젝션 적용
-            fe_norm = F.normalize(fe, dim=-1)
+            fe_norm = F.normalize(x, dim=-1)
             z = self.projection_head(fe_norm)
             z = F.normalize(z, dim=-1)
             return z  # 예시 128D 반환
         else:
             # 평가 모드: 원본 특징
-            return F.normalize(fe, dim=-1)  # 6144D 반환
+            return F.normalize(x, dim=-1)  # 6144D 반환
     
     def getFeatureCode(self, x):
         x1 = self.cb1(x)
@@ -335,11 +335,11 @@ class ccnet(torch.nn.Module):
         x2 = self.fc1(x1)
         # x = x / torch.norm(x, p=2, dim=1, keepdim=True)
 
-        fe = torch.cat((x1, x2), dim=1)
+        # fe = torch.cat((x1, x2), dim=1)
         # 🔧 정규화 제거: NCM에서 통합 처리
         # fe = fe / torch.norm(fe, p=2, dim=1, keepdim=True)
 
-        return fe
+        return x2
 
 
 if __name__== "__main__" :
