@@ -16,7 +16,7 @@ Model:
   use_pretrained: true
   pretrained_path: /content/drive/MyDrive/net_params1.pth
   # 🧀 프로젝션 헤드 설정
-  projection_dim: 1024
+  projection_dim: 128
   use_projection: true
 
 Training:
