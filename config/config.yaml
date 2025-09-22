@@ -23,9 +23,9 @@ Training:
   memory_batch_size: 96
   num_experiences: 100
   memory_size: 1000
-  min_samples_per_class: 15
-  scr_epochs: 10
-  iterations_per_epoch: 8
+  min_samples_per_class: 7
+  scr_epochs: 5
+  iterations_per_epoch: 10
   num_epochs: 3000  # (사용 안 함)
   num_workers: 8
   learning_rate: 0.0001
@@ -74,7 +74,7 @@ Openset:
   tta_include_original: true  # 원본 포함 권장
   tta_agree_k: 0  # 0=과반 자동, 2=2개 이상 동의
   tta_augmentation_strength: 1.0  # 0.3~0.7 권장
-  tta_aggregation: 'mean'  # 'median' or 'mean'
+  tta_aggregation: 'median'  # 'median' or 'mean'
   
   # 🪻 기존 TTA 반복 설정
   # tta_n_repeats: 3  # TTA 반복 횟수
@@ -83,7 +83,7 @@ Openset:
   tta_n_repeats_genuine: 3      # Genuine 점수: 3번 반복 (정확도 중요)
   tta_n_repeats_between: 3      # Between impostor: 2번 반복 (균형)
   tta_n_repeats_negref: 0       # NegRef: 1번 (메모리 절약)
-  tta_repeat_aggregation: 'mean'  # 반복 간 집계 방법
+  tta_repeat_aggregation: 'median'  # 반복 간 집계 방법
   tta_verbose: true  # TTA 디버깅 출력
   
   # 🎾 Impostor 점수 비율 설정 (합이 1.0이 되어야 함)
