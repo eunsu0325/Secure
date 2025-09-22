@@ -754,7 +754,11 @@ class SCRTrainer:
     @torch.no_grad()
     def _evaluate_openset(self):
         """오픈셋 평가 (TTA 지원)"""
-        
+
+        # 🔧 재현성: 평가 시 시드 재설정
+        eval_seed = getattr(self.config.training, 'seed', 42)
+        set_seed(eval_seed)
+
         use_tta = self.use_tta and TTA_FUNCTIONS_AVAILABLE
         img_size = self.config.dataset.height
         channels = self.config.dataset.channels
@@ -787,7 +791,8 @@ class SCRTrainer:
                     aug_strength=self.openset_config.tta_augmentation_strength,
                     return_details=True,
                     img_size=img_size,
-                    channels=channels
+                    channels=channels,
+                    seed=eval_seed + 5000  # 🔧 재현성: seed 전달
                 )
                 
                 # TTA 통계 출력
@@ -823,6 +828,8 @@ class SCRTrainer:
                 unknown_filtered.append(p)
         
         if len(unknown_filtered) > 1000:
+            # 🔧 재현성: config seed 기반 샘플링
+            np.random.seed(eval_seed + 1000)  # deterministic offset
             unknown_filtered = np.random.choice(unknown_filtered, 1000, replace=False).tolist()
         
         if unknown_filtered:
@@ -835,7 +842,8 @@ class SCRTrainer:
                     agree_k=self.openset_config.tta_agree_k,
                     aug_strength=self.openset_config.tta_augmentation_strength,
                     img_size=img_size,
-                    channels=channels
+                    channels=channels,
+                    seed=eval_seed + 3000  # 🔧 재현성: seed 전달
                 )
             else:
                 preds_unk = predict_batch(
@@ -852,6 +860,8 @@ class SCRTrainer:
         )
         
         if len(negref_paths) > 1000:
+            # 🔧 재현성: config seed 기반 샘플링
+            np.random.seed(eval_seed + 2000)  # deterministic offset
             negref_paths = np.random.choice(negref_paths, 1000, replace=False).tolist()
         
         if negref_paths:
@@ -864,7 +874,8 @@ class SCRTrainer:
                     agree_k=self.openset_config.tta_agree_k,
                     aug_strength=self.openset_config.tta_augmentation_strength,
                     img_size=img_size,
-                    channels=channels
+                    channels=channels,
+                    seed=eval_seed + 4000  # 🔧 재현성: seed 전달
                 )
             else:
                 preds_neg = predict_batch(

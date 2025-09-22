@@ -114,7 +114,8 @@ def extract_features(model, paths: List[str], transform, device,
             
         x = torch.stack(batch, dim=0).to(device)
         f = model.getFeatureCode(x)
-        f = F.normalize(f, p=2, dim=1, eps=1e-12)
+        # 🔧 정규화 제거: NCM에서 통합 처리
+        # f = F.normalize(f, p=2, dim=1, eps=1e-12)
         feats.append(f.cpu())
     
     return torch.cat(feats, dim=0).numpy() if feats else np.array([])
@@ -160,11 +161,11 @@ def get_light_augmentation(strength: float = 0.5, img_size: int = 128) -> T.Comp
 # 🥩 === TTA 메인 함수 ===
 @torch.no_grad()
 def predict_batch_tta(
-    model, 
-    ncm, 
-    paths: List[str], 
+    model,
+    ncm,
+    paths: List[str],
     base_transform,
-    device, 
+    device,
     n_views: int = 3,
     include_original: bool = True,
     agree_k: int = 0,
@@ -173,11 +174,15 @@ def predict_batch_tta(
     return_details: bool = False,
     img_size: int = 128,
     channels: int = 1,
-    verbose: bool = False
+    verbose: bool = False,
+    seed: int = 42  # 🔧 재현성: seed 파라미터 추가
 ) -> Union[np.ndarray, Tuple[np.ndarray, List[Dict]]]:
     """
     Test-Time Augmentation 기반 Multi-view Consensus 예측
     """
+    # 🔧 재현성: TTA seed 설정
+    set_seed(seed)
+
     if not paths:
         return (np.array([]), []) if return_details else np.array([])
     
@@ -257,7 +262,8 @@ def predict_batch_tta(
         
         features = model.getFeatureCode(batch_flat)
         features = features.view(B, n_views, -1)
-        features = F.normalize(features, p=2, dim=2, eps=1e-12)
+        # 🔧 정규화 제거: NCM에서 통합 처리
+        # features = F.normalize(features, p=2, dim=2, eps=1e-12)
         
         for i in range(B):
             view_scores = []
@@ -423,12 +429,13 @@ def extract_scores_genuine_tta(
             feat_batch = model.getFeatureCode(batch)
             features.append(feat_batch)
         features = torch.cat(features, dim=0)
-    
-    features = F.normalize(features, p=2, dim=1, eps=1e-12)
-    
+
+    # 🔧 정규화 제거: NCM에서 통합 처리
+    # features = F.normalize(features, p=2, dim=1, eps=1e-12)
+
     current_sample_idx = -1
     repeat_scores = []
-    
+
     for i, (s_idx, r_idx, v_idx, label) in enumerate(sample_info):
         if s_idx != current_sample_idx:
             if current_sample_idx >= 0 and repeat_scores:
@@ -578,12 +585,13 @@ def extract_scores_impostor_between_tta(
             feat_batch = model.getFeatureCode(batch)
             features.append(feat_batch)
         features = torch.cat(features, dim=0)
-    
-    features = F.normalize(features, p=2, dim=1, eps=1e-12)
-    
+
+    # 🔧 정규화 제거: NCM에서 통합 처리
+    # features = F.normalize(features, p=2, dim=1, eps=1e-12)
+
     current_sample_idx = -1
     repeat_scores = []
-    
+
     for i, (s_idx, r_idx, v_idx, cls_id) in enumerate(sample_info):
         if s_idx != current_sample_idx:
             if current_sample_idx >= 0 and repeat_scores:
@@ -729,8 +737,9 @@ def extract_scores_impostor_negref_tta(
         del batch_tensor
     
     features = torch.cat(features_list, dim=0)
-    features = F.normalize(features, p=2, dim=1, eps=1e-12)
-    
+    # 🔧 정규화 제거: NCM에서 통합 처리
+    # features = F.normalize(features, p=2, dim=1, eps=1e-12)
+
     current_sample_idx = -1
     repeat_scores = []
     view_scores = []
@@ -1029,7 +1038,8 @@ def predict_batch(model, ncm, paths: List[str], transform, device,
         
         x = torch.stack(batch, dim=0).to(device)
         feat = model.getFeatureCode(x)
-        feat = F.normalize(feat, p=2, dim=1, eps=1e-12)
+        # 🔧 정규화 제거: NCM에서 통합 처리
+        # feat = F.normalize(feat, p=2, dim=1, eps=1e-12)
         pred = ncm.predict_openset(feat)
         preds.extend(pred.cpu().numpy())
     
