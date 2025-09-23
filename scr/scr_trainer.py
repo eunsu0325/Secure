@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset, Subset, ConcatDataset
+from torch.utils.data import DataLoader, Dataset, ConcatDataset
 from torch.optim import lr_scheduler
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Set
@@ -82,6 +82,28 @@ def get_balanced_indices(n_samples: int, target_size: int, seed_offset: int = 0)
     
     np.random.shuffle(indices)
     return np.array(indices)
+
+
+def repeat_and_augment_data(paths, labels, target_size):
+    """데이터를 목표 크기에 맞춰 반복 증강"""
+    if not paths or target_size <= 0:
+        return [], []
+
+    if len(paths) >= target_size:
+        # 충분한 데이터가 있으면 랜덤 샘플링
+        indices = torch.randperm(len(paths))[:target_size]
+        return [paths[i] for i in indices], [labels[i] for i in indices]
+
+    # 부족한 경우 순환 반복해서 목표 크기 달성
+    repeated_paths = []
+    repeated_labels = []
+
+    for i in range(target_size):
+        idx = i % len(paths)  # 순환 인덱스
+        repeated_paths.append(paths[idx])
+        repeated_labels.append(labels[idx])
+
+    return repeated_paths, repeated_labels
 
 
 class MemoryDataset(Dataset):
@@ -413,10 +435,15 @@ class SCRTrainer:
         
         self.registered_users.add(user_id)
         
-        # 현재 사용자 데이터셋 생성
+        # 🔧 현재 사용자 데이터를 scr_batch_size만큼 증강
+        augmented_current_paths, augmented_current_labels = repeat_and_augment_data(
+            train_paths, train_labels, self.config.training.scr_batch_size
+        )
+
+        # 증강된 현재 사용자 데이터셋 생성
         current_dataset = MemoryDataset(
-            paths=train_paths,
-            labels=train_labels,
+            paths=augmented_current_paths,
+            labels=augmented_current_labels,
             transform=self.train_transform,
             train=True,
             channels=self.config.dataset.channels
@@ -433,13 +460,8 @@ class SCRTrainer:
             
             for iteration in range(self.config.training.iterations_per_epoch):
                 
-                # 공평한 반복 샘플링
-                current_indices = get_balanced_indices(
-                    len(current_dataset),
-                    self.config.training.scr_batch_size,
-                    self.experience_count * 1000 + epoch * 100 + iteration
-                )
-                current_subset = Subset(current_dataset, current_indices)
+                # 🔧 증강된 현재 데이터를 전체 사용 (이미 scr_batch_size로 맞춰짐)
+                current_subset = current_dataset
                 
                 # 메모리에서 샘플링
                 if len(self.memory_buffer) > 0:
@@ -456,7 +478,7 @@ class SCRTrainer:
                             memory_paths, memory_labels, max_per_class=self.max_neg_per_class
                         )
                         
-                        cap = self._memory_cap_for_ratio(len(current_indices), self.r0)
+                        cap = self._memory_cap_for_ratio(self.config.training.scr_batch_size, self.r0)
                         if cap >= 0 and len(memory_paths) > cap:
                             idx = np.random.choice(len(memory_paths), size=cap, replace=False)
                             memory_paths = [memory_paths[i] for i in idx]
@@ -466,14 +488,19 @@ class SCRTrainer:
                         memory_paths, memory_labels = (list(map(list, zip(*kept))) if kept else ([], []))
                     
                     if memory_paths:
+                        # 🔧 메모리 데이터를 memory_batch_size만큼 증강
+                        augmented_memory_paths, augmented_memory_labels = repeat_and_augment_data(
+                            memory_paths, memory_labels, self.config.training.memory_batch_size
+                        )
+
                         memory_dataset = MemoryDataset(
-                            paths=memory_paths,
-                            labels=memory_labels,
+                            paths=augmented_memory_paths,
+                            labels=augmented_memory_labels,
                             transform=self.train_transform,
                             train=True,
                             channels=self.config.dataset.channels
                         )
-                        
+
                         combined_dataset = ConcatDataset([current_subset, memory_dataset])
                     else:
                         combined_dataset = current_subset
