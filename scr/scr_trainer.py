@@ -175,11 +175,19 @@ class SCRTrainer:
         self.use_proxy_anchor = getattr(config.training, 'use_proxy_anchor', True)
     
         if self.use_proxy_anchor:
+            # 🔧 실제 특징 차원에 맞춰 ProxyAnchor 초기화
+            if config.model.use_projection:
+                embedding_dim = config.model.projection_dim  # 프로젝션 헤드 사용 시
+            else:
+                embedding_dim = 2048  # getFeatureCode() 출력 차원 (fc1 출력)
+
             self.proxy_anchor_loss = ProxyAnchorLoss(
-                embedding_size=config.model.projection_dim,  # 256D로 올바르게 설정
+                embedding_size=embedding_dim,
                 margin=getattr(config.training, 'proxy_margin', 0.1),
                 alpha=getattr(config.training, 'proxy_alpha', 32)
             ).to(device)
+
+            print(f"🦈 ProxyAnchor initialized with {embedding_dim}D embeddings")
             
             self.proxy_lambda = getattr(config.training, 'proxy_lambda', 0.3)
             
