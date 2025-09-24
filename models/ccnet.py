@@ -335,11 +335,11 @@ class ccnet(torch.nn.Module):
         x2 = self.fc1(x1)
         # x = x / torch.norm(x, p=2, dim=1, keepdim=True)
 
-        # fe = torch.cat((x1, x2), dim=1)
+        fe = torch.cat((x1, x2), dim=1)
         # 🔧 정규화 제거: NCM에서 통합 처리
         # fe = fe / torch.norm(fe, p=2, dim=1, keepdim=True)
 
-        return x2
+        return fe
 
 
 if __name__== "__main__" :
