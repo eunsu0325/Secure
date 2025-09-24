@@ -36,6 +36,7 @@ class Training:
     num_epochs: int
     num_workers: int
     learning_rate: float
+    projection_learning_rate: float = 0.0005  # 프로젝션 헤드 학습률
     scheduler_step_size: int
     scheduler_gamma: float
     temperature: float

@@ -30,6 +30,7 @@ Training:
   num_epochs: 3000  # (사용 안 함)
   num_workers: 8
   learning_rate: 0.0001
+  projection_learning_rate: 0.0005  # 프로젝션 헤드 학습률 (백본의 5배)
   scheduler_step_size: 50
   scheduler_gamma: 0.8
   temperature: 0.07  # SupConLoss용

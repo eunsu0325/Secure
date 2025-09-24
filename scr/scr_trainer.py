@@ -225,11 +225,8 @@ class SCRTrainer:
         self.base_lr = config.training.learning_rate
         self.proxy_lr_ratio = getattr(config.training, 'proxy_lr_ratio', 10) if self.use_proxy_anchor else 1
         
-        # 초기 옵티마이저 (백본만)
-        self.optimizer = optim.Adam(
-            self.model.parameters(),
-            lr=self.base_lr
-        )
+        # 초기 옵티마이저 (그룹별 학습률 적용)
+        self.optimizer = self._create_optimizer_with_grouped_params(include_proxies=False)
         
         # 스케줄러
         self.scheduler = lr_scheduler.StepLR(
@@ -348,6 +345,50 @@ class SCRTrainer:
         else:
             print(f"🎲 SCRTrainer initialized with random weights")
 
+
+    def _create_optimizer_with_grouped_params(self, include_proxies=True):
+        """🔧 파라미터 그룹별로 다른 학습률 적용한 옵티마이저 생성"""
+        param_groups = []
+
+        # 백본과 프로젝션 헤드 파라미터 분리
+        backbone_params = []
+        projection_params = []
+
+        for name, param in self.model.named_parameters():
+            if 'projection_head' in name:
+                projection_params.append(param)
+            else:
+                backbone_params.append(param)
+
+        # 백본 파라미터 그룹 (사전학습된 CCNet)
+        if backbone_params:
+            param_groups.append({
+                'params': backbone_params,
+                'lr': self.config.training.learning_rate,
+                'name': 'backbone'
+            })
+            print(f"🏗️ Backbone LR: {self.config.training.learning_rate:.6f}")
+
+        # 프로젝션 헤드 파라미터 그룹 (새로 초기화된 레이어)
+        if projection_params and self.config.model.use_projection:
+            param_groups.append({
+                'params': projection_params,
+                'lr': self.config.training.projection_learning_rate,
+                'name': 'projection'
+            })
+            print(f"🧀 Projection Head LR: {self.config.training.projection_learning_rate:.6f}")
+
+        # 프록시 파라미터 그룹 (새로 초기화된 프록시)
+        if include_proxies and self.use_proxy_anchor and hasattr(self, 'proxy_anchor_loss') and self.proxy_anchor_loss.proxies is not None:
+            param_groups.append({
+                'params': [self.proxy_anchor_loss.proxies],
+                'lr': self.base_lr * self.proxy_lr_ratio,
+                'name': 'proxies'
+            })
+            print(f"🦈 Proxies LR: {self.base_lr * self.proxy_lr_ratio:.6f} ({self.proxy_lr_ratio}x)")
+
+        return optim.Adam(param_groups)
+
     def _recreate_optimizer_with_proxies(self):
         """🔥 핵심 수정: 프록시 추가 시 옵티마이저 안전 재생성 (상태 복원 제거)"""
         if not self.use_proxy_anchor or self.proxy_anchor_loss.proxies is None:
@@ -357,18 +398,8 @@ class SCRTrainer:
         
         # 프록시 수가 변경된 경우에만 재생성
         if current_num_proxies != self.last_num_proxies:
-            # 새 옵티마이저 생성 (상태 복원 없이)
-            param_groups = [
-                {'params': self.model.parameters(), 'lr': self.base_lr}
-            ]
-            
-            if self.proxy_anchor_loss.proxies is not None:
-                param_groups.append({
-                    'params': [self.proxy_anchor_loss.proxies], 
-                    'lr': self.base_lr * self.proxy_lr_ratio
-                })
-            
-            self.optimizer = optim.Adam(param_groups)
+            # 새 옵티마이저 생성 (그룹별 학습률 적용)
+            self.optimizer = self._create_optimizer_with_grouped_params(include_proxies=True)
             
             # 스케줄러 재생성
             self.scheduler = lr_scheduler.StepLR(
