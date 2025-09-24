@@ -8,7 +8,7 @@ Dataset:
   channels: 1
   augmentation: true
   negative_samples_file: /content/drive/MyDrive/CCNet_OKD_CD/data/train_Tongji.txt
-  num_negative_classes: 10
+  num_negative_classes: 100
 
 Model:
   architecture: ccnet
@@ -16,15 +16,15 @@ Model:
   use_pretrained: true
   pretrained_path: /content/drive/MyDrive/net_params1.pth
   # 🧀 프로젝션 헤드 설정
-  projection_dim: 128
+  projection_dim: 512
   use_projection: true
 
 Training:
-  scr_batch_size: 32
-  memory_batch_size: 96
+  scr_batch_size: 18
+  memory_batch_size: 110
   num_experiences: 100
   memory_size: 1000
-  min_samples_per_class: 7
+  min_samples_per_class: 9
   scr_epochs: 5
   iterations_per_epoch: 10
   num_epochs: 3000  # (사용 안 함)
@@ -44,9 +44,9 @@ Training:
 
   # 🦈 ProxyAnchorLoss 설정 추가
   use_proxy_anchor: true
-  proxy_margin: 0.1        # Proxy Anchor margin δ
-  proxy_alpha: 16          # Proxy Anchor scaling α
-  proxy_lr_ratio: 10       # 프록시 학습률 배수 (백본의 10배)
+  proxy_margin: 0.5        # Proxy Anchor margin δ
+  proxy_alpha: 64          # Proxy Anchor scaling α
+  proxy_lr_ratio: 1       # 프록시 학습률 배수 (백본의 10배)
   proxy_lambda: 0.5        # 🦈 고정 가중치 (0.3 = 30% ProxyAnchor, 70% SupCon)
 
 # 🐋 오픈셋 인식 설정
@@ -64,7 +64,7 @@ Openset:
   initial_tau: 0.5           # 초기 임계치
   
   # 데이터 분할
-  dev_ratio: 0.3             # Dev 세트 비율
+  dev_ratio: 0.1             # Dev 세트 비율
   negref_max_eval: 100      # NegRef 최대 샘플
   
   # 로깅
@@ -75,14 +75,14 @@ Openset:
   tta_include_original: true  # 원본 포함 권장
   tta_agree_k: 0  # 0=과반 자동, 2=2개 이상 동의
   tta_augmentation_strength: 1.0  # 0.3~0.7 권장
-  tta_aggregation: 'median'  # 'median' or 'mean'
+  tta_aggregation: 'mean'  # 'median' or 'mean'
   
   # 🪻 기존 TTA 반복 설정
   # tta_n_repeats: 3  # TTA 반복 횟수
   
   # 🎾 타입별 독립적인 TTA 반복 설정
-  tta_n_repeats_genuine: 3      # Genuine 점수: 3번 반복 (정확도 중요)
-  tta_n_repeats_between: 3      # Between impostor: 2번 반복 (균형)
+  tta_n_repeats_genuine: 2      # Genuine 점수: 3번 반복 (정확도 중요)
+  tta_n_repeats_between: 2      # Between impostor: 2번 반복 (균형)
   tta_n_repeats_negref: 0       # NegRef: 1번 (메모리 절약)
   tta_repeat_aggregation: 'mean'  # 반복 간 집계 방법
   tta_verbose: true  # TTA 디버깅 출력
@@ -91,13 +91,10 @@ Openset:
   impostor_ratio_between: 1.0    # Between impostor 30%
   impostor_ratio_unknown: 0.0    # Unknown 0% (현재 미사용)
   impostor_ratio_negref: 0.0     # NegRef 70%
-  impostor_balance_total: 100   # 균형 맞출 총 샘플 수
-  
-  # (선택) 전체 기본값 - 타입별 설정이 없을 때 사용
-  # tta_n_repeats: 3  # 비활성화 (타입별 설정 우선)
+  impostor_balance_total: 6000   # 균형 맞출 총 샘플 수
 
 # 🔥 네거티브 샘플 설정
 Negative:
-  warmup_experiences: 10
+  warmup_experiences: 4
   max_per_batch: 1
   r0: 0.5
