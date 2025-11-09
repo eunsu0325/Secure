@@ -3,11 +3,7 @@
 """
 Supervised Contrastive Replay (SCR) Training Script with Open-set Support
 CCNet + SCR for Continual Learning
-🦈 ProxyAnchorLoss Support Added
-⭐️ Energy Score Support Added
-🎯 TTA Support Added
-🫐 TTA Repeats Support Added
-🎾 Type-specific TTA Repeats & Impostor Ratios Added
+ProxyAnchorLoss and TTA Support
 """
 
 import os
@@ -45,21 +41,11 @@ from scr import (
     SCRTrainer
 )
 
-# 🥩 오픈셋 함수들 import 추가
-try:
-    from utils.utils_openset import (
-        predict_batch,
-        predict_batch_tta,
-        load_paths_labels_from_txt
-    )
-    TTA_AVAILABLE = True
-except ImportError:
-    from utils.utils_openset import (
-        predict_batch,
-        load_paths_labels_from_txt
-    )
-    TTA_AVAILABLE = False
-    print("⚠️ TTA functions not available")
+from utils.utils_openset import (
+    predict_batch,
+    predict_batch_tta,
+    load_paths_labels_from_txt
+)
 
 def compute_safe_base_id(*txt_files):
     """모든 txt 파일에서 최대 user ID를 찾아 안전한 BASE_ID 계산"""
@@ -88,29 +74,10 @@ def purge_negatives(memory_buffer, base_id):
             removed += len(memory_buffer.buffer_groups[c].buffer)
             del memory_buffer.buffer_groups[c]
         memory_buffer.seen_classes.discard(c)
-    print(f"🧹 Purged {len(to_del)} negative classes ({removed} samples)")
+    print(f"Purged {len(to_del)} negative classes ({removed} samples)")
 
-def remove_negative_samples_gradually(memory_buffer: ClassBalancedBuffer, 
-                                    base_id: int,
-                                    removal_ratio: float = 0.2):
-    """메모리 버퍼에서 negative 샘플을 점진적으로 제거"""
-    negative_classes = [int(c) for c in memory_buffer.seen_classes if int(c) >= base_id]
-    
-    if not negative_classes:
-        return 0
-    
-    num_to_remove = max(1, int(len(negative_classes) * removal_ratio))
-    classes_to_remove = np.random.choice(negative_classes, size=num_to_remove, replace=False)
-    
-    removed_count = 0
-    for class_id in classes_to_remove:
-        if class_id in memory_buffer.buffer_groups:
-            removed_count += len(memory_buffer.buffer_groups[class_id].buffer)
-            del memory_buffer.buffer_groups[class_id]
-            memory_buffer.seen_classes.remove(class_id)
-    
-    print(f"Removed {num_to_remove} negative classes ({removed_count} samples)")
-    return removed_count
+# [제거됨] remove_negative_samples_gradually 함수는 사용하지 않음
+# 대신 purge_negatives로 워밍업 종료 시 한번에 제거
 
 @torch.no_grad()
 def plot_tsne_from_memory(trainer,
@@ -281,8 +248,8 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
     """
     test_set_file을 사용한 전체 평가
     openset_mode=True면 오픈셋 평가도 수행
-    🥩 TTA 지원 추가
-    
+    TTA 지원 포함
+
     Returns:
         (accuracy, openset_metrics) if openset_mode else (accuracy, None)
     """
@@ -303,9 +270,8 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
     if not known_classes:
         return (0.0, {}) if openset_mode else (0.0, None)
     
-    # 🥩 TTA 설정 확인
-    use_tta = (TTA_AVAILABLE and 
-               hasattr(trainer, 'use_tta') and trainer.use_tta and 
+    # TTA 설정 확인
+    use_tta = (hasattr(trainer, 'use_tta') and trainer.use_tta and
                hasattr(config, 'openset') and config.openset.tta_n_views > 1)
     
     if openset_mode and trainer.openset_enabled:
@@ -334,7 +300,7 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
             known_paths = [test_dataset.images_path[i] for i in known_indices] 
             known_labels = [int(test_dataset.images_label[i]) for i in known_indices]
             
-            # 🥩 TTA 또는 일반 예측
+            # TTA 또는 일반 예측
             if use_tta:
                 preds = predict_batch_tta(
                     trainer.model, trainer.ncm,
@@ -365,7 +331,7 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
             
             unknown_paths = [test_dataset.images_path[i] for i in unknown_indices]
             
-            # 🥩 TTA 또는 일반 예측
+            # TTA 또는 일반 예측
             if use_tta:
                 preds = predict_batch_tta(
                     trainer.model, trainer.ncm,
@@ -402,12 +368,8 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
         else:
             openset_metrics['tta_enabled'] = False
         
-        print(f"Evaluating on {len(known_indices)} known + {len(unknown_indices)} unknown samples")
-        if use_tta:
-            print(f"   🎯 Using TTA with {config.openset.tta_n_views} views")
-            # 🎾 타입별 반복 정보 출력
-            print(f"   🔄 Type-specific repeats: G={config.openset.tta_n_repeats_genuine}, "
-                  f"B={config.openset.tta_n_repeats_between}, N={config.openset.tta_n_repeats_negref}")
+        print(f"Evaluating on {len(known_indices)} known + {len(unknown_indices)} unknown samples" +
+              (" (TTA enabled)" if use_tta else ""))
         
         return accuracy, openset_metrics
     
@@ -438,7 +400,7 @@ def main(args):
     print(f"Using config: {args.config}")
     print(config)
     
-    # 🥩 config에 seed 설정 추가 (SCRTrainer가 사용)
+    # config에 seed 설정 추가 (SCRTrainer가 사용)
     if not hasattr(config_obj.training, 'seed'):
         config_obj.training.seed = args.seed
     
@@ -455,22 +417,16 @@ def main(args):
         print(f"   Warmup users: {config_obj.openset.warmup_users}")
         print(f"   Initial tau: {config_obj.openset.initial_tau}")
         
-        # 🥩 TTA 정보 추가
+        # TTA 설정 (시작 시 한 번만 자세히 출력)
         if config_obj.openset.tta_n_views > 1:
-            print(f"   🎯 TTA: {config_obj.openset.tta_n_views} views")
-            print(f"      Include original: {config_obj.openset.tta_include_original}")
-            print(f"      Augmentation: {config_obj.openset.tta_augmentation_strength}")
-            print(f"      Aggregation: {config_obj.openset.tta_aggregation}")
-            
-            # 🎾 타입별 TTA 반복 정보 추가
-            print(f"   🔄 Type-specific TTA Repeats:")
-            print(f"      Genuine: {config_obj.openset.tta_n_repeats_genuine} repeats")
-            print(f"      Between: {config_obj.openset.tta_n_repeats_between} repeats")
-            print(f"      NegRef: {config_obj.openset.tta_n_repeats_negref} repeats")
-            print(f"      Repeat aggregation: {config_obj.openset.tta_repeat_aggregation}")
+            print(f"   TTA Configuration:")
+            print(f"      Views: {config_obj.openset.tta_n_views} (+original: {config_obj.openset.tta_include_original})")
+            print(f"      Type-specific repeats: G={config_obj.openset.tta_n_repeats_genuine}, "
+                  f"B={config_obj.openset.tta_n_repeats_between}, N={config_obj.openset.tta_n_repeats_negref}")
+            print(f"      Aggregation: {config_obj.openset.tta_aggregation} (repeat: {config_obj.openset.tta_repeat_aggregation})")
         
-        # 🎾 Impostor 비율 정보 추가
-        print(f"   📊 Impostor Ratios:")
+        # Impostor 비율 정보
+        print(f"   Impostor Ratios:")
         print(f"      Between: {config_obj.openset.impostor_ratio_between*100:.0f}%")
         print(f"      Unknown: {config_obj.openset.impostor_ratio_unknown*100:.0f}%")
         print(f"      NegRef: {config_obj.openset.impostor_ratio_negref*100:.0f}%")
@@ -758,15 +714,9 @@ def main(args):
                     print(f"   TRR_unknown: {openset_metrics['TRR_unknown']:.3f}, FAR_unknown: {openset_metrics['FAR_unknown']:.3f}")
                 print(f"   τ_s: {openset_metrics.get('tau_s', 0):.4f}")
                 
-                # 🥩 TTA 정보 출력
+                # TTA 사용 여부만 간단히 표시
                 if openset_metrics.get('tta_enabled'):
-                    print(f"   🎯 TTA: {openset_metrics.get('tta_views', 1)} views")
-                    
-                    # 🎾 타입별 반복 정보 출력
-                    print(f"   🔄 Type-specific repeats:")
-                    print(f"      Genuine: {openset_metrics.get('tta_repeats_genuine', 1)}")
-                    print(f"      Between: {openset_metrics.get('tta_repeats_between', 1)}")
-                    print(f"      NegRef: {openset_metrics.get('tta_repeats_negref', 1)}")
+                    print(f"   TTA: Active")
             
             # Trainer의 오픈셋 평가 히스토리도 저장
             if hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
@@ -830,16 +780,12 @@ def main(args):
         print(f"   FAR (Unknown): {final_result.get('FAR_unknown', 0):.3f}")
         print(f"   Final τ_s: {final_result.get('tau_s', 0):.4f}")
         
-        # 🥩 TTA 최종 정보
+        # TTA 최종 요약
         if final_result.get('tta_enabled'):
-            print(f"   🎯 TTA: Enabled ({final_result.get('tta_views', 1)} views)")
-            
-            # 🎾 타입별 반복 최종 정보
-            print(f"   🔄 Type-specific Repeats:")
-            print(f"      Genuine: {final_result.get('tta_repeats_genuine', 1)}")
-            print(f"      Between: {final_result.get('tta_repeats_between', 1)}")
-            print(f"      NegRef: {final_result.get('tta_repeats_negref', 1)}")
-            print(f"      Aggregation: {final_result.get('tta_repeat_aggregation', 'median')}")
+            print(f"   TTA: Enabled (views={final_result.get('tta_views', 1)}, "
+                  f"repeats=G{final_result.get('tta_repeats_genuine', 1)}/"
+                  f"B{final_result.get('tta_repeats_between', 1)}/"
+                  f"N{final_result.get('tta_repeats_negref', 1)})")
     
     print(f"\nTotal Training Time: {(time.time() - start_time)/60:.1f} minutes")
     

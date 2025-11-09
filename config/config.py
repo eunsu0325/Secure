@@ -26,6 +26,7 @@ class Model:
 
 @dataclasses.dataclass
 class Training:
+    # 기본값이 없는 필수 필드들
     scr_batch_size: int
     memory_batch_size: int
     num_experiences: int
@@ -45,14 +46,16 @@ class Training:
     results_path: Path
     gpu_ids: str
     ncm_momentum: float
+
+    # 기본값이 있는 선택적 필드들
     projection_learning_rate: float = 0.0005  # 프로젝션 헤드 학습률
     batch_size: int = 128
     seed: int = 42  # 🥩 추가!
-    
+
     # 🦈 ProxyAnchorLoss 설정 추가
     use_proxy_anchor: bool = True
     proxy_margin: float = 0.1        # Proxy Anchor margin δ
-    proxy_alpha: float = 32          # Proxy Anchor scaling α  
+    proxy_alpha: float = 32          # Proxy Anchor scaling α
     proxy_lr_ratio: float = 10       # 프록시 학습률 배수
     proxy_lambda: float = 0.3        # 🦈 고정 가중치 (SupCon: 0.7, ProxyAnchor: 0.3)
 
