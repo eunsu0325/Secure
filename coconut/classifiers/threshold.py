@@ -1,4 +1,4 @@
-# 🐋 scr/threshold_calculator.py (수정)
+# coconut/classifiers/threshold.py
 """
 EER 기반 임계치 계산 및 스무딩
 - 코사인 유사도 기준

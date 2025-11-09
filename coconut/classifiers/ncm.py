@@ -1,4 +1,8 @@
-# scr/ncm_classifier.py
+"""
+NCM (Nearest Class Mean) Classifier for COCONUT
+최적화된 거리 기반 분류기
+"""
+
 from typing import Dict
 import torch
 from torch import Tensor, nn
@@ -8,7 +12,7 @@ import torch.nn.functional as F
 class NCMClassifier(nn.Module):
     """
     NCM (Nearest Class Mean) Classifier - 최적화 버전.
-    
+
     🚀 최적화: cdist 대신 행렬곱 사용 (2-3배 빠름)
     ✅ normalize=True: 코사인 유사도 기반
     """
@@ -19,7 +23,7 @@ class NCMClassifier(nn.Module):
         self.class_means_dict = {}
         self.normalize = normalize
         self.max_class = -1
-        
+
         # 오픈셋 관련
         self.tau_s = None            # 전역 임계치
         self.unknown_id = -1         # Unknown 클래스 ID
@@ -41,13 +45,13 @@ class NCMClassifier(nn.Module):
 
         max_class = max(self.class_means_dict.keys())
         self.max_class = max(max_class, self.max_class)
-        
+
         first_mean = list(self.class_means_dict.values())[0]
         feature_size = first_mean.size(0)
         device = first_mean.device
-        
+
         self.class_means = torch.zeros(self.max_class + 1, feature_size).to(device)
-        
+
         for k, v in self.class_means_dict.items():
             self.class_means[k] = self.class_means_dict[k].clone()
 
@@ -55,17 +59,17 @@ class NCMClassifier(nn.Module):
     def forward(self, x):
         """
         🚀 최적화된 NCM 분류
-        
+
         normalize=True: 코사인 유사도 (정규화 후 내적)
         normalize=False: 유클리디안 거리 (제곱 거리 사용)
         """
         # NCM이 비어있으면 빈 점수 반환
         if self.class_means_dict == {}:
             return torch.zeros((x.shape[0], 0), device=x.device, dtype=x.dtype)
-        
+
         # dtype 일치 보장 (fp16/AMP 지원)
         M = self.class_means.to(device=x.device, dtype=x.dtype)
-        
+
         if self.normalize:
             # 코사인 유사도 기반
             x = F.normalize(x, p=2, dim=1, eps=1e-12)
@@ -85,60 +89,60 @@ class NCMClassifier(nn.Module):
         현재 주로 사용되는 메서드
         """
         assert isinstance(class_means_dict, dict)
-        
+
         self.class_means_dict = {k: v.clone() for k, v in class_means_dict.items()}
-        
+
         # 방어적 정규화 (normalize=True일 때)
         if self.normalize:
             for k in self.class_means_dict:
                 self.class_means_dict[k] = F.normalize(
                     self.class_means_dict[k], p=2, dim=0, eps=1e-12
                 )
-        
+
         self._vectorize_means_dict()
-    
+
     def predict(self, x):
         """클래스 예측을 반환합니다."""
         # NCM이 비어있으면 -1 반환
         if len(self.class_means_dict) == 0:
             return torch.full((x.shape[0],), -1, dtype=torch.long, device=x.device)
-        
+
         scores = self.forward(x)
         return scores.argmax(dim=1)
-    
+
     def get_num_classes(self):
         """현재 저장된 클래스 수를 반환합니다."""
         return len(self.class_means_dict)
-    
+
     def get_class_means(self):
         """현재 저장된 클래스 평균들을 반환합니다."""
         return self.class_means_dict.copy()
-    
+
     def set_thresholds(self, tau_s: float):
         """오픈셋 임계치 설정"""
         self.tau_s = float(tau_s)
-    
+
     @torch.no_grad()
     def predict_openset(self, x):
         """오픈셋 예측 (최댓값 모드)"""
         # NCM이 비어있으면 모두 -1 반환
         if len(self.class_means_dict) == 0:
             return torch.full((x.shape[0],), -1, dtype=torch.long, device=x.device)
-        
+
         # 기존 최댓값 모드
         scores = self.forward(x)  # (B, C)
-        
+
         # Top-1 추출
         top1 = scores.topk(1, dim=1)
         max_score = top1.values[:, 0]
         pred = top1.indices[:, 0]
-        
+
         # 임계치 적용
         if self.tau_s is not None:
             accept = max_score >= self.tau_s
         else:
             accept = torch.ones_like(max_score, dtype=torch.bool)
-        
+
         pred[~accept] = self.unknown_id
-        
+
         return pred
