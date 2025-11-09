@@ -1,22 +1,22 @@
 # config/config.yaml
 
 Dataset:
-  train_set_file: /content/drive/MyDrive/Data/GPDSmanosASM_txt/train_palma.txt
-  test_set_file: /content/drive/MyDrive/Data/GPDSmanosASM_txt/test_palma.txt
+  train_set_file: /content/drive/MyDrive/데이터셋/train_BJTU.txt
+  test_set_file: /content/drive/MyDrive/데이터셋/test_BJTU.txt
   height: 128
   width: 128
   channels: 1
   augmentation: true
-  negative_samples_file: /content/drive/MyDrive/CCNet_OKD_CD/data/train_Tongji.txt
+  negative_samples_file: /content/drive/MyDrive/데이터셋/train_IITD.txt
   num_negative_classes: 100
 
 Model:
   architecture: ccnet
   competition_weight: 0.8
   use_pretrained: true
-  pretrained_path: /content/drive/MyDrive/net_params1.pth
+  pretrained_path:/content/drive/MyDrive/tongji.pth
   # 🧀 프로젝션 헤드 설정
-  projection_dim: 512
+  projection_dim: 128
   use_projection: true
 
 Training:
@@ -29,8 +29,8 @@ Training:
   iterations_per_epoch: 10
   num_epochs: 3000  # (사용 안 함)
   num_workers: 8
-  learning_rate: 0.0001
-  projection_learning_rate: 0.0005  # 프로젝션 헤드 학습률 (백본의 5배)
+  learning_rate: 0.00001
+  projection_learning_rate: 0.00005  # 프로젝션 헤드 학습률 (백본의 5배)
   scheduler_step_size: 50
   scheduler_gamma: 0.8
   temperature: 0.07  # SupConLoss용
@@ -45,10 +45,10 @@ Training:
 
   # 🦈 ProxyAnchorLoss 설정 추가
   use_proxy_anchor: true
-  proxy_margin: 0.5        # Proxy Anchor margin δ
-  proxy_alpha: 64          # Proxy Anchor scaling α
+  proxy_margin: 0.1        # Proxy Anchor margin δ
+  proxy_alpha: 32          # Proxy Anchor scaling α
   proxy_lr_ratio: 1       # 프록시 학습률 배수 (백본의 10배)
-  proxy_lambda: 0.5        # 🦈 고정 가중치 (0.3 = 30% ProxyAnchor, 70% SupCon)
+  proxy_lambda: 0.7        # 🦈 고정 가중치 (0.3 = 30% ProxyAnchor, 70% SupCon)
 
 # 🐋 오픈셋 인식 설정
 Openset:
@@ -82,8 +82,8 @@ Openset:
   # tta_n_repeats: 3  # TTA 반복 횟수
   
   # 🎾 타입별 독립적인 TTA 반복 설정
-  tta_n_repeats_genuine: 2      # Genuine 점수: 3번 반복 (정확도 중요)
-  tta_n_repeats_between: 2      # Between impostor: 2번 반복 (균형)
+  tta_n_repeats_genuine: 3      # Genuine 점수: 3번 반복 (정확도 중요)
+  tta_n_repeats_between: 3      # Between impostor: 2번 반복 (균형)
   tta_n_repeats_negref: 0       # NegRef: 1번 (메모리 절약)
   tta_repeat_aggregation: 'mean'  # 반복 간 집계 방법
   tta_verbose: true  # TTA 디버깅 출력
