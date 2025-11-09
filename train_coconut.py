@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Supervised Contrastive Replay (SCR) Training Script with Open-set Support
-CCNet + SCR for Continual Learning
-ProxyAnchorLoss and TTA Support
+COCONUT Training Script with Open-set Support
+CCNet + ProxyAnchor + SupCon for Continual Learning
+TTA Support Included
 """
 
 import os
@@ -33,12 +33,15 @@ from PIL import Image
 import torch.nn.functional as F
 
 from models import ccnet, MyDataset, get_scr_transforms
-from scr import (
-    ExperienceStream,
+
+# 🥥 COCONUT 모듈 import
+from coconut import (
     ClassBalancedBuffer,
     NCMClassifier,
-    SCRTrainer
+    COCONUTTrainer
 )
+from coconut.memory import ExperienceStream
+from coconut.training import ContinualLearningEvaluator
 
 from utils.utils_openset import (
     predict_batch,
@@ -197,53 +200,8 @@ def plot_tsne_from_memory(trainer,
 
     print(f"[t-SNE] Saved to {save_path}")
 
-class ContinualLearningEvaluator:
-    """
-    Continual Learning 평가 메트릭 계산
-    - Average Accuracy
-    - Forgetting Measure
-    - Open-set metrics (TAR, TRR, FAR)
-    """
-    def __init__(self, num_experiences: int):
-        self.num_experiences = num_experiences
-        self.accuracy_history = defaultdict(list)
-        self.openset_history = []
 
-    def update(self, experience_id: int, accuracy: float):
-        """experience_id 학습 후 정확도 업데이트"""
-        self.accuracy_history[experience_id].append(accuracy)
-
-    def update_openset(self, metrics: dict):
-        """오픈셋 메트릭 업데이트"""
-        self.openset_history.append(metrics)
-
-    def get_average_accuracy(self) -> float:
-        """현재까지의 평균 정확도"""
-        all_accs = []
-        for accs in self.accuracy_history.values():
-            if accs:
-                all_accs.append(accs[-1])
-        return np.mean(all_accs) if all_accs else 0.0
-
-    def get_forgetting_measure(self) -> float:
-        """Forgetting Measure 계산"""
-        forgetting = []
-        for exp_id, accs in self.accuracy_history.items():
-            if len(accs) > 1:
-                max_acc = max(accs[:-1])
-                curr_acc = accs[-1]
-                forgetting.append(max_acc - curr_acc)
-
-        return np.mean(forgetting) if forgetting else 0.0
-
-    def get_latest_openset_metrics(self) -> dict:
-        """최신 오픈셋 메트릭 반환"""
-        if self.openset_history:
-            return self.openset_history[-1]
-        return {}
-
-
-def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tuple:
+def evaluate_on_test_set(trainer: COCONUTTrainer, config, openset_mode=False) -> tuple:
     """
     test_set_file을 사용한 전체 평가
     openset_mode=True면 오픈셋 평가도 수행
@@ -391,13 +349,18 @@ def evaluate_on_test_set(trainer: SCRTrainer, config, openset_mode=False) -> tup
 def main(args):
     """메인 실행 함수"""
 
+    print("\n" + "="*60)
+    print("🥥 COCONUT Training Starting")
+    print("   CCNet + ProxyAnchor + SupCon")
+    print("="*60 + "\n")
+
     # 1. Configuration 로드
     config = ConfigParser(args.config)
     config_obj = config.get_config()
     print(f"Using config: {args.config}")
     print(config)
 
-    # config에 seed 설정 추가 (SCRTrainer가 사용)
+    # config에 seed 설정 추가 (COCONUTTrainer가 사용)
     if not hasattr(config_obj.training, 'seed'):
         config_obj.training.seed = args.seed
 
@@ -455,8 +418,9 @@ def main(args):
     print(f'Device: {device}')
 
     # 2. 결과 저장 디렉토리 생성
-    results_dir = os.path.join(config_obj.training.results_path, 'scr_results')
+    results_dir = os.path.join(config_obj.training.results_path, 'coconut_results')
     os.makedirs(results_dir, exist_ok=True)
+
     # 3. 데이터 스트림 초기화
     print("\n=== Initializing Data Stream ===")
     data_stream = ExperienceStream(
@@ -515,6 +479,7 @@ def main(args):
 
     model = model.to(device)
 
+    # 🥥 COCONUT 컴포넌트 사용
     # NCM Classifier
     ncm_classifier = NCMClassifier(normalize=True).to(device)
 
@@ -524,8 +489,8 @@ def main(args):
         min_samples_per_class=config_obj.training.min_samples_per_class
     )
 
-    # SCR Trainer
-    trainer = SCRTrainer(
+    # COCONUT Trainer
+    trainer = COCONUTTrainer(
         model=model,
         ncm_classifier=ncm_classifier,
         memory_buffer=memory_buffer,
@@ -566,7 +531,8 @@ def main(args):
         'pretrained_path': str(config_obj.model.pretrained_path) if config_obj.model.pretrained_path else None,
         'openset_enabled': openset_enabled,
         'seed': config_obj.training.seed,
-        'config_path': args.config
+        'config_path': args.config,
+        'trainer_type': 'COCONUTTrainer'
     }
 
     # 8. Continual Learning 시작
@@ -758,7 +724,8 @@ def main(args):
         'total_time_minutes': (time.time() - start_time) / 60,
         'negative_removal_history': training_history['negative_removal_history'],
         'openset_enabled': openset_enabled,
-        'seed': config_obj.training.seed
+        'seed': config_obj.training.seed,
+        'trainer_type': 'COCONUTTrainer'
     }
 
     # 오픈셋 요약 추가
@@ -777,9 +744,13 @@ def main(args):
 
     print(f"\nResults saved to: {results_dir}")
 
+    print("\n" + "="*60)
+    print("🥥 COCONUT Training Complete!")
+    print("="*60 + "\n")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='SCR Training with ProxyAnchorLoss, TTA Support')
+    parser = argparse.ArgumentParser(description='COCONUT Training (CCNet + ProxyAnchor + SupCon)')
     parser.add_argument('--config', type=str, default='config/config.yaml',
                         help='Path to config file')
     parser.add_argument('--seed', type=int, default=42,
