@@ -14,7 +14,7 @@ import os  # 추가
 
 from loss import SupConLoss, ProxyAnchorLoss
 from models import get_scr_transforms
-from utils.util import AverageMeter
+from utils.average_meter import AverageMeter
 from utils.pretrained_loader import PretrainedLoader
 
 # 오픈셋 관련 import
