@@ -14,7 +14,7 @@ Model:
   architecture: ccnet
   competition_weight: 0.8
   use_pretrained: true
-  pretrained_path:/content/drive/MyDrive/tongji.pth
+  pretrained_path: /content/drive/MyDrive/tongji.pth
   # 🧀 프로젝션 헤드 설정
   projection_dim: 128
   use_projection: true
