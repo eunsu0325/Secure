@@ -89,7 +89,6 @@ class GaborConv2d(nn.Module):
     def forward(self, x):
         kernel = self.genGaborBank(self.kernel_size, self.channel_in, self.channel_out, self.sigma, self.gamma, self.theta, self.f, self.psi)
         self.kernel = kernel
-        # print(x.shape)
         out = F.conv2d(x, kernel, stride=self.stride, padding=self.padding)
 
         return out
@@ -161,12 +160,11 @@ class CompetitiveBlock_Mul_Ord_Comp(nn.Module):
 
         self.weight_chan = weight
         self.weight_spa = (1-weight) / 2
-        # print(self.weight_chan)
+
     def forward(self, x):
 
         #1-st order
         x = self.gabor_conv2d(x)
-        # print(x.shape)
         x1_1 = self.argmax(x)
         x1_2 = self.argmax_x(x)
         x1_3 = self.argmax_y(x)

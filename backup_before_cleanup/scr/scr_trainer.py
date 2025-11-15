@@ -63,6 +63,27 @@ except ImportError:
             return img.convert('RGB')
 
 
+def get_balanced_indices(n_samples: int, target_size: int, seed_offset: int = 0) -> np.ndarray:
+    """
+    공평한 반복 샘플링
+    예: 5장 → 32개 인덱스 (각 이미지 6-7번씩)
+    """
+    if n_samples >= target_size:
+        return np.random.choice(n_samples, target_size, replace=False)
+    
+    # 공평한 반복 계산
+    repeat = target_size // n_samples
+    remainder = target_size % n_samples
+    
+    indices = []
+    for i in range(n_samples):
+        count = repeat + (1 if i < remainder else 0)
+        indices.extend([i] * count)
+    
+    np.random.shuffle(indices)
+    return np.array(indices)
+
+
 def repeat_and_augment_data(paths, labels, target_size):
     """데이터를 목표 크기에 맞춰 반복 증강"""
     if not paths or target_size <= 0:
@@ -1253,3 +1274,43 @@ class SCRTrainer:
         torch.save(checkpoint_dict, path)
         print(f"✅ Checkpoint saved to: {path}")
     
+    def load_checkpoint(self, path: str):
+        """체크포인트 로드"""
+        checkpoint = torch.load(path)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.ncm.load_state_dict(checkpoint['ncm_state_dict'])
+        self.experience_count = checkpoint['experience_count']
+        
+        # 옵티마이저 상태 복원 시도
+        if 'optimizer_state_dict' in checkpoint:
+            try:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            except Exception as e:
+                print(f"Warning: Could not restore optimizer state: {e}")
+        
+        if 'scheduler_state_dict' in checkpoint:
+            try:
+                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            except Exception as e:
+                print(f"Warning: Could not restore scheduler state: {e}")
+        
+        # ProxyAnchorLoss 관련 복원
+        if 'proxy_anchor_data' in checkpoint and self.use_proxy_anchor:
+            try:
+                proxy_data = checkpoint['proxy_anchor_data']
+                self.proxy_anchor_loss.proxies = nn.Parameter(proxy_data['proxies'].to(self.device))
+                self.proxy_anchor_loss.class_to_idx = proxy_data.get('class_to_idx', {})
+                self.proxy_anchor_loss.num_classes = proxy_data.get('num_classes', 0)
+                self.last_num_proxies = self.proxy_anchor_loss.num_classes
+            except Exception as e:
+                print(f"Warning: Could not restore proxy anchor data: {e}")
+        
+        # 오픈셋 관련 복원
+        if 'openset_data' in checkpoint and self.openset_enabled:
+            try:
+                openset_data = checkpoint['openset_data']
+                self.ncm.tau_s = openset_data.get('tau_s')
+                self.registered_users = set(openset_data.get('registered_users', []))
+                self.evaluation_history = openset_data.get('evaluation_history', [])
+            except Exception as e:
+                print(f"Warning: Could not restore openset data: {e}")
