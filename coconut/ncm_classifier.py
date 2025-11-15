@@ -79,6 +79,35 @@ class NCMClassifier(nn.Module):
             scores = -(x2 + m2.unsqueeze(0) - 2 * xm)  # (B, C)
             return scores  # 높을수록 가까움 (negative distance)
 
+    def update_class_means_dict(self, class_means_dict: Dict[int, Tensor], momentum: float = 0.5):
+        """
+        클래스 평균을 업데이트합니다. (EMA 지원)
+        나중에 EMA 실험을 위해 유지
+        """
+        assert 0 <= momentum <= 1
+        assert isinstance(class_means_dict, dict)
+        
+        for k, v in class_means_dict.items():
+            if k not in self.class_means_dict or (self.class_means_dict[k] == 0).all():
+                # 새로운 클래스
+                self.class_means_dict[k] = class_means_dict[k].clone()
+            else:
+                # 기존 클래스 업데이트
+                device = self.class_means_dict[k].device
+                self.class_means_dict[k] = (
+                    momentum * class_means_dict[k].to(device)
+                    + (1 - momentum) * self.class_means_dict[k]
+                )
+        
+        # 방어적 정규화 (normalize=True일 때)
+        if self.normalize:
+            for k in self.class_means_dict:
+                self.class_means_dict[k] = F.normalize(
+                    self.class_means_dict[k], p=2, dim=0, eps=1e-12
+                )
+        
+        self._vectorize_means_dict()
+
     def replace_class_means_dict(self, class_means_dict: Dict[int, Tensor]):
         """
         기존 평균을 완전히 교체합니다.
@@ -142,3 +171,32 @@ class NCMClassifier(nn.Module):
         pred[~accept] = self.unknown_id
         
         return pred
+    
+    @torch.no_grad()
+    def get_openset_scores(self, x):
+        """오픈셋 점수 상세 정보 반환 (디버깅용)"""
+        # NCM이 비어있으면 빈 결과 반환
+        if len(self.class_means_dict) == 0:
+            return {
+                'scores': torch.zeros((x.shape[0], 0), device=x.device),
+                'top_scores': torch.zeros(x.shape[0], device=x.device),
+                'predictions': torch.full((x.shape[0],), -1, dtype=torch.long, device=x.device),
+                'accept_mask': torch.zeros(x.shape[0], dtype=torch.bool, device=x.device),
+                'tau_s': self.tau_s,
+                'mode': 'max'
+            }
+        
+        scores = self.forward(x)
+        top1 = scores.topk(1, dim=1)
+        
+        pred = self.predict_openset(x)
+        accept_mask = pred != self.unknown_id
+        
+        return {
+            'scores': scores,
+            'top_scores': top1.values[:, 0],
+            'predictions': pred,
+            'accept_mask': accept_mask,
+            'tau_s': self.tau_s,
+            'mode': 'max'
+        }

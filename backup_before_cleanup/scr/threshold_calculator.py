@@ -334,6 +334,50 @@ class ThresholdCalibrator:
         self.tau_m = self.margin_init if hasattr(self, 'margin_init') else 0.05
 
 
+# 🐋 헬퍼 함수들 (기존 유지)
+def compute_far_frr(tau: float, genuine_scores: np.ndarray, 
+                    impostor_scores: np.ndarray) -> Tuple[float, float]:
+    """
+    🐋 주어진 임계치에서 FAR/FRR 계산
+    
+    Returns:
+        (FAR, FRR)
+    """
+    if len(genuine_scores) == 0 or len(impostor_scores) == 0:
+        return 0.0, 0.0
+    
+    # FRR: genuine을 거부한 비율
+    frr = np.mean(genuine_scores < tau)
+    
+    # FAR: impostor를 수락한 비율
+    far = np.mean(impostor_scores >= tau)
+    
+    return float(far), float(frr)
+
+
+def find_threshold_at_far(target_far: float, genuine_scores: np.ndarray,
+                          impostor_scores: np.ndarray) -> float:
+    """
+    🐋 목표 FAR에서의 임계치 찾기
+    
+    Args:
+        target_far: 목표 FAR (예: 0.01 = 1%)
+        
+    Returns:
+        해당 FAR을 달성하는 임계치
+    """
+    # impostor 점수를 정렬
+    sorted_impostor = np.sort(impostor_scores)[::-1]  # 내림차순
+    
+    # target_far 위치의 점수
+    idx = int(len(sorted_impostor) * target_far)
+    idx = min(idx, len(sorted_impostor) - 1)
+    
+    tau = sorted_impostor[idx]
+    
+    return float(tau)
+
+
 # ☄️ 테스트 코드 수정
 if __name__ == "__main__":
     print("=== Threshold Calibrator Test ===\n")
