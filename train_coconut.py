@@ -252,8 +252,8 @@ def main(args):
 
     # BASE_ID 계산 및 설정
     config_obj.negative.base_id = compute_safe_base_id(
-        config_obj.dataset.train_set_file,
-        config_obj.dataset.test_set_file
+        str(config_obj.dataset.train_set_file),
+        str(config_obj.dataset.test_set_file)
     )
 
     # 오픈셋 모드 확인
@@ -308,8 +308,8 @@ def main(args):
     # 3. 데이터 스트림 초기화
     print("\n=== Initializing Data Stream ===")
     data_stream = ExperienceStream(
-        train_file=config_obj.dataset.train_set_file,
-        negative_file=config_obj.dataset.negative_samples_file,
+        train_file=str(config_obj.dataset.train_set_file),
+        negative_file=str(config_obj.dataset.negative_samples_file),
         num_negative_classes=config_obj.dataset.num_negative_classes,
         base_id=config_obj.negative.base_id
     )
@@ -430,7 +430,7 @@ def main(args):
     # 6. 평가자 초기화 (새로운 per-user 평가 시스템)
     evaluator = ContinualLearningEvaluator(
         config=config_obj,
-        test_file=config_obj.dataset.test_set_file
+        test_file=str(config_obj.dataset.test_set_file)
     )
 
     # 7. 학습 결과 저장용

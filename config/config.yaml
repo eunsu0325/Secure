@@ -1,13 +1,13 @@
 # COCONUT Configuration
 
 Dataset:
-  train_set_file: /content/drive/MyDrive/dataset/train_BJTU.txt
-  test_set_file: /content/drive/MyDrive/dataset/test_BJTU.txt
+  train_set_file: /content/drive/MyDrive/데이터셋/train_BJTU.txt
+  test_set_file: /content/drive/MyDrive/데이터셋/test_BJTU.txt
   height: 128
   width: 128
   channels: 1
   augmentation: true
-  negative_samples_file: /content/drive/MyDrive/dataset/train_IITD.txt
+  negative_samples_file: /content/drive/MyDrive/데이터셋/train_IITD.txt
   num_negative_classes: 100
 
 Model:
@@ -16,11 +16,11 @@ Model:
   use_pretrained: true
   pretrained_path: /content/drive/MyDrive/tongji.pth
   # Projection head settings
-  projection_dim: 128
+  projection_dim: 512
   use_projection: true
 
 Training:
-  experience_batch_size: 18
+  experience_batch_size: 16
   memory_batch_size: 110
   num_experiences: 100
   memory_size: 1000
@@ -35,14 +35,14 @@ Training:
   epochs_per_experience: 5
   iterations_per_epoch: 10
   num_workers: 8
-  learning_rate: 0.00001
-  projection_learning_rate: 0.00005  # 5x backbone LR
+  learning_rate: 0.000001
+  projection_learning_rate: 0.000005  # 5x backbone LR
   scheduler_step_size: 50
   scheduler_gamma: 0.8
   temperature: 0.07  # SupConLoss temperature
   test_interval: 5  # Evaluation and calibration frequency
-  checkpoint_path: /content/drive/MyDrive/cvc
-  results_path: /content/drive/MyDrive/cvc
+  checkpoint_path: /content/drive/MyDrive/coconut
+  results_path: /content/drive/MyDrive/coconut
   gpu_ids: "0"
   ncm_momentum: 1.0
   seed: 42
@@ -51,7 +51,7 @@ Training:
   # ProxyAnchorLoss settings
   use_proxy_anchor: true
   proxy_margin: 0.1        # Proxy Anchor margin delta
-  proxy_alpha: 32          # Proxy Anchor scaling alpha
+  proxy_alpha: 16          # Proxy Anchor scaling alpha
   proxy_lr_ratio: 1        # Proxy learning rate multiplier (10x backbone)
   proxy_lambda: 0.7        # Fixed weight (0.3 = 30% ProxyAnchor, 70% SupCon)
 
@@ -61,8 +61,8 @@ Openset:
 
   # Threshold settings
   threshold_mode: 'far'      # 'eer' or 'far'
-  target_far: 0.01           # FAR target 1%
-  threshold_alpha: 1.0       # EMA smoothing coefficient
+  target_far: 0.001           # FAR target 1%
+  threshold_alpha: 0.8       # EMA smoothing coefficient
   threshold_max_delta: 1.0  # Maximum change limit
 
   # Initial values and warmup
@@ -94,6 +94,6 @@ Openset:
 
 # Negative sample settings
 Negative:
-  warmup_experiences: 4
+  warmup_experiences: 3
   max_per_batch: 1
   r0: 0.5

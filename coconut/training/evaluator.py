@@ -59,8 +59,11 @@ class ContinualLearningEvaluator:
             channels=self.config.dataset.channels
         )
 
+        # Convert Path object to string if needed
+        test_file_path = str(self.test_file) if self.test_file else None
+
         dataset = BaseVeinDataset(
-            paths=self.test_file,
+            paths=test_file_path,
             transform=transform,
             train=False,
             channels=self.config.dataset.channels,

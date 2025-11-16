@@ -848,7 +848,7 @@ class COCONUTTrainer:
 
         # 2. Unknown (TRR/FAR)
         unknown_paths, unknown_labels = load_paths_labels_from_txt(
-            self.config.dataset.train_set_file
+            str(self.config.dataset.train_set_file)
         )
 
         unknown_filtered = []
@@ -885,7 +885,7 @@ class COCONUTTrainer:
 
         # 3. NegRef
         negref_paths, _ = load_paths_labels_from_txt(
-            self.config.dataset.negative_samples_file
+            str(self.config.dataset.negative_samples_file)
         )
 
         if len(negref_paths) > 1000:
