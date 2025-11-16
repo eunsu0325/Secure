@@ -410,10 +410,8 @@ class COCONUTTrainer:
             Features tensor (B, D) where D is the feature dimension
         """
         if not hasattr(self, 'openset_config'):
-            # No TTA config, fallback to normal extraction
-            from ..openset import extract_features
-            return extract_features(self.model, batch_images,
-                                  use_projection=self.config.model.use_projection)
+            # No TTA config, fallback to normal extraction using getFeatureCode
+            return self.model.getFeatureCode(batch_images)
 
         # TTA configuration
         n_views = self.openset_config.tta_n_views
@@ -448,12 +446,9 @@ class COCONUTTrainer:
                     aug_img = light_aug(img_pil) if aug_strength > 0 else img_pil
                     view = T.ToTensor()(aug_img).to(img.device)
 
-                # Extract features
+                # Extract features using getFeatureCode for NCM compatibility (6144D)
                 view = view.unsqueeze(0)  # Add batch dimension
-                if self.config.model.use_projection:
-                    features = self.model(view)  # Use projection head
-                else:
-                    features = self.model.getFeatureCode(view)  # Direct features
+                features = self.model.getFeatureCode(view)  # Always use getFeatureCode for NCM
 
                 view_features.append(features.squeeze(0))
 

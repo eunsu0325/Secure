@@ -150,14 +150,13 @@ class ContinualLearningEvaluator:
                 # Move to device
                 batch_images = batch_images.to(trainer.device)
 
-                # Extract features
+                # Extract features using getFeatureCode for NCM compatibility (6144D)
                 if use_tta and hasattr(trainer, 'use_tta') and trainer.use_tta:
-                    # TTA: Multiple views
+                    # TTA: Multiple views with getFeatureCode
                     features = trainer._extract_features_with_tta(batch_images)
                 else:
-                    # Normal: Single view
-                    features = extract_features(trainer.model, batch_images,
-                                               use_projection=trainer.config.model.use_projection)
+                    # Normal: Single view using getFeatureCode (6144D)
+                    features = trainer.model.getFeatureCode(batch_images)
 
                 # Calculate similarities
                 for feat in features:
