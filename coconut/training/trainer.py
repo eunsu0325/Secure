@@ -804,17 +804,17 @@ class COCONUTTrainer:
 
         # 동적 비율로 균형 맞추기
         # Use only between impostor scores (100%)
-        impostor_ratio = (
-            1.0,  # Between: 100%
-            0.0,  # Unknown: 0%
-            0.0   # NegRef: 0%
-        )
+        impostor_ratio_config = {
+            'between': 1.0,  # Between: 100%
+            'unknown': 0.0,  # Unknown: 0%
+            'negref': 0.0    # NegRef: 0%
+        }
 
         s_impostor = balance_impostor_scores(
             s_imp_between,
             None,  # Unknown not used
             None,  # NegRef not used
-            ratio=impostor_ratio,
+            ratio_config=impostor_ratio_config,
             total=self.openset_config.impostor_balance_total
         )
 
