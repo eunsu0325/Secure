@@ -340,27 +340,8 @@ def main(args):
     else:
         print(f"Projection Head: Disabled (using raw 6144D features)")
 
-    # 사전훈련 가중치 로드
-    if hasattr(config_obj.model, 'use_pretrained') and config_obj.model.use_pretrained:
-        if config_obj.model.pretrained_path and config_obj.model.pretrained_path.exists():
-            print(f"\nLoading pretrained weights from main script...")
-            loader = PretrainedLoader()
-            try:
-                model = loader.load_ccnet_pretrained(
-                    model=model,
-                    checkpoint_path=config_obj.model.pretrained_path,
-                    device=device,
-                    verbose=True
-                )
-                print("Pretrained weights loaded successfully!")
-            except Exception as e:
-                print(f"Failed to load pretrained model: {e}")
-                print("Continuing with random initialization...")
-        else:
-            print(f"Pretrained path not found or not set")
-    else:
-        print("Starting from random initialization")
-
+    # 사전훈련 가중치는 COCONUTTrainer에서 로드함
+    # (중복 로딩 방지)
     model = model.to(device)
 
     # COCONUT 컴포넌트 사용

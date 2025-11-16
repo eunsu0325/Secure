@@ -129,10 +129,11 @@ class COCONUTTrainer:
         if hasattr(ncm_classifier, 'to'):
             ncm_classifier = ncm_classifier.to(device)
 
-        # 사전훈련 로딩
+        # 사전훈련 로딩 (한 번만 실행)
         if hasattr(config.model, 'use_pretrained') and config.model.use_pretrained:
             if config.model.pretrained_path and config.model.pretrained_path.exists():
-                print(f"\n Loading pretrained weights in COCONUTTrainer...")
+                print(f"\n🎯 Loading pretrained weights...")
+                print(f"   Path: {config.model.pretrained_path}")
                 loader = PretrainedLoader()
                 try:
                     model = loader.load_ccnet_pretrained(
@@ -141,12 +142,14 @@ class COCONUTTrainer:
                         device=device,
                         verbose=True
                     )
-                    print("[OK] Pretrained weights loaded successfully in trainer!")
+                    print("✅ Pretrained weights loaded successfully!")
                 except Exception as e:
-                    print(f"WARNING:  Failed to load pretrained: {e}")
-                    print("Continuing with current weights...")
+                    print(f"⚠️ WARNING: Failed to load pretrained: {e}")
+                    print("   Continuing with current weights...")
             else:
-                print(f"WARNING:  Pretrained path not found: {config.model.pretrained_path}")
+                print(f"⚠️ WARNING: Pretrained path not found: {config.model.pretrained_path}")
+        else:
+            print("📦 Using random initialization (no pretrained weights)")
 
         self.model = model
         self.ncm = ncm_classifier
@@ -394,6 +397,78 @@ class COCONUTTrainer:
         if r <= 0:
             return 0
         return int((r / max(1e-8, 1.0 - r)) * num_current)
+
+    @torch.no_grad()
+    def _extract_features_with_tta(self, batch_images):
+        """
+        Extract features with Test-Time Augmentation (TTA).
+
+        Args:
+            batch_images: Batch of images (B, C, H, W)
+
+        Returns:
+            Features tensor (B, D) where D is the feature dimension
+        """
+        if not hasattr(self, 'openset_config'):
+            # No TTA config, fallback to normal extraction
+            from ..openset import extract_features
+            return extract_features(self.model, batch_images,
+                                  use_projection=self.config.model.use_projection)
+
+        # TTA configuration
+        n_views = self.openset_config.tta_n_views
+        include_original = self.openset_config.tta_include_original
+        aug_strength = self.openset_config.tta_augmentation_strength
+        aggregation = self.openset_config.tta_aggregation
+
+        # Get augmentation transform
+        from torchvision import transforms as T
+        from ..openset.tta_operations import get_light_augmentation
+
+        light_aug = get_light_augmentation(aug_strength, self.config.dataset.height)
+
+        batch_size = batch_images.shape[0]
+        all_features = []
+
+        self.model.eval()
+
+        for i in range(batch_size):
+            img = batch_images[i]  # Single image tensor
+            view_features = []
+
+            # Process multiple views
+            for v_idx in range(n_views):
+                if v_idx == 0 and include_original:
+                    # Use original image for first view
+                    view = img
+                else:
+                    # Apply augmentation for other views
+                    # Convert tensor to PIL for augmentation
+                    img_pil = T.ToPILImage()(img.cpu())
+                    aug_img = light_aug(img_pil) if aug_strength > 0 else img_pil
+                    view = T.ToTensor()(aug_img).to(img.device)
+
+                # Extract features
+                view = view.unsqueeze(0)  # Add batch dimension
+                if self.config.model.use_projection:
+                    features = self.model(view)  # Use projection head
+                else:
+                    features = self.model.getFeatureCode(view)  # Direct features
+
+                view_features.append(features.squeeze(0))
+
+            # Aggregate features from multiple views
+            view_features = torch.stack(view_features)
+            if aggregation == 'mean':
+                aggregated = view_features.mean(dim=0)
+            elif aggregation == 'median':
+                aggregated = view_features.median(dim=0)[0]
+            else:
+                aggregated = view_features.mean(dim=0)  # Default to mean
+
+            all_features.append(aggregated)
+
+        return torch.stack(all_features)
 
     def train_experience(self, user_id: int, image_paths: List[str], labels: List[int]) -> Dict:
         """하나의 experience (한 명의 사용자) 학습 - 오픈셋 지원."""
