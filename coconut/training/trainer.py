@@ -11,19 +11,21 @@ from PIL import Image
 import torch.nn.functional as F
 import copy
 import os
+import random
 
 # COCONUT 모듈 import
 from coconut.losses import SupConLoss, ProxyAnchorLoss
+from coconut.data import MemoryDataset
 
 # 기존 모듈 import (점진적 마이그레이션 예정)
-from models import get_scr_transforms
-from utils.average_meter import AverageMeter
-from utils.pretrained_loader import PretrainedLoader
-from scr.threshold_calculator import ThresholdCalibrator
+from coconut.data import get_scr_transforms
+from .average_meter import AverageMeter
+from coconut.models import PretrainedLoader
+from coconut.classifiers.threshold import ThresholdCalibrator
 
 # 오픈셋 유틸리티 함수들
 try:
-    from utils.utils_openset import (
+    from coconut.openset import (
         split_user_data,
         extract_scores_genuine,
         extract_scores_impostor_between,
@@ -37,12 +39,12 @@ try:
         extract_scores_genuine_tta,
         extract_scores_impostor_between_tta,
         extract_scores_impostor_negref_tta,
-        set_seed,
-        _open_with_channels
+        set_seed
     )
+    from coconut.openset.utils import _open_with_channels
     TTA_FUNCTIONS_AVAILABLE = True
 except ImportError:
-    from utils.utils_openset import (
+    from coconut.openset import (
         split_user_data,
         extract_scores_genuine,
         extract_scores_impostor_between,
@@ -54,7 +56,7 @@ except ImportError:
         set_seed
     )
     TTA_FUNCTIONS_AVAILABLE = False
-    print("⚠️ TTA functions not available, using max score only")
+    print("WARNING: TTA functions not available, using max score only")
 
     def _open_with_channels(path: str, channels: int):
         img = Image.open(path)
@@ -62,6 +64,15 @@ except ImportError:
             return img.convert('L')
         else:
             return img.convert('RGB')
+
+
+def worker_init_fn(worker_id):
+    """
+    Initialize each DataLoader worker with unique seed for reproducibility
+    """
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 def repeat_and_augment_data(paths, labels, target_size):
@@ -85,38 +96,7 @@ def repeat_and_augment_data(paths, labels, target_size):
 
     return repeated_paths, repeated_labels
 
-
-class MemoryDataset(Dataset):
-    def __init__(self, paths: List[str], labels: List[int], transform,
-                 train=True, dual_views=None, channels: int = 1):
-        self.paths = paths
-
-        if torch.is_tensor(labels):
-            self.labels = labels.cpu().numpy()
-        else:
-            self.labels = np.array(labels)
-
-        self.transform = transform
-        self.train = train
-        self.dual_views = dual_views if dual_views is not None else train
-        self.channels = channels
-
-    def __len__(self):
-        return len(self.paths)
-
-    def __getitem__(self, index):
-        path = self.paths[index]
-        label = self.labels[index]
-
-        img = _open_with_channels(path, self.channels)
-
-        if self.dual_views:
-            data1 = self.transform(img)
-            data2 = self.transform(img)
-            return [data1, data2], label
-        else:
-            data = self.transform(img)
-            return data, label
+# MemoryDataset moved to coconut.data.datasets
 
 
 class COCONUTTrainer:
@@ -141,7 +121,7 @@ class COCONUTTrainer:
         # 시드 설정
         seed = getattr(config.training, 'seed', 42) if hasattr(config, 'training') else 42
         set_seed(seed)
-        print(f"🎲 Random seed set to {seed}")
+        print(f" Random seed set to {seed}")
 
         # 모델/NCM 디바이스 이동
         self.device = device
@@ -152,7 +132,7 @@ class COCONUTTrainer:
         # 사전훈련 로딩
         if hasattr(config.model, 'use_pretrained') and config.model.use_pretrained:
             if config.model.pretrained_path and config.model.pretrained_path.exists():
-                print(f"\n📦 Loading pretrained weights in COCONUTTrainer...")
+                print(f"\n Loading pretrained weights in COCONUTTrainer...")
                 loader = PretrainedLoader()
                 try:
                     model = loader.load_ccnet_pretrained(
@@ -161,12 +141,12 @@ class COCONUTTrainer:
                         device=device,
                         verbose=True
                     )
-                    print("✅ Pretrained weights loaded successfully in trainer!")
+                    print("[OK] Pretrained weights loaded successfully in trainer!")
                 except Exception as e:
-                    print(f"⚠️  Failed to load pretrained: {e}")
+                    print(f"WARNING:  Failed to load pretrained: {e}")
                     print("Continuing with current weights...")
             else:
-                print(f"⚠️  Pretrained path not found: {config.model.pretrained_path}")
+                print(f"WARNING:  Pretrained path not found: {config.model.pretrained_path}")
 
         self.model = model
         self.ncm = ncm_classifier
@@ -183,7 +163,7 @@ class COCONUTTrainer:
         self.use_proxy_anchor = getattr(config.training, 'use_proxy_anchor', True)
 
         if self.use_proxy_anchor:
-            # 🔧 실제 특징 차원에 맞춰 ProxyAnchor 초기화
+            #  실제 특징 차원에 맞춰 ProxyAnchor 초기화
             if config.model.use_projection:
                 embedding_dim = config.model.projection_dim  # 프로젝션 헤드 사용 시
             else:
@@ -195,11 +175,11 @@ class COCONUTTrainer:
                 alpha=getattr(config.training, 'proxy_alpha', 32)
             ).to(device)
 
-            print(f"🥥 COCONUT ProxyAnchor initialized with {embedding_dim}D embeddings")
+            print(f"[COCONUT] COCONUT ProxyAnchor initialized with {embedding_dim}D embeddings")
 
             self.proxy_lambda = getattr(config.training, 'proxy_lambda', 0.3)
 
-            print(f"🥥 ProxyAnchorLoss enabled:")
+            print(f"[COCONUT] ProxyAnchorLoss enabled:")
             print(f"   Margin (δ): {self.proxy_anchor_loss.margin}")
             print(f"   Alpha (α): {self.proxy_anchor_loss.alpha}")
             print(f"   Lambda (fixed): {self.proxy_lambda}")
@@ -207,7 +187,7 @@ class COCONUTTrainer:
             self.proxy_anchor_loss = None
             self.proxy_lambda = 0.0
 
-        # 🔥 핵심 수정: 옵티마이저 관리 개선
+        # [CORE] 핵심 수정: 옵티마이저 관리 개선
         self.base_lr = config.training.learning_rate
         self.proxy_lr_ratio = getattr(config.training, 'proxy_lr_ratio', 10) if self.use_proxy_anchor else 1
 
@@ -248,7 +228,7 @@ class COCONUTTrainer:
             self.use_tta = self.openset_config.tta_n_views > 1
             if self.use_tta:
                 if TTA_FUNCTIONS_AVAILABLE:
-                    print(f"🎯 TTA enabled for evaluation:")
+                    print(f"[TARGET] TTA enabled for evaluation:")
                     print(f"   Views: {self.openset_config.tta_n_views}")
                     print(f"   Include original: {self.openset_config.tta_include_original}")
                     print(f"   Augmentation: {self.openset_config.tta_augmentation_strength}")
@@ -258,14 +238,13 @@ class COCONUTTrainer:
                     print(f"   Type-specific repeats:")
                     print(f"     - Genuine: {self.openset_config.tta_n_repeats_genuine}")
                     print(f"     - Between: {self.openset_config.tta_n_repeats_between}")
-                    print(f"     - NegRef: {self.openset_config.tta_n_repeats_negref}")
                 else:
-                    print("⚠️ TTA requested but functions not available")
+                    print("WARNING: TTA requested but functions not available")
                     self.use_tta = False
 
             # 모드 로그
             mode_str = f"MAX + TTA({self.openset_config.tta_n_views})" if self.use_tta else "MAX"
-            print(f"🔧 Open-set mode: {mode_str}")
+            print(f" Open-set mode: {mode_str}")
 
             # ThresholdCalibrator 초기화
             self.threshold_calibrator = ThresholdCalibrator(
@@ -296,23 +275,23 @@ class COCONUTTrainer:
 
             # 모드별 초기값 조정
             if config.openset.threshold_mode == 'far':
-                print(f"🎯 FAR Target mode enabled")
+                print(f"[TARGET] FAR Target mode enabled")
                 print(f"   Target FAR: {config.openset.target_far*100:.1f}%")
             else:
-                print(f"🐋 EER mode enabled")
+                print(f"[INFO] EER mode enabled")
 
             print(f"   Initial τ_s: {initial_tau}")
         else:
             self.registered_users = set()
             self.use_tta = False
-            print("📌 Open-set mode disabled")
+            print(" Open-set mode disabled")
 
         # Statistics
         self.experience_count = 0
 
         # BASE_ID 저장
         self.base_id = int(config.negative.base_id) if hasattr(config, 'negative') else 10000
-        print(f"🥥 COCONUTTrainer using BASE_ID: {self.base_id}")
+        print(f"[COCONUT] COCONUTTrainer using BASE_ID: {self.base_id}")
 
         # 워밍업 관련 파라미터
         self.warmup_T = int(config.negative.warmup_experiences) if hasattr(config, 'negative') else 4
@@ -323,17 +302,17 @@ class COCONUTTrainer:
         if torch.backends.cudnn.is_available():
             torch.backends.cudnn.benchmark = True
             torch.backends.cudnn.deterministic = False
-            print("🚀 CuDNN benchmark enabled (speed priority)")
+            print("[INIT] CuDNN benchmark enabled (speed priority)")
 
         # 사전훈련 사용 여부 로그
         if hasattr(config.model, 'use_pretrained') and config.model.use_pretrained:
-            print(f"🔥 COCONUTTrainer initialized with pretrained model")
+            print(f"[CORE] COCONUTTrainer initialized with pretrained model")
         else:
-            print(f"🎲 COCONUTTrainer initialized with random weights")
+            print(f" COCONUTTrainer initialized with random weights")
 
 
     def _create_optimizer_with_grouped_params(self, include_proxies=True):
-        """🔧 파라미터 그룹별로 다른 학습률 적용한 옵티마이저 생성"""
+        """ 파라미터 그룹별로 다른 학습률 적용한 옵티마이저 생성"""
         param_groups = []
 
         # 백본과 프로젝션 헤드 파라미터 분리
@@ -353,7 +332,7 @@ class COCONUTTrainer:
                 'lr': self.config.training.learning_rate,
                 'name': 'backbone'
             })
-            print(f"🏗️ Backbone LR: {self.config.training.learning_rate:.6f}")
+            print(f"️ Backbone LR: {self.config.training.learning_rate:.6f}")
 
         # 프로젝션 헤드 파라미터 그룹 (새로 초기화된 레이어)
         if projection_params and self.config.model.use_projection:
@@ -362,7 +341,7 @@ class COCONUTTrainer:
                 'lr': self.config.training.projection_learning_rate,
                 'name': 'projection'
             })
-            print(f"🧀 Projection Head LR: {self.config.training.projection_learning_rate:.6f}")
+            print(f" Projection Head LR: {self.config.training.projection_learning_rate:.6f}")
 
         # 프록시 파라미터 그룹 (새로 초기화된 프록시)
         if include_proxies and self.use_proxy_anchor and hasattr(self, 'proxy_anchor_loss') and self.proxy_anchor_loss.proxies is not None:
@@ -371,12 +350,12 @@ class COCONUTTrainer:
                 'lr': self.base_lr * self.proxy_lr_ratio,
                 'name': 'proxies'
             })
-            print(f"🥥 Proxies LR: {self.base_lr * self.proxy_lr_ratio:.6f} ({self.proxy_lr_ratio}x)")
+            print(f"[COCONUT] Proxies LR: {self.base_lr * self.proxy_lr_ratio:.6f} ({self.proxy_lr_ratio}x)")
 
         return optim.Adam(param_groups)
 
     def _recreate_optimizer_with_proxies(self):
-        """🔥 핵심 수정: 프록시 추가 시 옵티마이저 안전 재생성 (상태 복원 제거)"""
+        """[CORE] 핵심 수정: 프록시 추가 시 옵티마이저 안전 재생성 (상태 복원 제거)"""
         if not self.use_proxy_anchor or self.proxy_anchor_loss.proxies is None:
             return
 
@@ -395,7 +374,7 @@ class COCONUTTrainer:
             )
 
             self.last_num_proxies = current_num_proxies
-            print(f"🔄 Optimizer recreated with {current_num_proxies} proxies (fresh state)")
+            print(f" Optimizer recreated with {current_num_proxies} proxies (fresh state)")
 
     def _dedup_negative_classes(self, paths, labels, max_per_class=1):
         """네거티브 클래스 중복 제거"""
@@ -421,7 +400,7 @@ class COCONUTTrainer:
 
         print(f"\n=== Training Experience {self.experience_count}: User {user_id} ===")
 
-        # 🔥 핵심 수정: 프록시 추가 및 옵티마이저 재생성
+        # [CORE] 핵심 수정: 프록시 추가 및 옵티마이저 재생성
         if self.use_proxy_anchor:
             unique_labels = set(labels)
             real_classes = [l for l in unique_labels if l < self.base_id]
@@ -445,16 +424,16 @@ class COCONUTTrainer:
             self.dev_data[user_id] = (dev_paths, dev_labels)
             self.train_data[user_id] = (train_paths, train_labels)
 
-            print(f"🐋 Data split: Train={len(train_paths)}, Dev={len(dev_paths)}")
+            print(f"[INFO] Data split: Train={len(train_paths)}, Dev={len(dev_paths)}")
         else:
             train_paths = image_paths
             train_labels = original_labels
 
         self.registered_users.add(user_id)
 
-        # 🔧 현재 사용자 데이터를 scr_batch_size만큼 증강
+        #  현재 사용자 데이터를 experience_batch_size만큼 증강
         augmented_current_paths, augmented_current_labels = repeat_and_augment_data(
-            train_paths, train_labels, self.config.training.scr_batch_size
+            train_paths, train_labels, self.config.training.experience_batch_size
         )
 
         # 증강된 현재 사용자 데이터셋 생성
@@ -472,12 +451,12 @@ class COCONUTTrainer:
         # SCR 논문 방식: epoch당 여러 iteration
         self.model.train()
 
-        for epoch in range(self.config.training.scr_epochs):
+        for epoch in range(self.config.training.epochs_per_experience):
             epoch_loss = 0
 
             for iteration in range(self.config.training.iterations_per_epoch):
 
-                # 🔧 증강된 현재 데이터를 전체 사용 (이미 scr_batch_size로 맞춰짐)
+                #  증강된 현재 데이터를 전체 사용 (이미 experience_batch_size로 맞춰짐)
                 current_subset = current_dataset
 
                 # 메모리에서 샘플링
@@ -495,7 +474,7 @@ class COCONUTTrainer:
                             memory_paths, memory_labels, max_per_class=self.max_neg_per_class
                         )
 
-                        cap = self._memory_cap_for_ratio(self.config.training.scr_batch_size, self.r0)
+                        cap = self._memory_cap_for_ratio(self.config.training.experience_batch_size, self.r0)
                         if cap >= 0 and len(memory_paths) > cap:
                             idx = np.random.choice(len(memory_paths), size=cap, replace=False)
                             memory_paths = [memory_paths[i] for i in idx]
@@ -505,7 +484,7 @@ class COCONUTTrainer:
                         memory_paths, memory_labels = (list(map(list, zip(*kept))) if kept else ([], []))
 
                     if memory_paths:
-                        # 🔧 메모리 데이터를 memory_batch_size만큼 증강
+                        #  메모리 데이터를 memory_batch_size만큼 증강
                         augmented_memory_paths, augmented_memory_labels = repeat_and_augment_data(
                             memory_paths, memory_labels, self.config.training.memory_batch_size
                         )
@@ -567,7 +546,7 @@ class COCONUTTrainer:
                         loss = (1 - self.proxy_lambda) * loss_supcon + self.proxy_lambda * loss_proxy
 
                         if iteration == 0 and epoch == 0:
-                            print(f"🥥 Losses - SupCon: {loss_supcon.item():.4f}, ProxyAnchor: {loss_proxy.item():.4f}, λ: {self.proxy_lambda}")
+                            print(f"[COCONUT] Losses - SupCon: {loss_supcon.item():.4f}, ProxyAnchor: {loss_proxy.item():.4f}, λ: {self.proxy_lambda}")
                     else:
                         loss = loss_supcon
 
@@ -584,10 +563,10 @@ class COCONUTTrainer:
 
             if (epoch + 1) % 1 == 0:
                 avg_loss = epoch_loss / self.config.training.iterations_per_epoch
-                print(f"  Epoch [{epoch+1}/{self.config.training.scr_epochs}] Loss: {avg_loss:.4f}")
+                print(f"  Epoch [{epoch+1}/{self.config.training.epochs_per_experience}] Loss: {avg_loss:.4f}")
 
-                # 📊 에포크마다 코사인 유사도 분포 분석
-                if (epoch + 1) % 5 == 0 or epoch == self.config.training.scr_epochs - 1:
+                #  에포크마다 코사인 유사도 분포 분석
+                if (epoch + 1) % 5 == 0 or epoch == self.config.training.epochs_per_experience - 1:
                     self._analyze_cosine_distribution_epoch()
 
         # 메모리 버퍼 업데이트
@@ -604,16 +583,16 @@ class COCONUTTrainer:
         missing = buffer_classes - ncm_classes
 
         if missing:
-            print(f"⚠️  NCM missing classes: {sorted(list(missing))}")
+            print(f"WARNING:  NCM missing classes: {sorted(list(missing))}")
         else:
-            print(f"✅ NCM synchronized: {len(ncm_classes)} classes")
+            print(f"[OK] NCM synchronized: {len(ncm_classes)} classes")
 
         # 주기적 캘리브레이션 및 평가 (오픈셋 모드)
         if self.openset_enabled and len(self.registered_users) % self.config.training.test_interval == 0:
 
             if len(self.registered_users) >= self.openset_config.warmup_users:
                 print("\n" + "="*60)
-                print("🔄 THRESHOLD CALIBRATION & EVALUATION")
+                print(" THRESHOLD CALIBRATION & EVALUATION")
                 print("="*60)
 
                 self._calibrate_threshold()
@@ -627,7 +606,7 @@ class COCONUTTrainer:
 
                 print("="*60 + "\n")
             else:
-                print(f"📌 Warmup phase: {len(self.registered_users)}/{self.openset_config.warmup_users}")
+                print(f" Warmup phase: {len(self.registered_users)}/{self.openset_config.warmup_users}")
 
         self.experience_count += 1
         self.scheduler.step()
@@ -649,7 +628,7 @@ class COCONUTTrainer:
         # 타입별 독립적인 TTA 반복 설정
         n_repeats_genuine = getattr(self.openset_config, 'tta_n_repeats_genuine', 1)
         n_repeats_between = getattr(self.openset_config, 'tta_n_repeats_between', 1)
-        n_repeats_negref = getattr(self.openset_config, 'tta_n_repeats_negref', 1)
+        n_repeats_negref = 0  # NegRef not used
 
         repeat_agg = getattr(self.openset_config, 'tta_repeat_aggregation', 'median')
         tta_verbose = getattr(self.openset_config, 'tta_verbose', False)
@@ -660,16 +639,16 @@ class COCONUTTrainer:
 
         # 모드 표시
         mode_str = f"MAX + TTA(views={self.openset_config.tta_n_views})" if use_tta else "MAX"
-        print(f"📊 Using {mode_str} scores for calibration")
+        print(f" Using {mode_str} scores for calibration")
 
         # 타입별 반복 설정 출력
         if use_tta:
-            print(f"🔄 TTA with type-specific repeats:")
+            print(f" TTA with type-specific repeats:")
             print(f"   Genuine: {self.openset_config.tta_n_views} views × {n_repeats_genuine} repeats")
             print(f"   Between: {self.openset_config.tta_n_views} views × {n_repeats_between} repeats")
             print(f"   NegRef: {self.openset_config.tta_n_views} views × {n_repeats_negref} repeats")
 
-        print(f"\n📊 Extracting scores for {self.openset_config.threshold_mode.upper()} calibration...")
+        print(f"\n Extracting scores for {self.openset_config.threshold_mode.upper()} calibration...")
 
         # Dev 데이터 수집
         all_dev_paths = []
@@ -721,7 +700,6 @@ class COCONUTTrainer:
                 include_original=self.openset_config.tta_include_original,
                 aug_strength=self.openset_config.tta_augmentation_strength,
                 aggregation=self.openset_config.tta_aggregation,
-                max_eval=self.openset_config.negref_max_eval,
                 img_size=img_size,
                 channels=channels,
                 n_repeats=n_repeats_negref,
@@ -751,28 +729,27 @@ class COCONUTTrainer:
                 self.model, self.ncm,
                 self.config.dataset.negative_samples_file,
                 self.test_transform, self.device,
-                max_eval=self.openset_config.negref_max_eval,
                 channels=channels
             )
 
         # 동적 비율로 균형 맞추기
+        # Use only between impostor scores (100%)
         impostor_ratio = (
-            self.openset_config.impostor_ratio_between,
-            self.openset_config.impostor_ratio_unknown,
-            self.openset_config.impostor_ratio_negref
+            1.0,  # Between: 100%
+            0.0,  # Unknown: 0%
+            0.0   # NegRef: 0%
         )
 
         s_impostor = balance_impostor_scores(
             s_imp_between,
-            None,  # Unknown 제거
-            s_imp_negref,
+            None,  # Unknown not used
+            None,  # NegRef not used
             ratio=impostor_ratio,
             total=self.openset_config.impostor_balance_total
         )
 
         print(f"   Genuine: {len(s_genuine)} scores")
-        print(f"   Impostor: {len(s_impostor)} scores")
-        print(f"     - Target ratio: Between={impostor_ratio[0]:.0%}, NegRef={impostor_ratio[2]:.0%}")
+        print(f"   Impostor: {len(s_impostor)} scores (100% between)")
 
         # 캘리브레이션
         if len(s_genuine) >= 10 and len(s_impostor) >= 10:
@@ -792,22 +769,22 @@ class COCONUTTrainer:
 
             # 모드별 출력
             if self.openset_config.threshold_mode == 'eer':
-                print(f"📊 EER Mode Results:")
+                print(f" EER Mode Results:")
                 print(f"   EER: {result.get('eer', 0)*100:.2f}%")
                 print(f"   Threshold: {result['tau_smoothed']:.4f}")
             else:
-                print(f"🎯 FAR Target Results:")
+                print(f"[TARGET] FAR Target Results:")
                 print(f"   Target FAR: {self.openset_config.target_far*100:.1f}%")
                 print(f"   Achieved FAR: {result.get('current_far', 0)*100:.1f}%")
                 print(f"   Threshold: {result['tau_smoothed']:.4f}")
         else:
-            print("⚠️ Not enough samples for calibration")
+            print("WARNING: Not enough samples for calibration")
 
     @torch.no_grad()
     def _evaluate_openset(self):
         """오픈셋 평가 (TTA 지원)"""
 
-        # 🔧 재현성: 평가 시 시드 재설정
+        #  재현성: 평가 시 시드 재설정
         eval_seed = getattr(self.config.training, 'seed', 42)
         set_seed(eval_seed)
 
@@ -816,9 +793,9 @@ class COCONUTTrainer:
         channels = self.config.dataset.channels
 
         if use_tta:
-            print(f"\n📈 Open-set Evaluation with TTA (n={self.openset_config.tta_n_views}):")
+            print(f"\n Open-set Evaluation with TTA (n={self.openset_config.tta_n_views}):")
         else:
-            print("\n📈 Open-set Evaluation (Single View):")
+            print("\n Open-set Evaluation (Single View):")
 
         # 변수 초기화
         TAR = FRR = 0.0
@@ -844,7 +821,7 @@ class COCONUTTrainer:
                     return_details=True,
                     img_size=img_size,
                     channels=channels,
-                    seed=eval_seed + 5000  # 🔧 재현성: seed 전달
+                    seed=eval_seed + 5000  #  재현성: seed 전달
                 )
 
                 # TTA 통계 출력
@@ -880,7 +857,7 @@ class COCONUTTrainer:
                 unknown_filtered.append(p)
 
         if len(unknown_filtered) > 1000:
-            # 🔧 재현성: config seed 기반 샘플링
+            #  재현성: config seed 기반 샘플링
             np.random.seed(eval_seed + 1000)  # deterministic offset
             unknown_filtered = np.random.choice(unknown_filtered, 1000, replace=False).tolist()
 
@@ -895,7 +872,7 @@ class COCONUTTrainer:
                     aug_strength=self.openset_config.tta_augmentation_strength,
                     img_size=img_size,
                     channels=channels,
-                    seed=eval_seed + 3000  # 🔧 재현성: seed 전달
+                    seed=eval_seed + 3000  #  재현성: seed 전달
                 )
             else:
                 preds_unk = predict_batch(
@@ -912,7 +889,7 @@ class COCONUTTrainer:
         )
 
         if len(negref_paths) > 1000:
-            # 🔧 재현성: config seed 기반 샘플링
+            #  재현성: config seed 기반 샘플링
             np.random.seed(eval_seed + 2000)  # deterministic offset
             negref_paths = np.random.choice(negref_paths, 1000, replace=False).tolist()
 
@@ -927,7 +904,7 @@ class COCONUTTrainer:
                     aug_strength=self.openset_config.tta_augmentation_strength,
                     img_size=img_size,
                     channels=channels,
-                    seed=eval_seed + 4000  # 🔧 재현성: seed 전달
+                    seed=eval_seed + 4000  #  재현성: seed 전달
                 )
             else:
                 preds_neg = predict_batch(
@@ -954,7 +931,7 @@ class COCONUTTrainer:
         print(f"   Score: Max")
 
         if use_tta:
-            print(f"   🎯 TTA: {self.openset_config.tta_n_views} views, agree_k={self.openset_config.tta_agree_k}")
+            print(f"   [TARGET] TTA: {self.openset_config.tta_n_views} views, agree_k={self.openset_config.tta_agree_k}")
 
         return {
             'TAR': TAR, 'FRR': FRR,
@@ -991,11 +968,11 @@ class COCONUTTrainer:
                 fake_count += 1
 
         if not real_paths:
-            print("⚠️ No real users for NCM update (NCM remains empty)")
+            print("WARNING: No real users for NCM update (NCM remains empty)")
             return
 
         if fake_count > 0:
-            print(f"🍄 NCM update: {len(real_paths)} real samples ({fake_count} fake samples filtered out)")
+            print(f" NCM update: {len(real_paths)} real samples ({fake_count} fake samples filtered out)")
 
         # 데이터셋 생성
         dataset = MemoryDataset(
@@ -1011,6 +988,7 @@ class COCONUTTrainer:
             batch_size=128,
             shuffle=False,
             num_workers=self.config.training.num_workers,
+            worker_init_fn=worker_init_fn if self.config.training.num_workers > 0 else None,
             pin_memory=True,
             persistent_workers=False
         )
@@ -1042,13 +1020,13 @@ class COCONUTTrainer:
         self.ncm.replace_class_means_dict(class_means)
 
         real_classes = [k for k in class_means.keys() if k < self.base_id]
-        print(f"🍄 Updated NCM with {len(real_classes)} real classes (no fake contamination)")
+        print(f" Updated NCM with {len(real_classes)} real classes (no fake contamination)")
 
         self.model.train()
 
     @torch.no_grad()
     def _analyze_cosine_distribution_epoch(self):
-        """📊 에포크마다 코사인 유사도 분포 분석"""
+        """ 에포크마다 코사인 유사도 분포 분석"""
         if len(self.memory_buffer) < 20:  # 최소 샘플 수 확인
             return
 
@@ -1080,7 +1058,7 @@ class COCONUTTrainer:
             real_paths = [real_paths[i] for i in indices]
             real_labels = [real_labels[i] for i in indices]
 
-        # 🎯 기존 방식과 동일한 NCM 기반 스코어 계산
+        # [TARGET] 기존 방식과 동일한 NCM 기반 스코어 계산
         genuine_scores = []
         impostor_scores = []
 
@@ -1108,7 +1086,7 @@ class COCONUTTrainer:
                 ncm_scores = self.ncm.forward(feat)
 
                 if ncm_scores.numel() > 0:
-                    # 🔧 수정: 클래스 ID를 직접 인덱스로 사용
+                    #  수정: 클래스 ID를 직접 인덱스로 사용
                     if cls_id in self.ncm.class_means_dict and cls_id < ncm_scores.shape[1]:
                         genuine_score = ncm_scores[0, cls_id].item()
                         genuine_scores.append(genuine_score)
@@ -1150,10 +1128,10 @@ class COCONUTTrainer:
                             impostor_scores.append(max_score)
                             impostor_count += 1
 
-        # 🐛 디버깅: NCM과 메모리 버퍼 동기화 확인
-        print(f"\n🔍 NCM Classes: {sorted(list(self.ncm.class_means_dict.keys()))}")
-        print(f"🔍 Memory Classes: {sorted(list(set(real_labels)))}")
-        print(f"🔍 Sample count - Genuine: {len(genuine_scores)}, Impostor: {len(impostor_scores)}")
+        #  디버깅: NCM과 메모리 버퍼 동기화 확인
+        print(f"\n NCM Classes: {sorted(list(self.ncm.class_means_dict.keys()))}")
+        print(f" Memory Classes: {sorted(list(set(real_labels)))}")
+        print(f" Sample count - Genuine: {len(genuine_scores)}, Impostor: {len(impostor_scores)}")
 
         # 통계 계산 및 출력
         if genuine_scores and impostor_scores:
@@ -1163,20 +1141,20 @@ class COCONUTTrainer:
             impostor_std = np.std(impostor_scores)
             separation = genuine_mean - impostor_mean
 
-            print(f"    📊 NCM Score Distribution (like EER Calculation):")
+            print(f"     NCM Score Distribution (like EER Calculation):")
             print(f"       Genuine:  {genuine_mean:.3f} ± {genuine_std:.3f} (n={len(genuine_scores)})")
             print(f"       Impostor: {impostor_mean:.3f} ± {impostor_std:.3f} (n={len(impostor_scores)})")
             print(f"       Separation: {separation:.3f}")
 
             # NCM 스코어 기준 성능 평가 (코사인 유사도와 다른 기준)
             if separation > 0.3:
-                print(f"       Status: 🟢 Excellent separation")
+                print(f"       Status:  Excellent separation")
             elif separation > 0.2:
-                print(f"       Status: 🟡 Good separation")
+                print(f"       Status:  Good separation")
             elif separation > 0.1:
-                print(f"       Status: 🟠 Moderate separation")
+                print(f"       Status:  Moderate separation")
             else:
-                print(f"       Status: 🔴 Poor separation")
+                print(f"       Status:  Poor separation")
 
         # 원래 모델 모드 복원
         if was_training:
@@ -1193,6 +1171,7 @@ class COCONUTTrainer:
             batch_size=128,
             shuffle=False,
             num_workers=self.config.training.num_workers,
+            worker_init_fn=worker_init_fn if self.config.training.num_workers > 0 else None,
             pin_memory=True,
             persistent_workers=False
         )
@@ -1215,7 +1194,7 @@ class COCONUTTrainer:
         return accuracy
 
     def save_checkpoint(self, path: str):
-        """🔥 안전한 체크포인트 저장 (디렉토리 생성 추가)"""
+        """[CORE] 안전한 체크포인트 저장 (디렉토리 생성 추가)"""
         # 디렉토리 생성
         save_dir = os.path.dirname(path)
         if save_dir:
@@ -1258,4 +1237,4 @@ class COCONUTTrainer:
                 print(f"Warning: Could not save openset data: {e}")
 
         torch.save(checkpoint_dict, path)
-        print(f"✅ Checkpoint saved to: {path}")
+        print(f"[OK] Checkpoint saved to: {path}")

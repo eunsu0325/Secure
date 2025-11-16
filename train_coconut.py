@@ -7,6 +7,9 @@ TTA Support Included
 """
 
 import os
+# Set PYTHONHASHSEED for reproducibility BEFORE other imports
+os.environ['PYTHONHASHSEED'] = '42'
+
 import argparse
 import time
 import numpy as np
@@ -21,7 +24,7 @@ from torch.utils.data import Subset
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import ConfigParser
-from utils.pretrained_loader import PretrainedLoader
+from coconut.models import PretrainedLoader
 
 # 시각화 관련 (t-SNE 디버깅용)
 import matplotlib
@@ -32,18 +35,18 @@ from sklearn.manifold import TSNE
 from PIL import Image
 import torch.nn.functional as F
 
-from models import ccnet, MyDataset, get_scr_transforms
+from coconut.models import ccnet
+from coconut.data import BaseVeinDataset, get_scr_transforms, ExperienceStream
 
-# 🥥 COCONUT 모듈 import
+# COCONUT 모듈 import
 from coconut import (
     ClassBalancedBuffer,
     NCMClassifier,
-    COCONUTTrainer
+    COCONUTTrainer,
+    ContinualLearningEvaluator
 )
-from coconut.memory import ExperienceStream
-from coconut.training import ContinualLearningEvaluator
 
-from utils.utils_openset import (
+from coconut.openset import (
     predict_batch,
     predict_batch_tta,
     load_paths_labels_from_txt
@@ -78,8 +81,6 @@ def purge_negatives(memory_buffer, base_id):
         memory_buffer.seen_classes.discard(c)
     print(f"Purged {len(to_del)} negative classes ({removed} samples)")
 
-# [제거됨] remove_negative_samples_gradually 함수는 사용하지 않음
-# 대신 purge_negatives로 워밍업 종료 시 한번에 제거
 
 @torch.no_grad()
 def plot_tsne_from_memory(trainer,
@@ -201,168 +202,52 @@ def plot_tsne_from_memory(trainer,
     print(f"[t-SNE] Saved to {save_path}")
 
 
-def evaluate_on_test_set(trainer: COCONUTTrainer, config, openset_mode=False) -> tuple:
-    """
-    test_set_file을 사용한 전체 평가
-    openset_mode=True면 오픈셋 평가도 수행
-    TTA 지원 포함
-
-    Returns:
-        (accuracy, openset_metrics) if openset_mode else (accuracy, None)
-    """
-    test_dataset = MyDataset(
-        txt=config.dataset.test_set_file,
-        transforms=get_scr_transforms(
-            train=False,
-            imside=config.dataset.height,
-            channels=config.dataset.channels
-        ),
-        train=False,
-        imside=config.dataset.height,
-        outchannels=config.dataset.channels
-    )
-
-    known_classes = set(trainer.ncm.class_means_dict.keys())
-
-    if not known_classes:
-        return (0.0, {}) if openset_mode else (0.0, None)
-
-    # TTA 설정 확인
-    use_tta = (hasattr(trainer, 'use_tta') and trainer.use_tta and
-               hasattr(config, 'openset') and config.openset.tta_n_views > 1)
-
-    if openset_mode and trainer.openset_enabled:
-        known_indices = []
-        unknown_indices = []
-
-        for i in range(len(test_dataset)):
-            label = int(test_dataset.images_label[i])
-            if label in known_classes:
-                known_indices.append(i)
-            else:
-                unknown_indices.append(i)
-
-        if known_indices:
-            known_subset = Subset(test_dataset, known_indices)
-            accuracy = trainer.evaluate(known_subset)
-        else:
-            accuracy = 0.0
-
-        openset_metrics = {}
-
-        if known_indices and trainer.ncm.tau_s is not None:
-            if len(known_indices) > 500:
-                known_indices = np.random.choice(known_indices, 500, replace=False)
-
-            known_paths = [test_dataset.images_path[i] for i in known_indices]
-            known_labels = [int(test_dataset.images_label[i]) for i in known_indices]
-
-            # TTA 또는 일반 예측
-            if use_tta:
-                preds = predict_batch_tta(
-                    trainer.model, trainer.ncm,
-                    known_paths, trainer.test_transform, trainer.device,
-                    n_views=config.openset.tta_n_views,
-                    include_original=config.openset.tta_include_original,
-                    agree_k=config.openset.tta_agree_k,
-                    aug_strength=config.openset.tta_augmentation_strength,
-                    img_size=config.dataset.height,
-                    channels=config.dataset.channels
-                )
-            else:
-                preds = predict_batch(
-                    trainer.model, trainer.ncm,
-                    known_paths, trainer.test_transform, trainer.device,
-                    channels=config.dataset.channels
-                )
-
-            correct = sum(1 for p, l in zip(preds, known_labels) if p == l)
-            rejected = sum(1 for p in preds if p == -1)
-
-            openset_metrics['TAR'] = correct / max(1, len(preds))
-            openset_metrics['FRR'] = rejected / max(1, len(preds))
-
-        if unknown_indices and trainer.ncm.tau_s is not None:
-            if len(unknown_indices) > 500:
-                unknown_indices = np.random.choice(unknown_indices, 500, replace=False)
-
-            unknown_paths = [test_dataset.images_path[i] for i in unknown_indices]
-
-            # TTA 또는 일반 예측
-            if use_tta:
-                preds = predict_batch_tta(
-                    trainer.model, trainer.ncm,
-                    unknown_paths, trainer.test_transform, trainer.device,
-                    n_views=config.openset.tta_n_views,
-                    include_original=config.openset.tta_include_original,
-                    agree_k=config.openset.tta_agree_k,
-                    aug_strength=config.openset.tta_augmentation_strength,
-                    img_size=config.dataset.height,
-                    channels=config.dataset.channels
-                )
-            else:
-                preds = predict_batch(
-                    trainer.model, trainer.ncm,
-                    unknown_paths, trainer.test_transform, trainer.device,
-                    channels=config.dataset.channels
-                )
-
-            openset_metrics['TRR_unknown'] = sum(1 for p in preds if p == -1) / len(preds)
-            openset_metrics['FAR_unknown'] = 1 - openset_metrics['TRR_unknown']
-
-        openset_metrics['tau_s'] = trainer.ncm.tau_s
-
-        # TTA 정보 추가
-        if use_tta:
-            openset_metrics['tta_enabled'] = True
-            openset_metrics['tta_views'] = config.openset.tta_n_views
-            openset_metrics['tta_repeats_genuine'] = config.openset.tta_n_repeats_genuine
-            openset_metrics['tta_repeats_between'] = config.openset.tta_n_repeats_between
-            openset_metrics['tta_repeats_negref'] = config.openset.tta_n_repeats_negref
-            openset_metrics['tta_repeat_aggregation'] = config.openset.tta_repeat_aggregation
-        else:
-            openset_metrics['tta_enabled'] = False
-
-        print(f"Evaluating on {len(known_indices)} known + {len(unknown_indices)} unknown samples" +
-              (" (TTA enabled)" if use_tta else ""))
-
-        return accuracy, openset_metrics
-
-    else:
-        filtered_indices = []
-        for i in range(len(test_dataset)):
-            label = int(test_dataset.images_label[i])
-            if label in known_classes:
-                filtered_indices.append(i)
-
-        if not filtered_indices:
-            return (0.0, None)
-
-        filtered_test = Subset(test_dataset, filtered_indices)
-
-        print(f"Evaluating on {len(filtered_indices)} test samples from {len(known_classes)} classes")
-
-        accuracy = trainer.evaluate(filtered_test)
-        return accuracy, None
-
-
 def main(args):
     """메인 실행 함수"""
 
     print("\n" + "="*60)
-    print("🥥 COCONUT Training Starting")
+    print("[COCONUT] COCONUT Training Starting")
     print("   CCNet + ProxyAnchor + SupCon")
     print("="*60 + "\n")
 
-    # 1. Configuration 로드
+    # 1. Configuration 로드 (seed 설정 전에)
     config = ConfigParser(args.config)
     config_obj = config.get_config()
     print(f"Using config: {args.config}")
     print(config)
 
-    # config에 seed 설정 추가 (COCONUTTrainer가 사용)
-    if not hasattr(config_obj.training, 'seed'):
-        config_obj.training.seed = args.seed
+    # 2. Seed 결정: config에 있으면 사용, 없으면 args.seed 사용
+    # args.seed가 기본값(42)이 아니면 override
+    if args.seed != 42:  # Command line에서 명시적으로 설정한 경우
+        seed = args.seed
+        print(f"Using seed from command line: {seed}")
+    elif hasattr(config_obj.training, 'seed'):
+        seed = config_obj.training.seed
+        print(f"Using seed from config: {seed}")
+    else:
+        seed = args.seed  # 기본값 42 사용
+        print(f"Using default seed: {seed}")
+
+    # 3. Set environment variables for complete reproducibility
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+
+    # 4. Set all random seeds for reproducibility
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    # 5. Enable deterministic algorithms
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    if hasattr(torch, 'use_deterministic_algorithms'):
+        torch.use_deterministic_algorithms(True)
+
+    print(f"🔒 Reproducibility enabled with seed={seed}")
+
+    # 6. Config에 최종 seed 저장 (COCONUTTrainer가 사용)
+    config_obj.training.seed = seed
 
     # BASE_ID 계산 및 설정
     config_obj.negative.base_id = compute_safe_base_id(
@@ -382,15 +267,13 @@ def main(args):
             print(f"   TTA Configuration:")
             print(f"      Views: {config_obj.openset.tta_n_views} (+original: {config_obj.openset.tta_include_original})")
             print(f"      Type-specific repeats: G={config_obj.openset.tta_n_repeats_genuine}, "
-                  f"B={config_obj.openset.tta_n_repeats_between}, N={config_obj.openset.tta_n_repeats_negref}")
+                  f"B={config_obj.openset.tta_n_repeats_between}")
             print(f"      Aggregation: {config_obj.openset.tta_aggregation} (repeat: {config_obj.openset.tta_repeat_aggregation})")
 
-        # Impostor 비율 정보
-        print(f"   Impostor Ratios:")
-        print(f"      Between: {config_obj.openset.impostor_ratio_between*100:.0f}%")
-        print(f"      Unknown: {config_obj.openset.impostor_ratio_unknown*100:.0f}%")
-        print(f"      NegRef: {config_obj.openset.impostor_ratio_negref*100:.0f}%")
-        print(f"      Total samples: {config_obj.openset.impostor_balance_total}")
+        # Impostor 설정 정보
+        print(f"   Impostor Settings:")
+        print(f"      Between impostor: {config_obj.openset.impostor_ratio_between*100:.0f}%")
+        print(f"      Total samples for balancing: {config_obj.openset.impostor_balance_total}")
 
         # FAR/EER 모드 표시
         if config_obj.openset.threshold_mode == 'far':
@@ -479,7 +362,7 @@ def main(args):
 
     model = model.to(device)
 
-    # 🥥 COCONUT 컴포넌트 사용
+    # COCONUT 컴포넌트 사용
     # NCM Classifier
     ncm_classifier = NCMClassifier(normalize=True).to(device)
 
@@ -516,8 +399,11 @@ def main(args):
 
     print("NCM starts empty - no fake class contamination")
 
-    # 6. 평가자 초기화
-    evaluator = ContinualLearningEvaluator(num_experiences=config_obj.training.num_experiences)
+    # 6. 평가자 초기화 (새로운 per-user 평가 시스템)
+    evaluator = ContinualLearningEvaluator(
+        config=config_obj,
+        test_file=config_obj.dataset.test_set_file
+    )
 
     # 7. 학습 결과 저장용
     training_history = {
@@ -549,6 +435,9 @@ def main(args):
 
     for exp_id, (user_id, image_paths, labels) in enumerate(data_stream):
 
+        # Register user in evaluator
+        evaluator.register_user(user_id)
+
         # Experience 학습
         stats = trainer.train_experience(user_id, image_paths, labels)
         training_history['losses'].append(stats['loss'])
@@ -558,14 +447,16 @@ def main(args):
         if exp_id + 1 == config_obj.negative.warmup_experiences:
             print(f"\n=== Warmup End (exp{exp_id}) → Post-warmup (exp{exp_id+1}) ===")
 
-            acc_pre, _ = evaluate_on_test_set(trainer, config_obj, openset_mode=openset_enabled)
-            print(f"[Warmup-End] pre-purge ACC={acc_pre:.2f}%")
+            # Quick evaluation before purge
+            perf_pre = evaluator.get_average_performance('1-eer')
+            print(f"[Warmup-End] pre-purge Avg 1-EER={perf_pre:.3f}")
 
             purge_negatives(memory_buffer, config_obj.negative.base_id)
             trainer._update_ncm()
 
-            acc_post, _ = evaluate_on_test_set(trainer, config_obj, openset_mode=openset_enabled)
-            print(f"[Warmup-End] post-purge ACC={acc_post:.2f}%")
+            # Quick evaluation after purge
+            perf_post = evaluator.get_average_performance('1-eer')
+            print(f"[Warmup-End] post-purge Avg 1-EER={perf_post:.3f}")
             print(f"========================================\n")
 
         # 평가 주기 확인
@@ -601,53 +492,40 @@ def main(args):
                         seed=42
                     )
 
-            # 테스트셋으로 평가
-            accuracy, openset_metrics = evaluate_on_test_set(
-                trainer, config_obj,
-                openset_mode=openset_enabled
+            # 모든 사용자 개별 평가 (새로운 방식)
+            report = evaluator.evaluate_all_users(
+                trainer=trainer,
+                experience_id=exp_id + 1,
+                use_tta=trainer.use_tta if hasattr(trainer, 'use_tta') else False
             )
 
-            # 메트릭 업데이트
-            evaluator.update(exp_id, accuracy)
-            if openset_metrics:
-                evaluator.update_openset(openset_metrics)
-
-            # 평균 정확도와 Forgetting 계산
-            avg_acc = evaluator.get_average_accuracy()
-            forgetting = evaluator.get_forgetting_measure()
+            # 평균 성능과 Forgetting 계산
+            avg_performance = evaluator.get_average_performance('1-eer')
+            forgetting = evaluator.get_forgetting_measure('1-eer')
 
             # 기록 저장
             accuracy_record = {
                 'experience': exp_id + 1,
-                'accuracy': accuracy,
-                'average_accuracy': avg_acc,
-                'forgetting': forgetting
+                'average_1_eer': avg_performance,
+                'forgetting': forgetting,
+                'evaluated_users': report['evaluated_users'],
+                'mean_forgetting': report['overall']['mean_forgetting'],
+                'std_forgetting': report['overall']['std_forgetting']
             }
 
-            # 오픈셋 메트릭 추가
-            if openset_metrics:
-                accuracy_record.update(openset_metrics)
-                training_history['openset_metrics'].append(openset_metrics)
-
             training_history['accuracies'].append(accuracy_record)
+            training_history['forgetting_reports'] = training_history.get('forgetting_reports', [])
+            training_history['forgetting_reports'].append(report)
 
-            print(f"Test Accuracy: {accuracy:.2f}%")
-            print(f"Average Accuracy: {avg_acc:.2f}%")
-            print(f"Forgetting Measure: {forgetting:.2f}%")
+            print(f"\n📊 Summary:")
+            print(f"Average 1-EER: {avg_performance:.3f}")
+            print(f"Mean Forgetting: {report['overall']['mean_forgetting']:.4f}")
+            print(f"Std Forgetting: {report['overall']['std_forgetting']:.4f}")
             print(f"Memory Buffer Size: {len(memory_buffer)}")
 
-            # 오픈셋 메트릭 출력
-            if openset_metrics:
-                print(f"\nOpen-set Metrics:")
-                if 'TAR' in openset_metrics:
-                    print(f"   TAR: {openset_metrics['TAR']:.3f}, FRR: {openset_metrics['FRR']:.3f}")
-                if 'TRR_unknown' in openset_metrics:
-                    print(f"   TRR_unknown: {openset_metrics['TRR_unknown']:.3f}, FAR_unknown: {openset_metrics['FAR_unknown']:.3f}")
-                print(f"   τ_s: {openset_metrics.get('tau_s', 0):.4f}")
-
-                # TTA 사용 여부만 간단히 표시
-                if openset_metrics.get('tta_enabled'):
-                    print(f"   TTA: Active")
+            # Save evaluation results
+            eval_results_dir = os.path.join(results_dir, "forgetting_analysis")
+            evaluator.save_results(eval_results_dir)
 
             # Trainer의 오픈셋 평가 히스토리도 저장
             if hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
@@ -687,40 +565,34 @@ def main(args):
 
     # 최종 통계
     final_result = training_history['accuracies'][-1] if training_history['accuracies'] else {}
-    final_acc = final_result.get('accuracy', 0)
-    final_avg_acc = final_result.get('average_accuracy', 0)
-    final_forget = final_result.get('forgetting', 0)
+    final_1_eer = final_result.get('average_1_eer', 0)
+    final_forget = final_result.get('mean_forgetting', 0)
+    final_forget_std = final_result.get('std_forgetting', 0)
 
     print(f"\n=== Final Results ===")
-    print(f"Final Test Accuracy: {final_acc:.2f}%")
-    print(f"Final Average Accuracy: {final_avg_acc:.2f}%")
-    print(f"Final Forgetting Measure: {final_forget:.2f}%")
-
-    # 최종 오픈셋 메트릭
-    if openset_enabled and 'TAR' in final_result:
-        print(f"\nFinal Open-set Performance:")
-        print(f"   TAR: {final_result.get('TAR', 0):.3f}")
-        print(f"   TRR (Unknown): {final_result.get('TRR_unknown', 0):.3f}")
-        print(f"   FAR (Unknown): {final_result.get('FAR_unknown', 0):.3f}")
-        print(f"   Final τ_s: {final_result.get('tau_s', 0):.4f}")
-
-        # TTA 최종 요약
-        if final_result.get('tta_enabled'):
-            print(f"   TTA: Enabled (views={final_result.get('tta_views', 1)}, "
-                  f"repeats=G{final_result.get('tta_repeats_genuine', 1)}/"
-                  f"B{final_result.get('tta_repeats_between', 1)}/"
-                  f"N{final_result.get('tta_repeats_negref', 1)})")
+    print(f"Final Average 1-EER: {final_1_eer:.3f}")
+    print(f"Final Mean Forgetting: {final_forget:.4f} (±{final_forget_std:.4f})")
+    print(f"Evaluated Users: {final_result.get('evaluated_users', 0)}")
 
     print(f"\nTotal Training Time: {(time.time() - start_time)/60:.1f} minutes")
+
+    # Export performance matrix to CSV
+    performance_csv_path = os.path.join(results_dir, "performance_matrix.csv")
+    evaluator.create_performance_matrix_csv(performance_csv_path)
+
+    # Plot forgetting curves
+    forgetting_plot_path = os.path.join(results_dir, "forgetting_curves.png")
+    evaluator.plot_forgetting_curves(forgetting_plot_path)
 
     # 결과 요약 저장
     summary = {
         'config': args.config,
         'num_experiences': config_obj.training.num_experiences,
         'memory_size': config_obj.training.memory_size,
-        'final_accuracy': final_acc,
-        'final_average_accuracy': final_avg_acc,
-        'final_forgetting': final_forget,
+        'final_average_1_eer': final_1_eer,
+        'final_mean_forgetting': final_forget,
+        'final_std_forgetting': final_forget_std,
+        'evaluated_users': final_result.get('evaluated_users', 0),
         'total_time_minutes': (time.time() - start_time) / 60,
         'negative_removal_history': training_history['negative_removal_history'],
         'openset_enabled': openset_enabled,
@@ -745,7 +617,7 @@ def main(args):
     print(f"\nResults saved to: {results_dir}")
 
     print("\n" + "="*60)
-    print("🥥 COCONUT Training Complete!")
+    print("[COCONUT] COCONUT Training Complete!")
     print("="*60 + "\n")
 
 

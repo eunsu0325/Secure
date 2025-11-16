@@ -1,9 +1,44 @@
-scipy
-matplotlib
-visdom
-torchsummary
-tensorboardX
-opencv-python-headless
-opencv-contrib-python-headless
-scikit-learn
-h5py
+# COCONUT: Compact Online Continual Neural User Templates
+# Palm Vein Recognition with Continual Learning
+# Python >= 3.8
+
+# === Core ML/DL Frameworks ===
+torch>=2.0.0           # Deep learning framework
+torchvision>=0.15.0    # Computer vision models and transforms
+
+# === Scientific Computing ===
+numpy>=1.24.0          # Numerical computing
+scipy>=1.10.0          # Scientific computing (optimization, interpolation)
+scikit-learn>=1.3.0    # Machine learning utilities (metrics, manifold)
+
+# === Image Processing ===
+Pillow>=10.0.0         # Image loading and processing (PIL)
+matplotlib>=3.7.0      # Plotting and visualization
+
+# === Configuration ===
+PyYAML>=6.0            # YAML config file parsing
+
+# === Utilities ===
+tqdm>=4.65.0           # Progress bars
+
+# === Optional Dependencies ===
+# Uncomment the following lines if you need these features:
+
+# Visualization Tools
+# visdom>=0.2.4          # Real-time visualization server
+# tensorboardX>=2.6      # TensorBoard logging
+# wandb>=0.15.0          # Weights & Biases experiment tracking
+
+# Advanced Image Processing
+# opencv-python-headless>=4.8.0         # Computer vision library
+# opencv-contrib-python-headless>=4.8.0 # OpenCV extra modules
+
+# Data Storage
+# h5py>=3.9.0            # HDF5 file format support
+
+# === Installation ===
+# To install all required packages:
+# pip install -r requirements.txt
+#
+# For CUDA support:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118

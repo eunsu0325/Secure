@@ -54,7 +54,7 @@ class ConfigParser:
                 model_dict['use_pretrained'] = False
             if 'pretrained_path' not in model_dict:
                 model_dict['pretrained_path'] = None
-            # 🧀 프로젝션 헤드 기본값 설정
+            # 프로젝션 헤드 기본값 설정
             if 'use_projection' not in model_dict:
                 model_dict['use_projection'] = True
             if 'projection_dim' not in model_dict:
@@ -68,7 +68,7 @@ class ConfigParser:
             if 'batch_size' not in training_dict:
                 training_dict['batch_size'] = 128
                 
-            # 🦈 ProxyAnchorLoss 기본값
+            #  ProxyAnchorLoss 기본값
             if 'use_proxy_anchor' not in training_dict:
                 training_dict['use_proxy_anchor'] = True
             if 'proxy_margin' not in training_dict:
@@ -78,24 +78,24 @@ class ConfigParser:
             if 'proxy_lr_ratio' not in training_dict:
                 training_dict['proxy_lr_ratio'] = 10
             if 'proxy_lambda' not in training_dict:
-                training_dict['proxy_lambda'] = 0.3  # 🦈 고정 가중치 기본값
+                training_dict['proxy_lambda'] = 0.3  #  고정 가중치 기본값
                 
             self.training = Training(**training_dict)
             
-            # 🦈 ProxyAnchorLoss 설정 출력
+            #  ProxyAnchorLoss 설정 출력
             if self.training.use_proxy_anchor:
-                print(f"🦈 ProxyAnchorLoss configuration loaded:")
+                print(f" ProxyAnchorLoss configuration loaded:")
                 print(f"   Margin (δ): {self.training.proxy_margin}")
                 print(f"   Alpha (α): {self.training.proxy_alpha}")
                 print(f"   LR ratio: {self.training.proxy_lr_ratio}x")
-                print(f"   Lambda (fixed): {self.training.proxy_lambda}")  # 🦈 고정값
+                print(f"   Lambda (fixed): {self.training.proxy_lambda}")  #  고정값
         
         # Parse Openset section
         if 'Openset' in self.config_dict:
             openset_dict = self.config_dict['Openset'].copy()
             openset_dict.pop('config_file', None)
             
-            # 🍎 기본값 추가
+            #  기본값 추가
             if 'threshold_mode' not in openset_dict:
                 openset_dict['threshold_mode'] = 'far'
             if 'target_far' not in openset_dict:
@@ -103,7 +103,7 @@ class ConfigParser:
             if 'verbose_calibration' not in openset_dict:
                 openset_dict['verbose_calibration'] = True
             
-            # 🥩 TTA 기본값 추가
+            #  TTA 기본값 추가
             if 'tta_n_views' not in openset_dict:
                 openset_dict['tta_n_views'] = 1  # 기본: 비활성화
             if 'tta_include_original' not in openset_dict:
@@ -115,11 +115,11 @@ class ConfigParser:
             if 'tta_aggregation' not in openset_dict:
                 openset_dict['tta_aggregation'] = 'median'
             
-            # 🪻 기존 TTA 반복 기본값
+            #  기존 TTA 반복 기본값
             # if 'tta_n_repeats' not in openset_dict:
             #     openset_dict['tta_n_repeats'] = 1
             
-            # 🎾 TTA 반복 기본값 추가
+            #  TTA 반복 기본값 추가
             if 'tta_n_repeats' not in openset_dict:
                 openset_dict['tta_n_repeats'] = 1
             if 'tta_repeat_aggregation' not in openset_dict:
@@ -127,70 +127,57 @@ class ConfigParser:
             if 'tta_verbose' not in openset_dict:
                 openset_dict['tta_verbose'] = False
             
-            # 🎾 타입별 TTA 반복 기본값 추가
+            #  타입별 TTA 반복 기본값 추가
             if 'tta_n_repeats_genuine' not in openset_dict:
                 openset_dict['tta_n_repeats_genuine'] = None
             if 'tta_n_repeats_between' not in openset_dict:
                 openset_dict['tta_n_repeats_between'] = None
-            if 'tta_n_repeats_negref' not in openset_dict:
-                openset_dict['tta_n_repeats_negref'] = None
             
-            # 🎾 Impostor 비율 기본값 추가
+            #  Impostor 비율 기본값 추가
             if 'impostor_ratio_between' not in openset_dict:
-                openset_dict['impostor_ratio_between'] = 0.3
-            if 'impostor_ratio_unknown' not in openset_dict:
-                openset_dict['impostor_ratio_unknown'] = 0.0
-            if 'impostor_ratio_negref' not in openset_dict:
-                openset_dict['impostor_ratio_negref'] = 0.7
+                openset_dict['impostor_ratio_between'] = 1.0
             if 'impostor_balance_total' not in openset_dict:
-                openset_dict['impostor_balance_total'] = 4000
+                openset_dict['impostor_balance_total'] = 6000
             
             self.openset = Openset(**openset_dict)
             
-            # 🍎 모드 표시
+            #  모드 표시
             mode_info = f" (FAR {self.openset.target_far*100:.1f}%)" if self.openset.threshold_mode == 'far' else " (EER)"
-            print(f"🐋 Open-set configuration loaded{mode_info}")
+            print(f" Open-set configuration loaded{mode_info}")
             
-            # 🥩 TTA 설정 출력
+            #  TTA 설정 출력
             if openset_dict.get('tta_n_views', 1) > 1:
-                print(f"🎯 TTA enabled: {openset_dict['tta_n_views']} views")
+                print(f" TTA enabled: {openset_dict['tta_n_views']} views")
                 print(f"   Include original: {openset_dict.get('tta_include_original', True)}")
                 print(f"   Augmentation strength: {openset_dict.get('tta_augmentation_strength', 0.5)}")
                 print(f"   Aggregation: {openset_dict.get('tta_aggregation', 'median')}")
                 
-                # 🎾 타입별 TTA 반복 설정 출력
+                #  타입별 TTA 반복 설정 출력
                 print(f"   Type-specific repeats:")
                 print(f"     - Genuine: {self.openset.tta_n_repeats_genuine} repeats")
                 print(f"     - Between: {self.openset.tta_n_repeats_between} repeats")
-                print(f"     - NegRef: {self.openset.tta_n_repeats_negref} repeats")
                 print(f"   Repeat aggregation: {openset_dict.get('tta_repeat_aggregation', 'median')}")
-                
+
                 # 총 평가 횟수 계산
                 total_evals_genuine = openset_dict['tta_n_views'] * self.openset.tta_n_repeats_genuine
                 total_evals_between = openset_dict['tta_n_views'] * self.openset.tta_n_repeats_between
-                total_evals_negref = openset_dict['tta_n_views'] * self.openset.tta_n_repeats_negref
                 
                 print(f"   Total evaluations per sample:")
                 print(f"     - Genuine: {total_evals_genuine}")
                 print(f"     - Between: {total_evals_between}")
-                print(f"     - NegRef: {total_evals_negref}")
             
-            # 🎾 Impostor 비율 출력
-            print(f"📊 Impostor score ratios:")
-            print(f"   Between: {self.openset.impostor_ratio_between*100:.0f}%")
-            print(f"   Unknown: {self.openset.impostor_ratio_unknown*100:.0f}%")
-            print(f"   NegRef: {self.openset.impostor_ratio_negref*100:.0f}%")
-            print(f"   Total samples: {self.openset.impostor_balance_total}")
-            
-            # 🎾 실제 샘플 수 계산 및 출력
+            #  Impostor 비율 출력
+            print(f" Impostor score settings:")
+            print(f"   Between impostor: {self.openset.impostor_ratio_between*100:.0f}%")
+            print(f"   Total samples for balancing: {self.openset.impostor_balance_total}")
+
+            #  실제 샘플 수 계산 및 출력
             n_between = int(self.openset.impostor_balance_total * self.openset.impostor_ratio_between)
-            n_unknown = int(self.openset.impostor_balance_total * self.openset.impostor_ratio_unknown)
-            n_negref = int(self.openset.impostor_balance_total * self.openset.impostor_ratio_negref)
-            print(f"   Expected samples: Between={n_between}, Unknown={n_unknown}, NegRef={n_negref}")
+            print(f"   Expected between impostor samples: {n_between}")
             
         else:
             self.openset = Openset(enabled=False)
-            print("📌 Open-set configuration not found, using defaults (disabled)")
+            print(" Open-set configuration not found, using defaults (disabled)")
         
         # Parse Negative section
         if 'Negative' in self.config_dict:
@@ -199,10 +186,10 @@ class ConfigParser:
             if 'base_id' not in negative_dict:
                 negative_dict['base_id'] = 1
             self.negative = Negative(**negative_dict)
-            print("🔥 Negative configuration loaded")
+            print(" Negative configuration loaded")
         else:
             self.negative = Negative()
-            print("📌 Negative configuration not found, using defaults")
+            print(" Negative configuration not found, using defaults")
     
     def get_config(self):
         """Config 객체들을 포함한 namespace 반환"""

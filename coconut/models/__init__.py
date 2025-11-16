@@ -1,4 +1,10 @@
-"""COCONUT Models"""
+"""Neural network models for COCONUT"""
 
-# Note: CCNet is imported from models/ not coconut/models/
-# to avoid duplication and maintain compatibility
+from .ccnet import ccnet, ProjectionHead
+from .pretrained_loader import PretrainedLoader
+
+__all__ = [
+    'ccnet',
+    'ProjectionHead',
+    'PretrainedLoader'
+]

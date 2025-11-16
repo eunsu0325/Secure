@@ -13,8 +13,8 @@ class NCMClassifier(nn.Module):
     """
     NCM (Nearest Class Mean) Classifier - 최적화 버전.
 
-    🚀 최적화: cdist 대신 행렬곱 사용 (2-3배 빠름)
-    ✅ normalize=True: 코사인 유사도 기반
+     최적화: cdist 대신 행렬곱 사용 (2-3배 빠름)
+     normalize=True: 코사인 유사도 기반
     """
 
     def __init__(self, normalize: bool = True):
@@ -58,7 +58,7 @@ class NCMClassifier(nn.Module):
     @torch.no_grad()
     def forward(self, x):
         """
-        🚀 최적화된 NCM 분류
+         최적화된 NCM 분류
 
         normalize=True: 코사인 유사도 (정규화 후 내적)
         normalize=False: 유클리디안 거리 (제곱 거리 사용)
@@ -146,3 +146,29 @@ class NCMClassifier(nn.Module):
         pred[~accept] = self.unknown_id
 
         return pred
+
+    @torch.no_grad()
+    def similarity(self, x, class_id: int):
+        """
+        Calculate similarity between input and specific class.
+
+        Args:
+            x: Input features (B, D) where B is batch size, D is feature dimension
+            class_id: Target class ID to compute similarity with
+
+        Returns:
+            Similarity score (float) or None if class not found
+        """
+        # Check if class exists
+        if class_id not in self.class_means_dict:
+            return None
+
+        # Get all scores
+        scores = self.forward(x)  # (B, num_classes)
+
+        # Return similarity for specific class
+        if scores.shape[0] == 1:
+            return float(scores[0, class_id])
+        else:
+            # If batch size > 1, return mean similarity
+            return float(scores[:, class_id].mean())
