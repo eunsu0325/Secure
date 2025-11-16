@@ -45,6 +45,7 @@ from coconut import (
     COCONUTTrainer,
     ContinualLearningEvaluator
 )
+from coconut.memory import HerdingBuffer
 
 from coconut.openset import (
     predict_batch,
@@ -366,11 +367,38 @@ def main(args):
     # NCM Classifier
     ncm_classifier = NCMClassifier(normalize=True).to(device)
 
-    # Memory Buffer
-    memory_buffer = ClassBalancedBuffer(
-        max_size=config_obj.training.memory_size,
-        min_samples_per_class=config_obj.training.min_samples_per_class
-    )
+    # Memory Buffer (Herding or Random)
+    if hasattr(config_obj.training, 'use_herding') and config_obj.training.use_herding:
+        print("\n========== HERDING BUFFER ENABLED ==========")
+        print(f"   Max samples per class: {config_obj.training.max_samples_per_class}")
+        print(f"   Drift threshold: {config_obj.training.drift_threshold}")
+        print("   Using iCaRL-inspired representative sampling")
+        print("===============================================\n")
+
+        # Transform for feature extraction
+        transform = get_scr_transforms(
+            train=False,
+            imside=config_obj.dataset.height,
+            channels=config_obj.dataset.channels
+        )
+
+        memory_buffer = HerdingBuffer(
+            max_size=config_obj.training.memory_size,
+            model=model,
+            device=device,
+            transform=transform,
+            min_samples_per_class=config_obj.training.min_samples_per_class,
+            max_samples_per_class=config_obj.training.max_samples_per_class,
+            use_projection=config_obj.model.use_projection
+        )
+        # drift_threshold 설정
+        memory_buffer.drift_threshold = config_obj.training.drift_threshold
+    else:
+        print("Using standard Class-Balanced Buffer with random sampling")
+        memory_buffer = ClassBalancedBuffer(
+            max_size=config_obj.training.memory_size,
+            min_samples_per_class=config_obj.training.min_samples_per_class
+        )
 
     # COCONUT Trainer
     trainer = COCONUTTrainer(
@@ -493,10 +521,13 @@ def main(args):
                     )
 
             # 모든 사용자 개별 평가 (새로운 방식)
+            curves_dir = os.path.join(results_dir, "evaluation_curves", f"exp_{exp_id+1:03d}")
             report = evaluator.evaluate_all_users(
                 trainer=trainer,
                 experience_id=exp_id + 1,
-                use_tta=trainer.use_tta if hasattr(trainer, 'use_tta') else False
+                use_tta=trainer.use_tta if hasattr(trainer, 'use_tta') else False,
+                save_curves=True,
+                curves_dir=curves_dir
             )
 
             # 평균 성능과 Forgetting 계산
@@ -522,6 +553,17 @@ def main(args):
             print(f"Mean Forgetting: {report['overall']['mean_forgetting']:.4f}")
             print(f"Std Forgetting: {report['overall']['std_forgetting']:.4f}")
             print(f"Memory Buffer Size: {len(memory_buffer)}")
+
+            # Herding Buffer의 경우 drift 통계 출력
+            if isinstance(memory_buffer, HerdingBuffer):
+                drift_stats = memory_buffer.get_drift_statistics()
+                if drift_stats:
+                    avg_drift = sum(drift_stats.values()) / len(drift_stats)
+                    max_drift_class = max(drift_stats.items(), key=lambda x: x[1])
+                    print(f"\n📈 Feature Drift Analysis:")
+                    print(f"   Average drift: {avg_drift:.4f}")
+                    print(f"   Max drift: Class {max_drift_class[0]} ({max_drift_class[1]:.4f})")
+                    print(f"   Classes monitored: {len(drift_stats)}")
 
             # Save evaluation results
             eval_results_dir = os.path.join(results_dir, "forgetting_analysis")

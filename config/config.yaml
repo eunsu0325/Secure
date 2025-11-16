@@ -25,6 +25,13 @@ Training:
   num_experiences: 100
   memory_size: 1000
   min_samples_per_class: 9
+
+  # Herding buffer settings (iCaRL-inspired)
+  use_herding: false  # Enable herding buffer instead of random sampling
+  max_samples_per_class: 20  # Maximum samples per class for herding
+  herding_batch_size: 32  # Batch size for feature extraction
+  drift_threshold: 0.5  # Threshold for feature drift detection
+
   epochs_per_experience: 5
   iterations_per_epoch: 10
   num_workers: 8

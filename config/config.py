@@ -57,6 +57,12 @@ class Training:
     proxy_lr_ratio: float = 10       # 프록시 학습률 배수
     proxy_lambda: float = 0.3        # 고정 가중치 (SupCon: 0.7, ProxyAnchor: 0.3)
 
+    # Herding buffer 설정
+    use_herding: bool = False  # Herding buffer 사용 여부
+    max_samples_per_class: int = 20  # Herding 시 클래스당 최대 샘플 수
+    herding_batch_size: int = 32  # Feature extraction 배치 크기
+    drift_threshold: float = 0.5  # Feature drift 감지 임계값
+
 @dataclasses.dataclass
 class Openset:
     enabled: bool = True

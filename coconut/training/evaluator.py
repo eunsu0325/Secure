@@ -12,7 +12,7 @@ import os
 import json
 from datetime import datetime
 
-from ..evaluation import ForgettingTracker, calculate_all_metrics
+from ..evaluation import ForgettingTracker, calculate_all_metrics, save_evaluation_curves
 from ..openset import extract_features
 from ..data import BaseVeinDataset, get_scr_transforms
 from torch.utils.data import DataLoader, Subset
@@ -175,17 +175,26 @@ class ContinualLearningEvaluator:
         # Calculate metrics
         if not genuine_scores or not impostor_scores:
             print(f"[Warning] Insufficient scores for user {user_id}")
-            return {'eer': 1.0, 'tar_001': 0.0, 'margin': 0.0}
+            return {
+                'eer': 1.0, 'tar_001': 0.0, 'margin': 0.0,
+                'genuine_scores': [], 'impostor_scores': []
+            }
 
-        metrics = calculate_all_metrics(
-            np.array(genuine_scores),
-            np.array(impostor_scores)
-        )
+        genuine_np = np.array(genuine_scores)
+        impostor_np = np.array(impostor_scores)
+
+        metrics = calculate_all_metrics(genuine_np, impostor_np)
+
+        # Add raw scores to metrics for later aggregation
+        metrics['genuine_scores'] = genuine_scores
+        metrics['impostor_scores'] = impostor_scores
 
         return metrics
 
     def evaluate_all_users(self, trainer, experience_id: int,
-                          use_tta: bool = False) -> Dict:
+                          use_tta: bool = False,
+                          save_curves: bool = False,
+                          curves_dir: Optional[str] = None) -> Dict:
         """
         Evaluate all registered users individually.
 
@@ -193,6 +202,8 @@ class ContinualLearningEvaluator:
             trainer: COCONUT trainer instance
             experience_id: Current experience count
             use_tta: Whether to use test-time augmentation
+            save_curves: Whether to save ROC/DET curves
+            curves_dir: Directory to save curves (if save_curves=True)
 
         Returns:
             Dictionary with evaluation results
@@ -202,6 +213,10 @@ class ContinualLearningEvaluator:
         print(f" Evaluating All {len(self.registered_users)} Users (Step {self.test_step})")
         print(f"{'='*60}")
 
+        # Collect all scores for aggregate curves
+        all_genuine_scores = []
+        all_impostor_scores = []
+
         # Evaluate each user
         for user_id in sorted(self.registered_users):
             print(f"\nEvaluating User {user_id}...", end=' ')
@@ -209,10 +224,19 @@ class ContinualLearningEvaluator:
             # Get performance metrics
             metrics = self.evaluate_single_user(trainer, user_id, use_tta)
 
+            # Collect scores for aggregate analysis
+            if 'genuine_scores' in metrics:
+                all_genuine_scores.extend(metrics['genuine_scores'])
+                all_impostor_scores.extend(metrics['impostor_scores'])
+
+            # Remove raw scores before updating tracker (to save memory)
+            metrics_for_tracker = {k: v for k, v in metrics.items()
+                                  if k not in ['genuine_scores', 'impostor_scores']}
+
             # Update forgetting tracker
             self.forgetting_tracker.update_user_performance(
                 user_id=user_id,
-                performance_dict=metrics,
+                performance_dict=metrics_for_tracker,
                 test_step=self.test_step,
                 experience_id=experience_id
             )
@@ -222,6 +246,34 @@ class ContinualLearningEvaluator:
 
         # Generate report
         report = self.forgetting_tracker.get_report(self.test_step, experience_id)
+
+        # Save evaluation curves if requested
+        if save_curves and all_genuine_scores and all_impostor_scores:
+            if curves_dir is None:
+                curves_dir = f"evaluation_curves/exp_{experience_id}"
+
+            print(f"\n📊 Generating evaluation curves...")
+
+            # Calculate overall EER and threshold
+            genuine_np = np.array(all_genuine_scores)
+            impostor_np = np.array(all_impostor_scores)
+            overall_metrics = calculate_all_metrics(genuine_np, impostor_np)
+
+            # Save curves and tables
+            saved_files = save_evaluation_curves(
+                genuine_np, impostor_np,
+                output_dir=curves_dir,
+                experience_id=experience_id,
+                eer_value=overall_metrics['eer'],
+                threshold=None,  # Will be calculated if needed
+                n_points=1000
+            )
+
+            # Add saved file paths to report
+            report['evaluation_curves'] = saved_files
+
+            # Also save aggregated metrics
+            report['aggregate_metrics'] = overall_metrics
 
         # Print summary
         self.forgetting_tracker.print_summary(self.test_step)
