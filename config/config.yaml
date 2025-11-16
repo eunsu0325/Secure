@@ -21,7 +21,7 @@ Model:
 
 Training:
   experience_batch_size: 16
-  memory_batch_size: 110
+  memory_batch_size: 112
   num_experiences: 100
   memory_size: 1000
   min_samples_per_class: 9
