@@ -89,10 +89,10 @@ class ContinualLearningEvaluator:
         user_paths = []
 
         for idx in range(len(self.test_dataset)):
-            label = int(self.test_dataset.images_label[idx])
+            label = int(self.test_dataset.labels[idx])
             if label == user_id:
                 user_indices.append(idx)
-                user_paths.append(self.test_dataset.images_path[idx])
+                user_paths.append(self.test_dataset.paths[idx])
 
         self.user_test_data[user_id] = {
             'indices': user_indices,
