@@ -370,7 +370,8 @@ def main(args):
             transform=transform,
             min_samples_per_class=config_obj.training.min_samples_per_class,
             max_samples_per_class=config_obj.training.max_samples_per_class,
-            use_projection=config_obj.model.use_projection
+            use_projection=config_obj.model.use_projection,
+            channels=config_obj.dataset.channels
         )
         # drift_threshold 설정
         memory_buffer.drift_threshold = config_obj.training.drift_threshold

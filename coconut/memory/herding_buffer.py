@@ -30,7 +30,8 @@ class HerdingBuffer(ClassBalancedBuffer):
         adaptive_size: bool = True,
         min_samples_per_class: int = 5,
         max_samples_per_class: int = 20,
-        use_projection: bool = False
+        use_projection: bool = False,
+        channels: int = 1
     ):
         """
         Args:
@@ -42,6 +43,7 @@ class HerdingBuffer(ClassBalancedBuffer):
             min_samples_per_class: 클래스당 최소 샘플 수
             max_samples_per_class: 클래스당 최대 샘플 수 (herding용)
             use_projection: projection head 사용 여부
+            channels: 이미지 채널 수 (1=grayscale, 3=RGB)
         """
         super().__init__(
             max_size=max_size,
@@ -54,6 +56,7 @@ class HerdingBuffer(ClassBalancedBuffer):
         self.transform = transform
         self.max_samples_per_class = max_samples_per_class
         self.use_projection = use_projection
+        self.channels = channels
 
         # Drift 관련 파라미터 저장
         self.drift_threshold = 0.5  # 기본값, config에서 override 가능
@@ -89,8 +92,16 @@ class HerdingBuffer(ClassBalancedBuffer):
             # 이미지 로드 및 전처리
             for path in batch_paths:
                 with Image.open(path) as img:
-                    if img.mode != 'RGB':
-                        img = img.convert('RGB')
+                    # channels에 따라 적절한 형식으로 변환
+                    if self.channels == 1:
+                        # Grayscale
+                        if img.mode != 'L':
+                            img = img.convert('L')
+                    else:
+                        # RGB
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+
                     if self.transform:
                         img = self.transform(img)
                     batch_images.append(img)
