@@ -23,6 +23,7 @@ class Model:
     # 프로젝션 헤드 설정 추가
     use_projection: bool = True
     projection_dim: int = 128  # 출력 차원만 조절 가능
+    use_projection_for_ncm: bool = False  # 🍑 NCM도 512D projection 사용할지 (false=6144D, true=512D)
 
 @dataclasses.dataclass
 class Training:
