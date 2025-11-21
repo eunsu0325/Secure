@@ -411,7 +411,9 @@ class COCONUTTrainer:
         """
         if not hasattr(self, 'openset_config'):
             # No TTA config, fallback to normal extraction using getFeatureCode
-            return self.model.getFeatureCode(batch_images)
+            # 🍑 config에 따라 projection 사용
+            use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
+            return self.model.getFeatureCode(batch_images, use_projection=use_projection)
 
         # TTA configuration
         n_views = self.openset_config.tta_n_views
@@ -446,9 +448,11 @@ class COCONUTTrainer:
                     aug_img = light_aug(img_pil) if aug_strength > 0 else img_pil
                     view = T.ToTensor()(aug_img).to(img.device)
 
-                # Extract features using getFeatureCode for NCM compatibility (6144D)
+                # Extract features using getFeatureCode for NCM compatibility
                 view = view.unsqueeze(0)  # Add batch dimension
-                features = self.model.getFeatureCode(view)  # Always use getFeatureCode for NCM
+                # 🍑 config에 따라 projection 사용
+                use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
+                features = self.model.getFeatureCode(view, use_projection=use_projection)  # 6144D 또는 512D
 
                 view_features.append(features.squeeze(0))
 
@@ -1070,7 +1074,9 @@ class COCONUTTrainer:
             data = data.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
-            features = self.model.getFeatureCode(data)
+            # 🍑 config에 따라 6144D 또는 512D 사용
+            use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
+            features = self.model.getFeatureCode(data, use_projection=use_projection)
 
             for i, label in enumerate(labels):
                 label_item = label.item()

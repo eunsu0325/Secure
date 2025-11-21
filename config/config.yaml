@@ -16,8 +16,9 @@ Model:
   use_pretrained: true
   pretrained_path: /content/drive/MyDrive/tongji.pth
   # Projection head settings
-  projection_dim: 512
+  projection_dim: 512  # 🍑 6144D -> 512D projection
   use_projection: true
+  use_projection_for_ncm: false  # 🍑 NCM도 512D projection 사용할지 (false=6144D, true=512D)
 
 Training:
   experience_batch_size: 16

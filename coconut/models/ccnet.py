@@ -250,14 +250,14 @@ class ProjectionHead(nn.Module):
     """
     def __init__(self, input_dim: int = 2048, projection_dim: int = 128):
         super().__init__()
-        
+
         # 2층 구조 고정
         self.fc1 = nn.Linear(input_dim, 1024)
         self.ln1 = nn.LayerNorm(1024)
         self.relu = nn.ReLU(inplace=True)
         self.fc2 = nn.Linear(1024, projection_dim)
         self.ln2 = nn.LayerNorm(projection_dim)
-    
+
     def forward(self, x):
         x = self.fc1(x)
         x = self.ln1(x)
@@ -266,13 +266,48 @@ class ProjectionHead(nn.Module):
         x = self.ln2(x)
         return x
 
+# 🍑 새로운 FullProjectionHead 추가 - 6144D 전체를 512D로 축소
+class FullProjectionHead(nn.Module):
+    """
+    🍑 6144D 전체를 받아서 512D로 점진적 축소
+    6144D -> 2048D -> 1024D -> projection_dim
+    """
+    def __init__(self, input_dim: int = 6144, projection_dim: int = 512):
+        super().__init__()
+
+        # 🍑 3층 구조로 점진적 축소
+        self.fc1 = nn.Linear(input_dim, 2048)
+        self.ln1 = nn.LayerNorm(2048)
+        self.relu1 = nn.ReLU(inplace=True)
+
+        self.fc2 = nn.Linear(2048, 1024)
+        self.ln2 = nn.LayerNorm(1024)
+        self.relu2 = nn.ReLU(inplace=True)
+
+        self.fc3 = nn.Linear(1024, projection_dim)
+        self.ln3 = nn.LayerNorm(projection_dim)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.ln1(x)
+        x = self.relu1(x)
+
+        x = self.fc2(x)
+        x = self.ln2(x)
+        x = self.relu2(x)
+
+        x = self.fc3(x)
+        x = self.ln3(x)
+
+        return x
+
 class ccnet(torch.nn.Module):
     '''
     CompNet = CB1//CB2//CB3 + FC + Dropout + (angular_margin) Output\n
     https://ieeexplore.ieee.org/document/9512475
     '''
 
-    def __init__(self, weight, use_projection: bool = True, projection_dim: int = 128):
+    def __init__(self, weight, use_projection: bool = True, projection_dim: int = 512):  # 🍑 기본값 512로 변경
         super(ccnet, self).__init__()
 
         #self.num_classes = num_classes
@@ -286,12 +321,17 @@ class ccnet(torch.nn.Module):
         self.drop = torch.nn.Dropout(p=0.5)
         # self.arclayer = torch.nn.Linear(1024,num_classes)         # self.arclayer_ = ArcMarginProduct(2048, num_classes, s=30, m=0.5, easy_margin=False)
 
-        #  프로젝션 헤드 추가
+        # 🍑 기존 projection head 주석처리, 새로운 FullProjectionHead 사용
         self.use_projection = use_projection
         if use_projection:
-            self.projection_head = ProjectionHead(input_dim=2048, projection_dim=projection_dim)
-            print(f" Projection Head enabled: 2048 -> 1024 -> {projection_dim}D")
-            print(f"   Structure: 2 layers with LayerNorm (논문 기본)")
+            # self.projection_head = ProjectionHead(input_dim=2048, projection_dim=projection_dim)
+            # print(f" Projection Head enabled: 2048 -> 1024 -> {projection_dim}D")
+            # print(f"   Structure: 2 layers with LayerNorm (논문 기본)")
+
+            # 🍑 새로운 FullProjectionHead 사용 (6144D -> 512D)
+            self.full_projection_head = FullProjectionHead(input_dim=6144, projection_dim=projection_dim)
+            print(f"🍑 Full Projection Head enabled: 6144D -> 2048D -> 1024D -> {projection_dim}D")
+            print(f"   Structure: 3 layers with LayerNorm (점진적 축소)")
 
 
     def forward(self, x, y=None):
@@ -301,23 +341,32 @@ class ccnet(torch.nn.Module):
 
         x = torch.cat((x1, x2, x3), dim=1)
 
-        x1 = self.fc(x)
-        x = self.fc1(x1)
-        #fe = torch.cat((x1,x),dim=1) # 4096D + 2048D = 6144D Feature Embedding
-        #x = self.drop(x) 
-        # x = self.arclayer_(x, y) 
-        #  핵심 수정: 프로젝션 헤드 적용
+        x1 = self.fc(x)  # 4096D
+        x2 = self.fc1(x1)  # 2048D  # 🍑 변수명 x -> x2로 변경
+
+        # 🍑 6144D features 생성 (주석 해제 및 수정)
+        fe = torch.cat((x1, x2), dim=1)  # 4096D + 2048D = 6144D Feature Embedding
+
+        #x = self.drop(x)
+        # x = self.arclayer_(x, y)
+        # 🍑 핵심 수정: 6144D를 512D로 프로젝션
         if self.training and self.use_projection:
-            # 학습 모드: 프로젝션 적용
-            fe_norm = F.normalize(x, dim=-1)
-            z = self.projection_head(fe_norm)
+            # 🍑 학습 모드: 6144D -> 512D projection
+            fe_norm = F.normalize(fe, dim=-1)  # 🍑 x -> fe로 변경
+            z = self.full_projection_head(fe_norm)  # 🍑 projection_head -> full_projection_head
             z = F.normalize(z, dim=-1)
-            return z  # 예시 128D 반환
+            return z  # 512D 반환
         else:
-            # 평가 모드: 원본 특징
-            return F.normalize(x, dim=-1)  # 6144D 반환
+            # 평가 모드: 6144D 원본 특징
+            return F.normalize(fe, dim=-1)  # 🍑 x -> fe로 변경, 6144D 반환
     
-    def getFeatureCode(self, x):
+    # 🍑 getFeatureCode에 projection 옵션 추가
+    def getFeatureCode(self, x, use_projection=False):
+        """
+        🍑 Args:
+            x: 입력 이미지
+            use_projection: True면 512D projection, False면 6144D raw
+        """
         x1 = self.cb1(x)
         x2 = self.cb2(x)
         x3 = self.cb3(x)
@@ -327,15 +376,23 @@ class ccnet(torch.nn.Module):
         x3 = x3.view(x3.shape[0], -1)
         x = torch.cat((x1, x2, x3), dim=1)
 
-        x1 = self.fc(x)
-        x2 = self.fc1(x1)
+        x1 = self.fc(x)  # 4096D
+        x2 = self.fc1(x1)  # 2048D
         # x = x / torch.norm(x, p=2, dim=1, keepdim=True)
 
-        fe = torch.cat((x1, x2), dim=1)
-        #  정규화 제거: NCM에서 통합 처리
-        # fe = fe / torch.norm(fe, p=2, dim=1, keepdim=True)
+        fe = torch.cat((x1, x2), dim=1)  # 6144D
 
-        return fe
+        # 🍑 projection 옵션 추가
+        if use_projection and self.use_projection:
+            # NCM도 512D projection 사용 가능
+            fe_norm = F.normalize(fe, dim=-1)
+            z = self.full_projection_head(fe_norm)
+            return F.normalize(z, dim=-1)  # 512D
+        else:
+            # 기존 방식: 6144D raw features
+            #  정규화 제거: NCM에서 통합 처리
+            # fe = fe / torch.norm(fe, p=2, dim=1, keepdim=True)
+            return fe
 
 
 if __name__== "__main__" :

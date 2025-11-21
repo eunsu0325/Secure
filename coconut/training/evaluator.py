@@ -155,8 +155,10 @@ class ContinualLearningEvaluator:
                     # TTA: Multiple views with getFeatureCode
                     features = trainer._extract_features_with_tta(batch_images)
                 else:
-                    # Normal: Single view using getFeatureCode (6144D)
-                    features = trainer.model.getFeatureCode(batch_images)
+                    # Normal: Single view using getFeatureCode
+                    # 🍑 config에 따라 projection 사용 (6144D 또는 512D)
+                    use_projection = getattr(trainer.config.model, 'use_projection_for_ncm', False)
+                    features = trainer.model.getFeatureCode(batch_images, use_projection=use_projection)
 
                 # Calculate similarities
                 for feat in features:
