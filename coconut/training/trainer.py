@@ -1157,8 +1157,10 @@ class COCONUTTrainer:
                 img = _open_with_channels(path, self.config.dataset.channels)
                 img_tensor = self.test_transform(img).unsqueeze(0).to(self.device)
 
-                # NCM 점수 계산 (6144D 특징 사용)
-                feat = self.model.getFeatureCode(img_tensor)
+                # NCM 점수 계산 (config에 따라 6144D 또는 512D 특징 사용)
+                # 🍑 use_projection_for_ncm 옵션 추가
+                use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
+                feat = self.model.getFeatureCode(img_tensor, use_projection=use_projection)
                 ncm_scores = self.ncm.forward(feat)
 
                 if ncm_scores.numel() > 0:
@@ -1187,7 +1189,9 @@ class COCONUTTrainer:
                 img_tensor = self.test_transform(img).unsqueeze(0).to(self.device)
 
                 # NCM 점수 계산
-                feat = self.model.getFeatureCode(img_tensor)
+                # 🍑 use_projection_for_ncm 옵션 추가
+                use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
+                feat = self.model.getFeatureCode(img_tensor, use_projection=use_projection)
                 ncm_scores = self.ncm.forward(feat)
 
                 if ncm_scores.numel() > 0:
@@ -1260,7 +1264,9 @@ class COCONUTTrainer:
                 data = data.to(self.device, non_blocking=True)
                 labels = labels.to(self.device, non_blocking=True)
 
-                features = self.model.getFeatureCode(data)
+                # 🍑 use_projection_for_ncm 옵션 추가
+                use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
+                features = self.model.getFeatureCode(data, use_projection=use_projection)
                 predictions = self.ncm.predict(features)
 
                 correct += (predictions == labels).sum().item()
