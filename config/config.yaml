@@ -52,8 +52,8 @@ Training:
   scheduler_gamma: 0.8
   temperature: 0.07  # SupConLoss temperature
   test_interval: 1  # Evaluation and calibration frequency
-  checkpoint_path: /content/drive/MyDrive/coconut
-  results_path: /content/drive/MyDrive/coconut
+  checkpoint_path: /content/drive/MyDrive/coconut_update
+  results_path: /content/drive/MyDrive/coconut_update
   gpu_ids: "0"
   ncm_momentum: 1.0
   seed: 42
