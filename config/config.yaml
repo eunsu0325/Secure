@@ -73,16 +73,16 @@ Openset:
 
   # ☘️ Threshold settings — FAR 모드 단독 (EER 제거)
   threshold_mode: 'far'      # ☘️ 'far' 단독 ('eer' 옵션 제거됨)
-  target_far: 0.001           # FAR target 1%
-  threshold_alpha: 0.8       # EMA smoothing coefficient
-  threshold_max_delta: 1.0  # Maximum change limit
+  target_far: 0.01            # FAR target 1% (0.001→0.01: τ 과도하게 높아지는 문제 완화)
+  threshold_alpha: 0.2       # EMA smoothing coefficient (0.8→0.2: τ 급변 방지)
+  threshold_max_delta: 0.05  # Maximum change limit (1.0→0.05: τ 급변 방지)
 
   # Initial values and warmup
   warmup_users: 10           # Warmup period
   initial_tau: 0.5           # Initial threshold
 
   # Data split
-  dev_ratio: 0.4             # Dev set ratio
+  dev_ratio: 0.1             # Dev set ratio (0.4→0.1: 학습 데이터 더 확보)
 
   # Logging
   verbose_calibration: true  # Verbose output
@@ -91,7 +91,7 @@ Openset:
   tta_n_views: 3  # 1=disabled, 2-3 recommended
   tta_include_original: true  # Include original recommended
   tta_agree_k: 0  # 0=auto majority, 2=2+ agreement
-  tta_augmentation_strength: 1.0  # 0.3-0.7 recommended
+  tta_augmentation_strength: 0.5  # 0.3-0.7 recommended (1.0→0.5: TTA 왜곡 과도 방지)
   tta_aggregation: 'mean'  # 'median' or 'mean'
 
   # Type-specific TTA repeat settings
