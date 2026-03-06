@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 from typing import Union, List
 import yaml
-from config.config import Dataset, Model, Training, Openset, Negative
+from config.config import Dataset, Model, Training, Openset
 
 
 class ConfigParser:
@@ -15,7 +15,6 @@ class ConfigParser:
         self.model = None
         self.training = None
         self.openset = None
-        self.negative = None
         self.parse()
     
     def parse(self):
@@ -179,17 +178,6 @@ class ConfigParser:
             self.openset = Openset(enabled=False)
             print(" Open-set configuration not found, using defaults (disabled)")
         
-        # Parse Negative section
-        if 'Negative' in self.config_dict:
-            negative_dict = self.config_dict['Negative'].copy()
-            negative_dict.pop('config_file', None)
-            if 'base_id' not in negative_dict:
-                negative_dict['base_id'] = 1
-            self.negative = Negative(**negative_dict)
-            print(" Negative configuration loaded")
-        else:
-            self.negative = Negative()
-            print(" Negative configuration not found, using defaults")
     
     def get_config(self):
         """Config 객체들을 포함한 namespace 반환"""
@@ -199,7 +187,6 @@ class ConfigParser:
         config.model = self.model
         config.training = self.training
         config.openset = self.openset
-        config.negative = self.negative
         config.config_file = self.filename
         return config
     
@@ -219,11 +206,5 @@ class ConfigParser:
                 string += f'{field.name:25} : {value}\n'
             string += f'----- Openset (Default) --- END -------\n'
         
-        if self.negative and 'Negative' not in self.config_dict:
-            string += f'----- Negative (Default) --- START -----\n'
-            for field in dataclasses.fields(self.negative):
-                value = getattr(self.negative, field.name)
-                string += f'{field.name:25} : {value}\n'
-            string += f'----- Negative (Default) --- END -------\n'
         
         return string

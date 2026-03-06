@@ -295,15 +295,6 @@ class COCONUTTrainer:
         # Statistics
         self.experience_count = 0
 
-        # BASE_ID 저장
-        self.base_id = int(config.negative.base_id) if hasattr(config, 'negative') else 10000
-        print(f"[COCONUT] COCONUTTrainer using BASE_ID: {self.base_id}")
-
-        # 워밍업 관련 파라미터
-        self.warmup_T = int(config.negative.warmup_experiences) if hasattr(config, 'negative') else 4
-        self.r0 = float(config.negative.r0) if hasattr(config, 'negative') else 0.5
-        self.max_neg_per_class = int(config.negative.max_per_batch) if hasattr(config, 'negative') else 1
-
         # CuDNN 최적화
         if torch.backends.cudnn.is_available():
             torch.backends.cudnn.benchmark = True
@@ -422,25 +413,6 @@ class COCONUTTrainer:
             print(f" Optimizer recreated: {current_num_proxies} proxies "
                   f"(preserved {n_old} existing, fresh {current_num_proxies - n_old} new)")
 
-    def _dedup_negative_classes(self, paths, labels, max_per_class=1):
-        """네거티브 클래스 중복 제거"""
-        out_p, out_l, seen = [], [], set()
-        for p, l in zip(paths, labels):
-            li = int(l)
-            if li >= self.base_id:
-                if (li in seen) and (max_per_class == 1):
-                    continue
-                seen.add(li)
-            out_p.append(p)
-            out_l.append(l)
-        return out_p, out_l
-
-    def _memory_cap_for_ratio(self, num_current, r):
-        """r0 비율 제한 계산"""
-        if r <= 0:
-            return 0
-        return int((r / max(1e-8, 1.0 - r)) * num_current)
-
     @torch.no_grad()
     def _extract_features_with_tta(self, batch_images):
         """
@@ -520,7 +492,7 @@ class COCONUTTrainer:
         # 프록시 추가 및 옵티마이저 재생성 (기존 state 보존)
         if self.use_proxy_anchor:
             unique_labels = set(labels)
-            real_classes = [l for l in unique_labels if l < self.base_id]
+            real_classes = list(unique_labels)
 
             if real_classes:
                 # add_classes() 전에 현재 프록시 참조와 optimizer state 저장
@@ -598,20 +570,7 @@ class COCONUTTrainer:
                     if torch.is_tensor(memory_labels):
                         memory_labels = memory_labels.cpu().tolist()
 
-                    # 워밍업 규칙 적용
-                    if self.experience_count < self.warmup_T:
-                        memory_paths, memory_labels = self._dedup_negative_classes(
-                            memory_paths, memory_labels, max_per_class=self.max_neg_per_class
-                        )
-
-                        cap = self._memory_cap_for_ratio(self.config.training.experience_batch_size, self.r0)
-                        if cap >= 0 and len(memory_paths) > cap:
-                            idx = np.random.choice(len(memory_paths), size=cap, replace=False)
-                            memory_paths = [memory_paths[i] for i in idx]
-                            memory_labels = [memory_labels[i] for i in idx]
-                    else:
-                        kept = [(p, l) for p, l in zip(memory_paths, memory_labels) if int(l) < self.base_id]
-                        memory_paths, memory_labels = (list(map(list, zip(*kept))) if kept else ([], []))
+                    pass  # 메모리 버퍼에는 실제 사용자만 존재하므로 필터링 불필요
 
                     if memory_paths:
                         #  메모리 데이터를 memory_batch_size만큼 증강
@@ -937,19 +896,19 @@ class COCONUTTrainer:
             MisID_rate   = misid    / n        # ☘️ 추가: 오인식율
             FNIR         = 1.0 - TAR           # ☘️ 추가: = FRR + MisID_rate
 
-        # 2. Unknown FPIR_in ☘️ train_set_file 실시간 필터 → unknown_test_file 고정 파일
+        # 2. Unknown FPIR_in — unknown_test_file 고정 파일 로드 (매 experience 동일한 pool)
         unknown_test_file = getattr(self.config.dataset, 'unknown_test_file', None)
 
         if unknown_test_file and str(unknown_test_file) != 'None':
-            # ☘️ unknown_test_file 고정 로드 — 매 experience마다 동일한 unknown pool
+            # unknown_test_file: enroll_file 미등록 ID 뒤 50% 권장
             unknown_filtered_paths, _ = load_paths_labels_from_txt(str(unknown_test_file))
             unknown_filtered = unknown_filtered_paths
             print(f"   Unknown Test: {len(unknown_filtered)} samples from {unknown_test_file}")
         else:
-            # ☘️ unknown_test_file 미설정 시 기존 방식 fallback (경고 출력)
-            print("   WARNING: unknown_test_file not set. Using train_set_file fallback (non-fixed pool).")
+            # unknown_test_file 미설정 시 enroll_file에서 미등록 사용자 실시간 필터 (경고)
+            print("   WARNING: unknown_test_file not set. Using enroll_file fallback (non-fixed pool).")
             unknown_paths, unknown_labels = load_paths_labels_from_txt(
-                str(self.config.dataset.train_set_file)
+                str(self.config.dataset.enroll_file)
             )
             unknown_filtered = [p for p, l in zip(unknown_paths, unknown_labels)
                                 if l not in self.registered_users]
@@ -985,10 +944,8 @@ class COCONUTTrainer:
             TRR_u = sum(1 for p in preds_unk if p == -1) / len(preds_unk)
             FAR_u = 1 - TRR_u
 
-        # 3. NegRef FPIR_xdom ☘️ negative_samples_file → negref_eval_file (학습에서 제거된 평가 전용 파일)
-        negref_eval_file = getattr(self.config.dataset, 'negref_eval_file', None)
-        _negref_source = str(negref_eval_file) if (negref_eval_file and str(negref_eval_file) != 'None') \
-                         else str(self.config.dataset.negative_samples_file)  # ☘️ fallback
+        # 3. NegRef FPIR_xdom — xdomain_file (크로스도메인 평가 전용, 학습 사용 안 함)
+        _negref_source = str(self.config.dataset.xdomain_file)
         negref_paths, _ = load_paths_labels_from_txt(_negref_source)
 
         if len(negref_paths) > 1000:
@@ -1060,24 +1017,13 @@ class COCONUTTrainer:
         all_paths, all_labels = self.memory_buffer.get_all_data()
 
         # 가짜 클래스 필터링
-        real_paths = []
-        real_labels = []
-        fake_count = 0
+        real_paths = all_paths
+        real_labels = all_labels
 
-        for path, label in zip(all_paths, all_labels):
-            label_int = int(label) if not isinstance(label, int) else label
-            if label_int < self.base_id:
-                real_paths.append(path)
-                real_labels.append(label)
-            else:
-                fake_count += 1
 
         if not real_paths:
             print("WARNING: No real users for NCM update (NCM remains empty)")
             return
-
-        if fake_count > 0:
-            print(f" NCM update: {len(real_paths)} real samples ({fake_count} fake samples filtered out)")
 
         # 데이터셋 생성
         dataset = MemoryDataset(
@@ -1115,19 +1061,17 @@ class COCONUTTrainer:
                     class_features[label_item] = []
                 class_features[label_item].append(features[i].cpu())
 
-        # 클래스별 평균 계산
+        # 클래스별 평균 계산 (정규화는 replace_class_means_dict 내부에서 처리)
         class_means = {}
         for label, features_list in class_features.items():
             if len(features_list) > 0:
                 mean_feature = torch.stack(features_list).mean(dim=0)
-                mean_feature = mean_feature / (mean_feature.norm(p=2) + 1e-12)
                 class_means[label] = mean_feature
 
         # NCM 업데이트
         self.ncm.replace_class_means_dict(class_means)
 
-        real_classes = [k for k in class_means.keys() if k < self.base_id]
-        print(f" Updated NCM with {len(real_classes)} real classes (no fake contamination)")
+        print(f" Updated NCM with {len(class_means)} classes")
 
         self.model.train()
 
@@ -1141,17 +1085,10 @@ class COCONUTTrainer:
         was_training = self.model.training
         self.model.eval()
 
-        # 메모리 버퍼에서 모든 데이터 가져오기 (실제 사용자만)
+        # 메모리 버퍼에서 모든 데이터 가져오기
         all_paths, all_labels = self.memory_buffer.get_all_data()
-
-        # 가짜 클래스 필터링
-        real_paths = []
-        real_labels = []
-        for path, label in zip(all_paths, all_labels):
-            label_int = int(label) if not isinstance(label, int) else label
-            if label_int < self.base_id:
-                real_paths.append(path)
-                real_labels.append(label_int)
+        real_paths = all_paths
+        real_labels = [int(l) if not isinstance(l, int) else l for l in all_labels]
 
         if len(real_paths) < 10:
             # 모드 복원 후 리턴
@@ -1159,9 +1096,11 @@ class COCONUTTrainer:
                 self.model.train()
             return
 
-        # 샘플링 (너무 많으면 일부만)
+        # 샘플링 (너무 많으면 일부만) — seed 고정으로 재현성 보장
         if len(real_paths) > 200:
-            indices = np.random.choice(len(real_paths), 200, replace=False)
+            monitor_seed = getattr(self.config.training, 'seed', 42) + self.experience_count
+            rng = np.random.RandomState(monitor_seed)
+            indices = rng.choice(len(real_paths), 200, replace=False)
             real_paths = [real_paths[i] for i in indices]
             real_labels = [real_labels[i] for i in indices]
 
@@ -1349,8 +1288,102 @@ class COCONUTTrainer:
             except Exception as e:
                 print(f"Warning: Could not save openset data: {e}")
 
+        # memory_buffer 전체 데이터 저장 (학습 재개 시 복원용)
+        try:
+            buf_paths, buf_labels = self.memory_buffer.get_all_data()
+            checkpoint_dict['memory_buffer_data'] = {
+                'paths': buf_paths,
+                'labels': [int(l) for l in buf_labels]
+            }
+        except Exception as e:
+            print(f"Warning: Could not save memory buffer data: {e}")
+
+        # probe_data 저장 (평가 재개 시 복원용)
+        if self.openset_enabled and self.probe_data:
+            try:
+                checkpoint_dict['probe_data'] = {
+                    uid: (paths, [int(l) for l in labels])
+                    for uid, (paths, labels) in self.probe_data.items()
+                }
+            except Exception as e:
+                print(f"Warning: Could not save probe data: {e}")
+
         torch.save(checkpoint_dict, path)
         print(f"[OK] Checkpoint saved to: {path}")
+
+    def load_checkpoint(self, path: str):
+        """체크포인트 로드 및 trainer 상태 복원 (학습 재개용)"""
+        checkpoint = torch.load(path, map_location=self.device)
+
+        # 모델 가중치 복원
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"[OK] Model weights restored")
+
+        # NCM 상태 복원
+        self.ncm.load_state_dict(checkpoint['ncm_state_dict'])
+        print(f"[OK] NCM state restored ({self.ncm.get_num_classes()} classes)")
+
+        # experience 카운터 복원
+        self.experience_count = checkpoint.get('experience_count', 0)
+
+        # 옵티마이저/스케줄러 복원
+        if 'optimizer_state_dict' in checkpoint:
+            try:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                print(f"[OK] Optimizer state restored")
+            except Exception as e:
+                print(f"Warning: Could not restore optimizer state: {e}")
+
+        if 'scheduler_state_dict' in checkpoint:
+            try:
+                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                print(f"[OK] Scheduler state restored")
+            except Exception as e:
+                print(f"Warning: Could not restore scheduler state: {e}")
+
+        # ProxyAnchorLoss 복원
+        if 'proxy_anchor_data' in checkpoint and self.use_proxy_anchor:
+            pa_data = checkpoint['proxy_anchor_data']
+            self.proxy_anchor_loss.proxies = nn.Parameter(
+                pa_data['proxies'].to(self.device)
+            )
+            self.proxy_anchor_loss.class_to_idx = pa_data['class_to_idx']
+            self.proxy_anchor_loss.num_classes = pa_data['num_classes']
+            self.last_num_proxies = pa_data['num_classes']
+            self._recreate_optimizer_with_proxies()
+            print(f"[OK] ProxyAnchor restored ({pa_data['num_classes']} proxies)")
+
+        # 오픈셋 데이터 복원
+        if 'openset_data' in checkpoint and self.openset_enabled:
+            od = checkpoint['openset_data']
+            self.registered_users = set(od.get('registered_users', []))
+            self.evaluation_history = od.get('evaluation_history', [])
+            tau_s = od.get('tau_s')
+            if tau_s is not None:
+                if hasattr(self.ncm, 'set_thresholds'):
+                    self.ncm.set_thresholds(tau_s=tau_s)
+                else:
+                    self.ncm.tau_s = tau_s
+            print(f"[OK] Openset data restored ({len(self.registered_users)} registered users, τ={tau_s})")
+
+        # memory_buffer 데이터 복원
+        if 'memory_buffer_data' in checkpoint:
+            buf_data = checkpoint['memory_buffer_data']
+            buf_paths = buf_data['paths']
+            buf_labels = buf_data['labels']
+            if buf_paths:
+                self.memory_buffer.update_from_dataset(buf_paths, buf_labels)
+                print(f"[OK] Memory buffer restored ({len(buf_paths)} samples)")
+
+        # probe_data 복원
+        if 'probe_data' in checkpoint and self.openset_enabled:
+            self.probe_data = {
+                uid: (paths, labels)
+                for uid, (paths, labels) in checkpoint['probe_data'].items()
+            }
+            print(f"[OK] Probe data restored ({len(self.probe_data)} users)")
+
+        print(f"[OK] Checkpoint loaded from: {path} (experience={self.experience_count})")
 
     # ☘️ Phase 4-[7]: Experience별 성능 변화 CSV 저장
     def save_eval_curve(self, path: str):
@@ -1368,7 +1401,8 @@ class COCONUTTrainer:
         fieldnames = [
             'experience', 'num_users', 'tau_s',
             'Rank1', 'FNIR', 'FRR', 'MisID',
-            'FPIR_in', 'FPIR_xdom'
+            'FPIR_in', 'FPIR_xdom',
+            'BWT', 'mean_forgetting'
         ]
 
         with open(path, 'w', newline='', encoding='utf-8') as f:
@@ -1376,20 +1410,114 @@ class COCONUTTrainer:
             writer.writeheader()
             for entry in self.evaluation_history:
                 m = entry.get('metrics', {})
+                bwt_val = entry.get('bwt')
+                fgt_val = entry.get('mean_forgetting')
                 row = {
-                    'experience':  entry.get('experience', ''),
-                    'num_users':   entry.get('num_users', ''),
-                    'tau_s':       f"{entry.get('tau_s', 0):.6f}",
-                    'Rank1':       f"{m.get('Rank1', 0):.6f}",
-                    'FNIR':        f"{m.get('FNIR', 0):.6f}",
-                    'FRR':         f"{m.get('FRR', 0):.6f}",
-                    'MisID':       f"{m.get('MisID', 0):.6f}",
-                    'FPIR_in':     f"{m.get('FPIR_in', 0):.6f}",
-                    'FPIR_xdom':   f"{m.get('FPIR_xdom', '') if m.get('FPIR_xdom') is not None else ''}",
+                    'experience':      entry.get('experience', ''),
+                    'num_users':       entry.get('num_users', ''),
+                    'tau_s':           f"{entry.get('tau_s', 0):.6f}",
+                    'Rank1':           f"{m.get('Rank1', 0):.6f}",
+                    'FNIR':            f"{m.get('FNIR', 0):.6f}",
+                    'FRR':             f"{m.get('FRR', 0):.6f}",
+                    'MisID':           f"{m.get('MisID', 0):.6f}",
+                    'FPIR_in':         f"{m.get('FPIR_in', 0):.6f}",
+                    'FPIR_xdom':       f"{m.get('FPIR_xdom', '') if m.get('FPIR_xdom') is not None else ''}",
+                    'BWT':             f"{bwt_val:.6f}" if bwt_val is not None else '',
+                    'mean_forgetting': f"{fgt_val:.6f}" if fgt_val is not None else '',
                 }
                 writer.writerow(row)
 
         print(f"☘️ [Phase 4-7] eval_curve.csv saved: {path} ({len(self.evaluation_history)} rows)")
+
+    def save_eval_curve_plot(self, path: str):
+        """
+        eval_curve.csv 데이터를 바탕으로 Performance vs Users 그래프 PNG 생성.
+        서브플롯 3개: (1) TAR/FNIR vs Users  (2) FPIR vs Users  (3) τ vs Users
+        """
+        if not self.evaluation_history:
+            print("WARNING: evaluation_history is empty. Cannot plot.")
+            return
+
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("WARNING: matplotlib not available. Skipping plot.")
+            return
+
+        os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
+
+        num_users_list = [e['num_users'] for e in self.evaluation_history]
+        tau_list       = [e.get('tau_s', 0) for e in self.evaluation_history]
+        tar_list   = [e['metrics'].get('Rank1', 0)   for e in self.evaluation_history]
+        fnir_list  = [e['metrics'].get('FNIR', 0)    for e in self.evaluation_history]
+        fpir_list  = [e['metrics'].get('FPIR_in', 0) for e in self.evaluation_history]
+        fpirx_list = [e['metrics'].get('FPIR_xdom')  for e in self.evaluation_history]
+        bwt_list   = [e.get('bwt') for e in self.evaluation_history]
+        fgt_list   = [e.get('mean_forgetting') for e in self.evaluation_history]
+
+        has_bwt = any(v is not None for v in bwt_list)
+        n_cols = 4 if has_bwt else 3
+
+        fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 5))
+        fig.suptitle('Performance vs Registered Users', fontsize=14, fontweight='bold')
+
+        # 서브플롯 1: TAR & FNIR
+        ax = axes[0]
+        ax.plot(num_users_list, tar_list,  'b-o', markersize=4, label='TAR (Rank-1)')
+        ax.plot(num_users_list, fnir_list, 'r-s', markersize=4, label='FNIR')
+        ax.set_xlabel('Registered Users')
+        ax.set_ylabel('Rate')
+        ax.set_title('TAR & FNIR vs Users')
+        ax.set_ylim(0, 1.05)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # 서브플롯 2: FPIR
+        ax = axes[1]
+        ax.plot(num_users_list, fpir_list, 'g-^', markersize=4, label='FPIR_in')
+        has_xdom = any(v is not None for v in fpirx_list)
+        if has_xdom:
+            xdom_vals = [v if v is not None else float('nan') for v in fpirx_list]
+            ax.plot(num_users_list, xdom_vals, 'm-v', markersize=4, label='FPIR_xdom')
+        ax.set_xlabel('Registered Users')
+        ax.set_ylabel('FPIR')
+        ax.set_title('FPIR vs Users')
+        ax.set_ylim(0, 1.05)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # 서브플롯 3: τ
+        ax = axes[2]
+        ax.plot(num_users_list, tau_list, 'k-o', markersize=4, label='τ_s')
+        ax.set_xlabel('Registered Users')
+        ax.set_ylabel('Threshold τ')
+        ax.set_title('Threshold τ vs Users')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # 서브플롯 4: BWT & Forgetting (데이터 있을 때만)
+        if has_bwt:
+            ax = axes[3]
+            bwt_vals = [v if v is not None else float('nan') for v in bwt_list]
+            ax.plot(num_users_list, bwt_vals, 'c-D', markersize=4, label='BWT')
+            ax.axhline(0, color='gray', linestyle='--', linewidth=1)
+            has_fgt = any(v is not None for v in fgt_list)
+            if has_fgt:
+                fgt_vals = [v if v is not None else float('nan') for v in fgt_list]
+                ax.plot(num_users_list, fgt_vals, 'orange', linestyle='-',
+                        marker='x', markersize=4, label='Mean Forgetting')
+            ax.set_xlabel('Registered Users')
+            ax.set_ylabel('BWT / Forgetting')
+            ax.set_title('BWT & Forgetting vs Users')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"[Plot] Performance vs Users saved: {path}")
 
     # ☘️ Phase 4-[8]: FPIR–FNIR trade-off 곡선 (τ sweep) — DET curve 데이터 저장
     def save_det_curve(self, path: str, n_points: int = 200):

@@ -55,34 +55,6 @@ from coconut.openset import (
     load_paths_labels_from_txt
 )
 
-def compute_safe_base_id(*txt_files):
-    """모든 txt 파일에서 최대 user ID를 찾아 안전한 BASE_ID 계산"""
-    max_id = 0
-    for path in txt_files:
-        with open(path, 'r', encoding='utf-8') as fh:
-            for line in fh:
-                parts = line.strip().split()
-                if len(parts) != 2:
-                    continue
-                try:
-                    lab = int(parts[1])
-                except ValueError:
-                    continue
-                max_id = max(max_id, lab)
-    base = max_id + 1
-    print(f"[NEG-BASE] max_user_id={max_id}, BASE_ID={base}")
-    return base
-
-def purge_negatives(memory_buffer, base_id):
-    """메모리 버퍼에서 모든 네거티브 클래스 제거"""
-    to_del = [int(c) for c in list(memory_buffer.seen_classes) if int(c) >= base_id]
-    removed = 0
-    for c in to_del:
-        if c in memory_buffer.buffer_groups:
-            removed += len(memory_buffer.buffer_groups[c].buffer)
-            del memory_buffer.buffer_groups[c]
-        memory_buffer.seen_classes.discard(c)
-    print(f"Purged {len(to_del)} negative classes ({removed} samples)")
 
 
 @torch.no_grad()
@@ -103,10 +75,7 @@ def plot_tsne_from_memory(trainer,
         print("[t-SNE] Memory buffer is empty.")
         return
 
-    base_id = getattr(trainer, 'base_id',
-                     getattr(trainer.config.negative, 'base_id', 10000))
-    real_data = [(p, l) for p, l in zip(paths, labels)
-                 if int(l) < base_id]
+    real_data = list(zip(paths, labels))
 
     if len(real_data) == 0:
         print("[t-SNE] No real users in buffer.")
@@ -252,12 +221,6 @@ def main(args):
     # 6. Config에 최종 seed 저장 (COCONUTTrainer가 사용)
     config_obj.training.seed = seed
 
-    # BASE_ID 계산 및 설정
-    config_obj.negative.base_id = compute_safe_base_id(
-        str(config_obj.dataset.train_set_file),
-        str(config_obj.dataset.test_set_file)
-    )
-
     # 오픈셋 모드 확인
     openset_enabled = hasattr(config_obj, 'openset') and config_obj.openset.enabled
     if openset_enabled:
@@ -310,10 +273,9 @@ def main(args):
     # 3. 데이터 스트림 초기화
     print("\n=== Initializing Data Stream ===")
     data_stream = ExperienceStream(
-        train_file=str(config_obj.dataset.train_set_file),
-        negative_file=str(config_obj.dataset.negative_samples_file),
-        num_negative_classes=config_obj.dataset.num_negative_classes,
-        base_id=config_obj.negative.base_id
+        train_file=str(config_obj.dataset.enroll_file),        # 등록 대상 사용자 파일
+        negative_file=str(config_obj.dataset.xdomain_file),   # 크로스도메인 파일 (평가 전용)
+        num_negative_classes=config_obj.dataset.num_xdomain_classes
     )
 
     stats = data_stream.get_statistics()
@@ -394,7 +356,7 @@ def main(args):
     )
 
     # ☘️ Negative 샘플 학습 초기화 블록 제거 (NegRef 학습 오염 방지)
-    # ☘️ negative_samples_file(IITD)은 이제 평가 전용으로만 사용 (negref_eval_file)
+    # ☘️ xdomain_file(IITD)은 이제 FPIR_xdom 평가 전용으로만 사용
     # ☘️ 기존 코드:
     # ☘️ print("\n=== Initializing with Negative Samples ===")
     # ☘️ neg_paths, neg_labels = data_stream.get_negative_samples()
@@ -410,7 +372,7 @@ def main(args):
     # 6. 평가자 초기화 (새로운 per-user 평가 시스템)
     evaluator = ContinualLearningEvaluator(
         config=config_obj,
-        test_file=str(config_obj.dataset.test_set_file)
+        test_file=str(config_obj.dataset.eval_probe_file)  # BWT/forgetting 측정용 독립 probe
     )
 
     # 7. 학습 결과 저장용
@@ -433,7 +395,6 @@ def main(args):
     print("\n=== Starting Continual Learning ===")
     print(f"Total experiences: {config_obj.training.num_experiences}")
     print(f"Evaluation interval: every {config_obj.training.test_interval} users")
-    print(f"Negative warmup: exp0~{config_obj.negative.warmup_experiences-1}")
     print(f"Learning rate: {config_obj.training.learning_rate}")
     print(f"Memory batch size: {config_obj.training.memory_batch_size}")
     print(f"Temperature: {config_obj.training.temperature}")
@@ -450,11 +411,6 @@ def main(args):
         stats = trainer.train_experience(user_id, image_paths, labels)
         training_history['losses'].append(stats['loss'])
         training_history['memory_sizes'].append(stats['memory_size'])
-
-        # ☘️ warmup 경계 purge_negatives 제거 — NegRef가 학습에 없으므로 불필요
-        # ☘️ if exp_id + 1 == config_obj.negative.warmup_experiences:
-        # ☘️     purge_negatives(memory_buffer, config_obj.negative.base_id)
-        # ☘️     trainer._update_ncm()
 
         # 평가 주기 확인
         if (exp_id + 1) % config_obj.training.test_interval == 0 or exp_id == config_obj.training.num_experiences - 1:
@@ -503,6 +459,11 @@ def main(args):
             avg_performance = evaluator.get_average_performance('tar_001')
             forgetting = evaluator.get_forgetting_measure('tar_001')
             bwt = evaluator.get_bwt('tar_001')  # ☘️ 추가: Backward Transfer
+
+            # BWT를 trainer.evaluation_history의 마지막 항목에 병합 (eval_curve.csv에 포함되도록)
+            if hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
+                trainer.evaluation_history[-1]['bwt'] = bwt
+                trainer.evaluation_history[-1]['mean_forgetting'] = forgetting
 
             # 기록 저장
             accuracy_record = {
@@ -602,15 +563,52 @@ def main(args):
     forgetting_plot_path = os.path.join(results_dir, "forgetting_curves.png")
     evaluator.plot_forgetting_curves(forgetting_plot_path)
 
-    # ☘️ Phase 4-[7]: eval_curve.csv 저장 — Experience별 FNIR/FPIR/τ 변화
+    # ☘️ Phase 4-[7]: eval_curve.csv 저장 + Performance vs Users PNG
     if openset_enabled and hasattr(trainer, 'save_eval_curve'):
         eval_curve_path = os.path.join(results_dir, "eval_curve.csv")
         trainer.save_eval_curve(eval_curve_path)
 
-    # ☘️ Phase 4-[8]: det_curve.csv 저장 — τ sweep FPIR–FNIR trade-off 곡선
+        # Performance vs Users 그래프 PNG
+        if hasattr(trainer, 'save_eval_curve_plot'):
+            eval_plot_path = os.path.join(results_dir, "performance_vs_users.png")
+            trainer.save_eval_curve_plot(eval_plot_path)
+
+    # ☘️ Phase 4-[8]: det_curve.csv 저장 + DET curve PNG
     if openset_enabled and hasattr(trainer, 'save_det_curve'):
         det_curve_path = os.path.join(results_dir, "det_curve.csv")
         trainer.save_det_curve(det_curve_path)
+
+        # DET curve PNG — visualization.py의 plot_det_curve 사용
+        try:
+            import pandas as pd
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            det_df = pd.read_csv(det_curve_path)
+            fpir_arr = det_df['FPIR'].values.astype(float)
+            fnir_arr = det_df['FNIR'].values.astype(float)
+
+            fig, ax = plt.subplots(figsize=(8, 8))
+            ax.plot(fpir_arr * 100, fnir_arr * 100, 'b-', linewidth=2)
+            # 운영 기준점 표시
+            for fp_target in [0.1, 1.0, 5.0]:
+                idx = int(np.argmin(np.abs(fpir_arr * 100 - fp_target)))
+                ax.plot(fpir_arr[idx] * 100, fnir_arr[idx] * 100,
+                        'ro', markersize=8,
+                        label=f'FPIR={fp_target:.1f}%, FNIR={fnir_arr[idx]*100:.2f}%')
+            ax.set_xscale('log')
+            ax.set_yscale('log')
+            ax.set_xlabel('FPIR (%)', fontsize=12)
+            ax.set_ylabel('FNIR (%)', fontsize=12)
+            ax.set_title('DET Curve (FPIR–FNIR Trade-off)', fontsize=14, fontweight='bold')
+            ax.legend(fontsize=9)
+            ax.grid(True, which='both', alpha=0.3)
+            det_plot_path = os.path.join(results_dir, "det_curve.png")
+            plt.savefig(det_plot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f"[Plot] DET curve saved: {det_plot_path}")
+        except Exception as e:
+            print(f"WARNING: Could not generate DET curve plot: {e}")
 
     # 결과 요약 저장
     summary = {

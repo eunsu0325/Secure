@@ -1,18 +1,25 @@
 # COCONUT Configuration
 
 Dataset:
-  train_set_file: /content/drive/MyDrive/데이터셋/train_BJTU.txt
-  test_set_file: /content/drive/MyDrive/데이터셋/test_BJTU.txt
+  # 등록 대상 사용자 파일 — 내부에서 90% train/NCM + 10% probe로 자동 분리됨
+  enroll_file: /content/drive/MyDrive/데이터셋/train_BJTU.txt
+
+  # 독립적인 per-user 평가용 probe 파일 — BWT/forgetting 측정 전용 (enroll_file과 다른 파일)
+  eval_probe_file: /content/drive/MyDrive/데이터셋/test_BJTU.txt
+
   height: 128
   width: 128
   channels: 1
   augmentation: true
-  negative_samples_file: /content/drive/MyDrive/데이터셋/train_IITD.txt
-  num_negative_classes: 100
-  # ☘️ Unknown Dev/Test 분리 및 NegRef 평가 전용 파일 (데이터 준비 후 경로 설정 필요)
-  unknown_dev_file: null    # ☘️ τ calibration용 비등록 사용자 데이터 (train_set_file의 앞 50% ID)
-  unknown_test_file: null   # ☘️ FPIR 최종 평가용 비등록 사용자 데이터 (train_set_file의 뒤 50% ID)
-  negref_eval_file: null    # ☘️ cross-domain FPIR 평가 전용 (negative_samples_file과 동일하거나 별도)
+
+  # 크로스도메인 FPIR_xdom 평가 전용 파일 — 학습에 사용하지 않음 (예: IITD 데이터셋)
+  xdomain_file: /content/drive/MyDrive/데이터셋/train_IITD.txt
+  num_xdomain_classes: 100
+
+  # τ calibration용 비등록 사용자 데이터 — enroll_file 미등록 ID 앞 50%로 구성 권장
+  unknown_dev_file: null
+  # FPIR_in 최종 평가용 비등록 사용자 데이터 — enroll_file 미등록 ID 뒤 50%로 구성 권장
+  unknown_test_file: null
 
 Model:
   architecture: ccnet
@@ -45,7 +52,7 @@ Training:
   scheduler_step_size: 50
   scheduler_gamma: 0.8
   temperature: 0.07  # SupConLoss temperature
-  test_interval: 5  # Evaluation and calibration frequency
+  test_interval: 1  # Evaluation and calibration frequency
   checkpoint_path: /content/drive/MyDrive/coconut
   results_path: /content/drive/MyDrive/coconut
   gpu_ids: "0"
@@ -98,8 +105,3 @@ Openset:
   # ☘️ impostor_ratio_between: 1.0    # 삭제 — τ는 unknown_dev_file 기반으로 계산
   # ☘️ impostor_balance_total: 6000   # 삭제 — balance_impostor_scores 미사용
 
-# Negative sample settings
-Negative:
-  warmup_experiences: 3
-  max_per_batch: 1
-  r0: 0.5

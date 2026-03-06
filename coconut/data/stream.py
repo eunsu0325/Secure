@@ -8,9 +8,9 @@ class ExperienceStream:
     """COCONUT을 위한 데이터 스트림 관리자."""
 
     def __init__(self,
-                 train_file: str,
-                 negative_file: str,
-                 num_negative_classes: int = 10,
+                 train_file: str,           # enroll_file: 등록 대상 사용자 파일
+                 negative_file: str,        # xdomain_file: 크로스도메인 파일 (평가 전용)
+                 num_negative_classes: int = 10,  # num_xdomain_classes
                  base_id: int = 10000):
         self.train_file = train_file
         self.negative_file = negative_file
@@ -62,7 +62,7 @@ class ExperienceStream:
         return dict(user_data)
 
     def _load_negative_data(self, txt_file: str) -> Dict[int, List[str]]:
-        """Negative 샘플을 로드합니다."""
+        """크로스도메인(xdomain) 샘플을 로드합니다. 평가 전용이며 학습에 사용되지 않습니다."""
         negative_data = defaultdict(list)
 
         with open(txt_file, 'r') as f:
@@ -82,7 +82,7 @@ class ExperienceStream:
                         negative_data[negative_id].append(path)
 
                 except Exception as e:
-                    print(f"Error processing negative line {i}: {e}")
+                    print(f"Error processing xdomain line {i}: {e}")
                     continue
 
         return dict(negative_data)
@@ -128,7 +128,7 @@ class ExperienceStream:
         """데이터셋 통계 정보"""
         stats = {
             'num_users': self.num_users,
-            'num_negative_classes': len(self.negative_data),
+            'num_xdomain_classes': len(self.negative_data),  # xdomain 클래스 수 (평가 전용)
             'samples_per_user': {},
             'total_samples': 0,
             'negative_samples': sum(len(paths) for paths in self.negative_data.values()),

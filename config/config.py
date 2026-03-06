@@ -5,18 +5,21 @@ from typing import Optional
 
 @dataclasses.dataclass
 class Dataset:
-    train_set_file: Path
-    test_set_file: Path
+    # 등록 대상 사용자 파일 — 내부에서 90% train/NCM + 10% probe로 자동 분리
+    enroll_file: Path
+    # 독립 per-user 평가용 probe — BWT/forgetting 측정 전용 (enroll_file과 겹치지 않아야 함)
+    eval_probe_file: Path
     height: int
     width: int
     channels: int
     augmentation: bool
-    negative_samples_file: Path
-    num_negative_classes: int
-    # ☘️ Unknown Dev/Test 분리 및 NegRef 평가 전용 파일 추가
-    unknown_dev_file: Optional[Path] = None   # ☘️ τ calibration용 unknown 데이터
-    unknown_test_file: Optional[Path] = None  # ☘️ FPIR 최종 평가용 unknown 데이터
-    negref_eval_file: Optional[Path] = None   # ☘️ cross-domain FPIR 평가 전용 (학습 사용 안 함)
+    # 크로스도메인 FPIR_xdom 평가 전용 파일 — 학습에 사용하지 않음 (예: IITD 데이터셋)
+    xdomain_file: Path
+    num_xdomain_classes: int
+    # τ calibration용 비등록 사용자 데이터 (enroll_file 미등록 ID 앞 50% 권장)
+    unknown_dev_file: Optional[Path] = None
+    # FPIR_in 최종 평가용 비등록 사용자 데이터 (enroll_file 미등록 ID 뒤 50% 권장)
+    unknown_test_file: Optional[Path] = None
 
 @dataclasses.dataclass
 class Model:
@@ -122,9 +125,3 @@ class Openset:
         if abs(self.impostor_ratio_between - 1.0) > 1e-6:
             self.impostor_ratio_between = 1.0  # Force to 100%
 
-@dataclasses.dataclass
-class Negative:
-    warmup_experiences: int = 4
-    max_per_batch: int = 1
-    r0: float = 0.5
-    base_id: int = 1
