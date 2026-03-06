@@ -1,5 +1,5 @@
 # config/__init__.py
-from config.config import Dataset, Model, Training, Openset, Negative
+from config.config import Dataset, Model, Training, Openset
 from config.config_parser import ConfigParser
 
 __all__ = [
@@ -8,5 +8,4 @@ __all__ = [
     'Training',
     'ConfigParser',
     'Openset',
-    'Negative'
 ]
