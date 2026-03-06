@@ -210,3 +210,5 @@ A: `max_samples_per_class`를 20-30으로 늘리세요
 
 - iCaRL: Rebuffi et al., "iCaRL: Incremental Classifier and Representation Learning", CVPR 2017
 - BiC: Wu et al., "Large Scale Incremental Learning", CVPR 2019
+
+-2321321312312
