@@ -351,14 +351,24 @@ class ccnet(torch.nn.Module):
         # x = self.arclayer_(x, y)
         # 🍑 핵심 수정: 6144D를 512D로 프로젝션
         if self.training and self.use_projection:
-            # 🍑 학습 모드: 6144D -> 512D projection
-            fe_norm = F.normalize(fe, dim=-1)  # 🍑 x -> fe로 변경
-            z = self.full_projection_head(fe_norm)  # 🍑 projection_head -> full_projection_head
+            # 학습 모드: 6144D → 512D projection (SupCon + ProxyAnchor 손실용)
+            # 반환값: L2 정규화된 512D 단위 벡터
+            fe_norm = F.normalize(fe, dim=-1)
+            z = self.full_projection_head(fe_norm)
             z = F.normalize(z, dim=-1)
-            return z  # 512D 반환
+            return z  # 512D, unit norm
         else:
-            # 평가 모드: 6144D 원본 특징
-            return F.normalize(fe, dim=-1)  # 🍑 x -> fe로 변경, 6144D 반환
+            # 평가 모드(model.eval() 상태에서 model(x) 직접 호출 시):
+            # 반환값: L2 정규화된 6144D 단위 벡터
+            #
+            # [주의] NCM 관련 feature 추출은 이 경로를 사용하지 말 것.
+            # NCM/평가 전용 경로는 반드시 getFeatureCode()를 사용해야 함.
+            #
+            # 이유: getFeatureCode()는 정규화하지 않은 raw 6144D를 반환하고
+            #       NCM 내부에서 F.normalize()로 통합 처리함.
+            #       이 경로(정규화된 단위벡터)와 혼용하면 NCM 점수에는
+            #       영향 없지만 코드 흐름이 불명확해져 유지보수 오류 가능.
+            return F.normalize(fe, dim=-1)  # 6144D, unit norm
     
     # 🍑 getFeatureCode에 projection 옵션 추가
     def getFeatureCode(self, x, use_projection=False):
@@ -382,17 +392,26 @@ class ccnet(torch.nn.Module):
 
         fe = torch.cat((x1, x2), dim=1)  # 6144D
 
-        # 🍑 projection 옵션 추가
         if use_projection and self.use_projection:
-            # NCM도 512D projection 사용 가능
+            # use_projection_for_ncm=True 일 때: 512D projection 공간에서 NCM 운영
+            # 반환값: L2 정규화된 512D 단위 벡터
+            # forward()의 학습 모드와 동일한 공간 → Loss와 NCM 공간 일치
             fe_norm = F.normalize(fe, dim=-1)
             z = self.full_projection_head(fe_norm)
-            return F.normalize(z, dim=-1)  # 512D
+            return F.normalize(z, dim=-1)  # 512D, unit norm
         else:
-            # 기존 방식: 6144D raw features
-            #  정규화 제거: NCM에서 통합 처리
-            # fe = fe / torch.norm(fe, p=2, dim=1, keepdim=True)
-            return fe
+            # use_projection_for_ncm=False 일 때 (기본값): 6144D backbone 공간에서 NCM 운영
+            # 반환값: 정규화하지 않은 raw 6144D (임의 스케일)
+            #
+            # [설계 의도] 정규화를 여기서 하지 않는 이유:
+            #   NCM.forward()가 내부적으로 F.normalize(x, dim=1)을 적용하므로
+            #   최종 코사인 유사도 계산 결과는 동일함.
+            #   정규화 책임을 NCM에 위임하여 단일 정규화 지점을 유지.
+            #
+            # [주의] 이 반환값을 NCM을 거치지 않고 직접 사용할 경우
+            #   forward() eval 모드의 정규화된 6144D와 스케일이 다름.
+            #   두 경로를 혼용하지 말 것.
+            return fe  # 6144D, raw (unnormalized)
 
 
 if __name__== "__main__" :
