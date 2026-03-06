@@ -1,7 +1,7 @@
 # config/config.py
 import dataclasses
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional
 
 @dataclasses.dataclass
 class Dataset:
@@ -13,6 +13,10 @@ class Dataset:
     augmentation: bool
     negative_samples_file: Path
     num_negative_classes: int
+    # ☘️ Unknown Dev/Test 분리 및 NegRef 평가 전용 파일 추가
+    unknown_dev_file: Optional[Path] = None   # ☘️ τ calibration용 unknown 데이터
+    unknown_test_file: Optional[Path] = None  # ☘️ FPIR 최종 평가용 unknown 데이터
+    negref_eval_file: Optional[Path] = None   # ☘️ cross-domain FPIR 평가 전용 (학습 사용 안 함)
 
 @dataclasses.dataclass
 class Model:
@@ -58,6 +62,9 @@ class Training:
     proxy_lr_ratio: float = 10       # 프록시 학습률 배수
     proxy_lambda: float = 0.3        # 고정 가중치 (SupCon: 0.7, ProxyAnchor: 0.3)
 
+    # ☘️ Curriculum Loss Schedule 설정
+    curriculum_ramp_users: int = 12  # ☘️ SupCon이 최대 가중치(0.5)에 도달하는 등록자 수
+
     # Herding buffer 설정
     use_herding: bool = False  # Herding buffer 사용 여부
     max_samples_per_class: int = 20  # Herding 시 클래스당 최대 샘플 수
@@ -71,7 +78,7 @@ class Openset:
     initial_tau: float = 0.7
     
     # 통일된 임계치 파라미터
-    threshold_mode: str = 'far'           # 'eer' or 'far'
+    threshold_mode: str = 'far'           # ☘️ 'far' 단독 (EER 모드 제거)
     target_far: float = 0.01              # FAR 타겟 (1%)
     threshold_alpha: float = 0.2          # EMA 계수 (기존 smoothing_alpha)
     threshold_max_delta: float = 0.03     # 최대 변화폭 (기존 max_delta)

@@ -79,7 +79,7 @@ def extract_scores_genuine(model, ncm, dev_paths: List[str], dev_labels: List[in
 @torch.no_grad()
 def extract_scores_impostor_between(model, ncm, dev_paths: List[str], dev_labels: List[int],
                                    transform, device, max_pairs: int = 2000,
-                                   channels: int = 1) -> np.ndarray:
+                                   channels: int = 1, seed: int = 42) -> np.ndarray:  # ☘️ seed 파라미터 추가
     """Extract between-class impostor scores (excluding own class)"""
     if not dev_paths:
         return np.array([])
@@ -97,8 +97,9 @@ def extract_scores_impostor_between(model, ncm, dev_paths: List[str], dev_labels
 
         sample_paths = cls_paths[:min(10, len(cls_paths))]
         if len(sample_paths) > 5:
-            # Use numpy for deterministic sampling with fixed local seed
-            rng = np.random.RandomState(42)
+            # ☘️ Use numpy for deterministic sampling with config seed (not hardcoded)
+            rng = np.random.RandomState(seed)  # ☘️ config seed 사용
+            # ☘️ rng = np.random.RandomState(42)  # 삭제 — 하드코딩 seed 제거
             indices = rng.choice(len(sample_paths), 5, replace=False)
             sample_paths = [sample_paths[i] for i in indices]
 

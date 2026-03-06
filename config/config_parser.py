@@ -141,9 +141,10 @@ class ConfigParser:
             
             self.openset = Openset(**openset_dict)
             
-            #  모드 표시
-            mode_info = f" (FAR {self.openset.target_far*100:.1f}%)" if self.openset.threshold_mode == 'far' else " (EER)"
-            print(f" Open-set configuration loaded{mode_info}")
+            # ☘️ FAR 모드 단독 출력 (EER 분기 제거)
+            mode_info = f" (FPIR target {self.openset.target_far*100:.1f}%)"
+            # ☘️ mode_info = ... if ... == 'far' else " (EER)"  # 삭제
+            print(f"☘️ Open-set configuration loaded{mode_info}")
             
             #  TTA 설정 출력
             if openset_dict.get('tta_n_views', 1) > 1:
@@ -166,14 +167,13 @@ class ConfigParser:
                 print(f"     - Genuine: {total_evals_genuine}")
                 print(f"     - Between: {total_evals_between}")
             
-            #  Impostor 비율 출력
-            print(f" Impostor score settings:")
-            print(f"   Between impostor: {self.openset.impostor_ratio_between*100:.0f}%")
-            print(f"   Total samples for balancing: {self.openset.impostor_balance_total}")
-
-            #  실제 샘플 수 계산 및 출력
-            n_between = int(self.openset.impostor_balance_total * self.openset.impostor_ratio_between)
-            print(f"   Expected between impostor samples: {n_between}")
+            # ☘️ Impostor 비율 출력 — between-class impostor calibration 제거됨
+            # ☘️ print(f" Impostor score settings: Between={...}, Total={...}")  # 삭제
+            # ☘️ τ는 unknown_dev_file 기반으로 계산됨 (config.dataset.unknown_dev_file)
+            unknown_dev = getattr(self.dataset, 'unknown_dev_file', None)
+            unknown_test = getattr(self.dataset, 'unknown_test_file', None)
+            print(f"☘️ τ calibration source: {'unknown_dev_file = ' + str(unknown_dev) if unknown_dev else 'WARNING: unknown_dev_file not set'}")
+            print(f"☘️ FPIR evaluation source: {'unknown_test_file = ' + str(unknown_test) if unknown_test else 'WARNING: unknown_test_file not set'}")
             
         else:
             self.openset = Openset(enabled=False)

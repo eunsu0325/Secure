@@ -9,6 +9,10 @@ Dataset:
   augmentation: true
   negative_samples_file: /content/drive/MyDrive/데이터셋/train_IITD.txt
   num_negative_classes: 100
+  # ☘️ Unknown Dev/Test 분리 및 NegRef 평가 전용 파일 (데이터 준비 후 경로 설정 필요)
+  unknown_dev_file: null    # ☘️ τ calibration용 비등록 사용자 데이터 (train_set_file의 앞 50% ID)
+  unknown_test_file: null   # ☘️ FPIR 최종 평가용 비등록 사용자 데이터 (train_set_file의 뒤 50% ID)
+  negref_eval_file: null    # ☘️ cross-domain FPIR 평가 전용 (negative_samples_file과 동일하거나 별도)
 
 Model:
   architecture: ccnet
@@ -47,7 +51,8 @@ Training:
   gpu_ids: "0"
   ncm_momentum: 1.0
   seed: 42
-
+  # ☘️ Curriculum Loss Schedule
+  curriculum_ramp_users: 12  # ☘️ SupCon 최대 가중치(0.5) 도달 등록자 수
 
   # ProxyAnchorLoss settings
   use_proxy_anchor: true
@@ -60,8 +65,8 @@ Training:
 Openset:
   enabled: true
 
-  # Threshold settings
-  threshold_mode: 'far'      # 'eer' or 'far'
+  # ☘️ Threshold settings — FAR 모드 단독 (EER 제거)
+  threshold_mode: 'far'      # ☘️ 'far' 단독 ('eer' 옵션 제거됨)
   target_far: 0.001           # FAR target 1%
   threshold_alpha: 0.8       # EMA smoothing coefficient
   threshold_max_delta: 1.0  # Maximum change limit
@@ -89,9 +94,9 @@ Openset:
   tta_repeat_aggregation: 'mean'  # Inter-repeat aggregation method
   tta_verbose: true  # TTA debugging output
 
-  # Impostor score settings
-  impostor_ratio_between: 1.0    # Between impostor 100%
-  impostor_balance_total: 6000   # Total samples for balancing
+  # ☘️ Impostor score settings — between-class impostor calibration 제거됨
+  # ☘️ impostor_ratio_between: 1.0    # 삭제 — τ는 unknown_dev_file 기반으로 계산
+  # ☘️ impostor_balance_total: 6000   # 삭제 — balance_impostor_scores 미사용
 
 # Negative sample settings
 Negative:

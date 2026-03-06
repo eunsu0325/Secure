@@ -7,8 +7,10 @@ TTA Support Included
 """
 
 import os
-# Set PYTHONHASHSEED for reproducibility BEFORE other imports
-os.environ['PYTHONHASHSEED'] = '42'
+# ☘️ PYTHONHASHSEED는 config seed 결정 후 main() 내부에서 설정함 (아래 233행 참고)
+# ☘️ os.environ['PYTHONHASHSEED'] = '42'  # 삭제 — 하드코딩, config 로드 전 설정 불필요
+# ☘️ 참고: PYTHONHASHSEED는 프로세스 시작 전 설정 시에만 해시 무작위화에 영향을 줌.
+# ☘️ 런타임 설정(아래 233행)은 해시 무작위화에 소급 효과가 없으나 seed 값 기록 용도로 유지.
 
 import argparse
 import time
@@ -391,23 +393,19 @@ def main(args):
         device=device
     )
 
-    # 5. Negative 샘플로 초기화
-    print("\n=== Initializing with Negative Samples ===")
-    neg_paths, neg_labels = data_stream.get_negative_samples()
+    # ☘️ Negative 샘플 학습 초기화 블록 제거 (NegRef 학습 오염 방지)
+    # ☘️ negative_samples_file(IITD)은 이제 평가 전용으로만 사용 (negref_eval_file)
+    # ☘️ 기존 코드:
+    # ☘️ print("\n=== Initializing with Negative Samples ===")
+    # ☘️ neg_paths, neg_labels = data_stream.get_negative_samples()
+    # ☘️ if len(neg_paths) > config_obj.training.memory_batch_size:
+    # ☘️     selected_indices = np.random.choice(len(neg_paths), ...)
+    # ☘️     neg_paths = [neg_paths[i] for i in selected_indices]
+    # ☘️     neg_labels = [neg_labels[i] for i in selected_indices]
+    # ☘️ memory_buffer.update_from_dataset(neg_paths, neg_labels)
 
-    if len(neg_paths) > config_obj.training.memory_batch_size:
-        selected_indices = np.random.choice(
-            len(neg_paths),
-            size=config_obj.training.memory_batch_size,
-            replace=False
-        )
-        neg_paths = [neg_paths[i] for i in selected_indices]
-        neg_labels = [neg_labels[i] for i in selected_indices]
-
-    memory_buffer.update_from_dataset(neg_paths, neg_labels)
+    print("\n☘️ NegRef 학습 제거됨 — NCM starts empty, no NegRef contamination")
     print(f"Initial buffer size: {len(memory_buffer)}")
-
-    print("NCM starts empty - no fake class contamination")
 
     # 6. 평가자 초기화 (새로운 per-user 평가 시스템)
     evaluator = ContinualLearningEvaluator(
@@ -453,21 +451,10 @@ def main(args):
         training_history['losses'].append(stats['loss'])
         training_history['memory_sizes'].append(stats['memory_size'])
 
-        # exp3→exp4 경계에서 네거티브 완전 제거
-        if exp_id + 1 == config_obj.negative.warmup_experiences:
-            print(f"\n=== Warmup End (exp{exp_id}) → Post-warmup (exp{exp_id+1}) ===")
-
-            # Quick evaluation before purge
-            perf_pre = evaluator.get_average_performance('1-eer')
-            print(f"[Warmup-End] pre-purge Avg 1-EER={perf_pre:.3f}")
-
-            purge_negatives(memory_buffer, config_obj.negative.base_id)
-            trainer._update_ncm()
-
-            # Quick evaluation after purge
-            perf_post = evaluator.get_average_performance('1-eer')
-            print(f"[Warmup-End] post-purge Avg 1-EER={perf_post:.3f}")
-            print(f"========================================\n")
+        # ☘️ warmup 경계 purge_negatives 제거 — NegRef가 학습에 없으므로 불필요
+        # ☘️ if exp_id + 1 == config_obj.negative.warmup_experiences:
+        # ☘️     purge_negatives(memory_buffer, config_obj.negative.base_id)
+        # ☘️     trainer._update_ncm()
 
         # 평가 주기 확인
         if (exp_id + 1) % config_obj.training.test_interval == 0 or exp_id == config_obj.training.num_experiences - 1:
@@ -487,7 +474,7 @@ def main(args):
                     space='fe',
                     perplexity=30,
                     max_points=5000,
-                    seed=42
+                    seed=seed  # ☘️ config seed 사용 (기존: seed=42 하드코딩)
                 )
 
                 if config_obj.model.use_projection:
@@ -499,7 +486,7 @@ def main(args):
                         space='z',
                         perplexity=30,
                         max_points=5000,
-                        seed=42
+                        seed=seed  # ☘️ config seed 사용 (기존: seed=42 하드코딩)
                     )
 
             # 모든 사용자 개별 평가 (새로운 방식)
@@ -608,6 +595,16 @@ def main(args):
     forgetting_plot_path = os.path.join(results_dir, "forgetting_curves.png")
     evaluator.plot_forgetting_curves(forgetting_plot_path)
 
+    # ☘️ Phase 4-[7]: eval_curve.csv 저장 — Experience별 FNIR/FPIR/τ 변화
+    if openset_enabled and hasattr(trainer, 'save_eval_curve'):
+        eval_curve_path = os.path.join(results_dir, "eval_curve.csv")
+        trainer.save_eval_curve(eval_curve_path)
+
+    # ☘️ Phase 4-[8]: det_curve.csv 저장 — τ sweep FPIR–FNIR trade-off 곡선
+    if openset_enabled and hasattr(trainer, 'save_det_curve'):
+        det_curve_path = os.path.join(results_dir, "det_curve.csv")
+        trainer.save_det_curve(det_curve_path)
+
     # 결과 요약 저장
     summary = {
         'config': args.config,
@@ -624,15 +621,28 @@ def main(args):
         'trainer_type': 'COCONUTTrainer'
     }
 
-    # 오픈셋 요약 추가
-    if openset_enabled and final_result:
+    # ☘️ 오픈셋 요약 추가 — evaluation_history에서 마지막 값 사용 (새 키 이름 반영)
+    if openset_enabled and hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
+        last_eval = trainer.evaluation_history[-1]
+        last_metrics = last_eval.get('metrics', {})
         summary['final_openset'] = {
-            'TAR': final_result.get('TAR', 0),
-            'TRR_unknown': final_result.get('TRR_unknown', 0),
-            'FAR_unknown': final_result.get('FAR_unknown', 0),
-            'tau_s': final_result.get('tau_s', 0),
-            'tta_enabled': final_result.get('tta_enabled', False)
+            'Rank1':       last_metrics.get('Rank1', 0),       # ☘️ TAR → Rank1
+            'FNIR':        last_metrics.get('FNIR', 0),        # ☘️ 추가
+            'FRR':         last_metrics.get('FRR', 0),
+            'MisID':       last_metrics.get('MisID', 0),       # ☘️ 추가
+            'FPIR_in':     last_metrics.get('FPIR_in', 0),     # ☘️ FAR_unknown → FPIR_in
+            'FPIR_xdom':   last_metrics.get('FPIR_xdom', None),# ☘️ FAR_negref → FPIR_xdom
+            'tau_s':       last_eval.get('tau_s', 0),
+            'num_users':   last_eval.get('num_users', 0),
+            'tta_enabled': last_metrics.get('tta_enabled', False)
         }
+        # ☘️ 삭제된 코드:
+        # ☘️ summary['final_openset'] = {
+        # ☘️     'TAR': final_result.get('TAR', 0),
+        # ☘️     'TRR_unknown': final_result.get('TRR_unknown', 0),
+        # ☘️     'FAR_unknown': final_result.get('FAR_unknown', 0),  # ← accuracy_record에 없던 키
+        # ☘️     'tau_s': final_result.get('tau_s', 0),
+        # ☘️ }
 
     summary_path = os.path.join(results_dir, 'summary.json')
     with open(summary_path, 'w') as f:
