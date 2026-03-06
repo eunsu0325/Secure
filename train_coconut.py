@@ -499,18 +499,21 @@ def main(args):
                 curves_dir=curves_dir
             )
 
-            # 평균 성능과 Forgetting 계산
-            avg_performance = evaluator.get_average_performance('1-eer')
-            forgetting = evaluator.get_forgetting_measure('1-eer')
+            # ☘️ 평균 성능 / Forgetting / BWT 계산 — '1-eer' → 'tar_001' (TAR@FPIR=1%)
+            avg_performance = evaluator.get_average_performance('tar_001')
+            forgetting = evaluator.get_forgetting_measure('tar_001')
+            bwt = evaluator.get_bwt('tar_001')  # ☘️ 추가: Backward Transfer
 
             # 기록 저장
             accuracy_record = {
                 'experience': exp_id + 1,
-                'average_1_eer': avg_performance,
+                'average_tar_001': avg_performance,
                 'forgetting': forgetting,
+                'bwt': bwt,  # ☘️ 추가
                 'evaluated_users': report['evaluated_users'],
                 'mean_forgetting': report['overall']['mean_forgetting'],
-                'std_forgetting': report['overall']['std_forgetting']
+                'std_forgetting': report['overall']['std_forgetting'],
+                'bwt_overall': report['overall'].get('bwt', 0.0)  # ☘️ 추가
             }
 
             training_history['accuracies'].append(accuracy_record)
@@ -518,9 +521,10 @@ def main(args):
             training_history['forgetting_reports'].append(report)
 
             print(f"\n📊 Summary:")
-            print(f"Average 1-EER: {avg_performance:.3f}")
-            print(f"Mean Forgetting: {report['overall']['mean_forgetting']:.4f}")
+            print(f"Average TAR@1%FPIR: {avg_performance:.3f}")
+            print(f"Mean Forgetting (TAR@1%FPIR): {report['overall']['mean_forgetting']:.4f}")
             print(f"Std Forgetting: {report['overall']['std_forgetting']:.4f}")
+            print(f"BWT: {bwt:.4f}  (< 0 = 망각, 0 = 유지, > 0 = 전이)")
             print(f"Memory Buffer Size: {len(memory_buffer)}")
 
             # Herding Buffer의 경우 drift 통계 출력
@@ -576,13 +580,16 @@ def main(args):
 
     # 최종 통계
     final_result = training_history['accuracies'][-1] if training_history['accuracies'] else {}
-    final_1_eer = final_result.get('average_1_eer', 0)
+    # ☘️ 'average_1_eer' → 'average_tar_001'
+    final_tar_001 = final_result.get('average_tar_001', 0)
     final_forget = final_result.get('mean_forgetting', 0)
     final_forget_std = final_result.get('std_forgetting', 0)
+    final_bwt = final_result.get('bwt', 0)  # ☘️ 추가
 
     print(f"\n=== Final Results ===")
-    print(f"Final Average 1-EER: {final_1_eer:.3f}")
-    print(f"Final Mean Forgetting: {final_forget:.4f} (±{final_forget_std:.4f})")
+    print(f"Final Average TAR@1%FPIR: {final_tar_001:.3f}")
+    print(f"Final Mean Forgetting (TAR@1%FPIR): {final_forget:.4f} (±{final_forget_std:.4f})")
+    print(f"Final BWT: {final_bwt:.4f}")  # ☘️ 추가
     print(f"Evaluated Users: {final_result.get('evaluated_users', 0)}")
 
     print(f"\nTotal Training Time: {(time.time() - start_time)/60:.1f} minutes")
@@ -610,9 +617,10 @@ def main(args):
         'config': args.config,
         'num_experiences': config_obj.training.num_experiences,
         'memory_size': config_obj.training.memory_size,
-        'final_average_1_eer': final_1_eer,
+        'final_average_tar_001': final_tar_001,
         'final_mean_forgetting': final_forget,
         'final_std_forgetting': final_forget_std,
+        'final_bwt': final_bwt,  # ☘️ 추가: Backward Transfer
         'evaluated_users': final_result.get('evaluated_users', 0),
         'total_time_minutes': (time.time() - start_time) / 60,
         'negative_removal_history': training_history['negative_removal_history'],

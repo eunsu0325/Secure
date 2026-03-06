@@ -6,7 +6,7 @@ Tracks per-user performance over time and calculates forgetting metrics
 
 import json
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from collections import defaultdict
 import os
 from datetime import datetime
@@ -130,6 +130,40 @@ class ForgettingTracker:
             return 0.0
         return np.mean(list(forgetting.values()))
 
+    def get_bwt(self, metric: Optional[str] = None) -> float:
+        """
+        ☘️ Backward Transfer (BWT) 계산.
+
+        BWT = (1 / N) * sum_u [ R(T, u) - R(u, u) ]
+        - R(T, u) : 최종 경험 이후 사용자 u의 성능
+        - R(u, u) : 사용자 u 등록 직후 첫 번째 평가 성능
+        - BWT < 0 : 망각 발생 (논문에서 보통 음수로 보고)
+
+        Returns:
+            float: BWT 값 (0에 가까울수록 망각 없음, 음수일수록 망각 심함)
+        """
+        metric = metric or self.primary_metric
+        diffs = []
+
+        for _, user_data in self.performance_matrix.items():
+            evals = user_data['evaluations']
+            if len(evals) < 2:
+                continue  # 최소 2번 평가된 사용자만 포함
+
+            # R(u, u): 등록 직후 첫 번째 평가 성능
+            first_val = evals[0]['metrics'].get(metric)
+            # R(T, u): 마지막(최종) 평가 성능
+            last_val  = evals[-1]['metrics'].get(metric)
+
+            if first_val is not None and last_val is not None:
+                # EER은 낮을수록 좋으므로 부호 반전
+                if metric == 'eer':
+                    diffs.append(first_val - last_val)   # 낮아져야 좋음 → BWT > 0이 좋은 것
+                else:
+                    diffs.append(last_val - first_val)   # 높아져야 좋음 → BWT > 0이 좋은 것
+
+        return float(np.mean(diffs)) if diffs else 0.0
+
     def get_group_forgetting(self, group_size: int = 10,
                            metric: Optional[str] = None) -> Dict[str, float]:
         """
@@ -203,6 +237,9 @@ class ForgettingTracker:
         # Overall statistics
         forgetting_values = list(forgetting.values())
 
+        # ☘️ BWT 계산 추가
+        bwt = self.get_bwt()
+
         report = {
             'test_step': test_step,
             'total_users': experience_id,
@@ -214,7 +251,8 @@ class ForgettingTracker:
                 'mean_forgetting': np.mean(forgetting_values) if forgetting_values else 0.0,
                 'std_forgetting': np.std(forgetting_values) if forgetting_values else 0.0,
                 'max_forgetting': np.max(forgetting_values) if forgetting_values else 0.0,
-                'min_forgetting': np.min(forgetting_values) if forgetting_values else 0.0
+                'min_forgetting': np.min(forgetting_values) if forgetting_values else 0.0,
+                'bwt': bwt  # ☘️ 추가: Backward Transfer
             },
             'timestamp': datetime.now().isoformat()
         }

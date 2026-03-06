@@ -14,6 +14,7 @@ from datetime import datetime
 
 from ..evaluation import ForgettingTracker, calculate_all_metrics, save_evaluation_curves
 from ..openset import extract_features
+from ..openset.score_extraction import extract_scores_impostor_unknown  # ☘️ unknown max score 추출용
 from ..data import BaseVeinDataset, get_scr_transforms
 from torch.utils.data import DataLoader, Subset
 
@@ -35,8 +36,9 @@ class ContinualLearningEvaluator:
         self.config = config
         self.test_file = test_file
 
-        # Initialize forgetting tracker
-        self.forgetting_tracker = ForgettingTracker(primary_metric='1-eer')
+        # ☘️ primary_metric '1-eer' → 'tar_001' (open-set 논문 표준: TAR@FPIR=1%)
+        # '1-eer'는 verification 지표로 open-set identification 망각 측정에 부적합
+        self.forgetting_tracker = ForgettingTracker(primary_metric='tar_001')
 
         # User-specific test data storage
         self.user_test_data = {}  # {user_id: {'paths': [...], 'indices': [...]}}
@@ -107,8 +109,40 @@ class ContinualLearningEvaluator:
         self.registered_users.add(user_id)
         self.prepare_user_test_data(user_id)
 
+    def _compute_unknown_impostor_scores(self, trainer,
+                                         max_samples: int = 500) -> Optional[np.ndarray]:
+        """
+        ☘️ unknown_test_file에서 unknown 사용자의 max NCM 유사도 스코어를 추출.
+        TAR@FPIR 계산 시 올바른 impostor 소스로 사용 (between-class 대체).
+
+        Args:
+            trainer: COCONUTTrainer (model, ncm, device, transform 보유)
+            max_samples: 최대 샘플 수 (성능 제한)
+
+        Returns:
+            np.ndarray of max scores, or None if unknown_test_file not set
+        """
+        unknown_test_file = getattr(self.config.dataset, 'unknown_test_file', None)
+        if not unknown_test_file or str(unknown_test_file) == 'None':
+            return None
+
+        seed = getattr(self.config.training, 'seed', 42)
+        # ☘️ extract_scores_impostor_unknown: unknown 이미지 → max(cosine_sim over all class means)
+        scores = extract_scores_impostor_unknown(
+            model=trainer.model,
+            ncm=trainer.ncm,
+            txt_file=str(unknown_test_file),
+            registered_users=trainer.registered_users,
+            transform=trainer.test_transform,
+            device=trainer.device,
+            max_eval=max_samples,
+            channels=self.config.dataset.channels
+        )
+        return scores if len(scores) >= 10 else None
+
     def evaluate_single_user(self, trainer, user_id: int,
-                            use_tta: bool = False) -> Dict[str, float]:
+                            use_tta: bool = False,
+                            unknown_impostor_scores: Optional[np.ndarray] = None) -> Dict[str, float]:
         """
         Evaluate a single user's performance.
 
@@ -116,6 +150,8 @@ class ContinualLearningEvaluator:
             trainer: COCONUT trainer instance
             user_id: User to evaluate
             use_tta: Whether to use test-time augmentation
+            unknown_impostor_scores: ☘️ Pre-computed max scores for unknown users
+                (from unknown_test_file). If None, falls back to between-class scores.
 
         Returns:
             Dictionary with biometric metrics
@@ -134,7 +170,8 @@ class ContinualLearningEvaluator:
 
         # Extract genuine scores (user authenticating as themselves)
         genuine_scores = []
-        impostor_scores = []
+        # ☘️ impostor_scores는 아래에서 unknown 또는 between-class로 분기
+        between_class_scores = []
 
         # Create dataloader
         loader = DataLoader(
@@ -147,37 +184,42 @@ class ContinualLearningEvaluator:
         trainer.model.eval()
         with torch.no_grad():
             for batch_images, batch_labels in loader:
-                # Move to device
                 batch_images = batch_images.to(trainer.device)
 
-                # Extract features using getFeatureCode for NCM compatibility (6144D)
                 if use_tta and hasattr(trainer, 'use_tta') and trainer.use_tta:
-                    # TTA: Multiple views with getFeatureCode
                     features = trainer._extract_features_with_tta(batch_images)
                 else:
-                    # Normal: Single view using getFeatureCode
-                    # 🍑 config에 따라 projection 사용 (6144D 또는 512D)
                     use_projection = getattr(trainer.config.model, 'use_projection_for_ncm', False)
                     features = trainer.model.getFeatureCode(batch_images, use_projection=use_projection)
 
-                # Calculate similarities
                 for feat in features:
-                    feat = feat.unsqueeze(0)  # Add batch dimension
+                    feat = feat.unsqueeze(0)
 
-                    # Genuine: similarity to correct user
+                    # Genuine: similarity to correct user's class mean
                     sim_genuine = trainer.ncm.similarity(feat, user_id)
                     if sim_genuine is not None:
                         genuine_scores.append(float(sim_genuine))
 
-                    # Impostor: similarities to other users
-                    for other_id in self.registered_users:
-                        if other_id != user_id:
-                            sim_impostor = trainer.ncm.similarity(feat, other_id)
-                            if sim_impostor is not None:
-                                impostor_scores.append(float(sim_impostor))
+                    # ☘️ between-class fallback용으로만 수집
+                    if unknown_impostor_scores is None:
+                        for other_id in self.registered_users:
+                            if other_id != user_id:
+                                sim_imp = trainer.ncm.similarity(feat, other_id)
+                                if sim_imp is not None:
+                                    between_class_scores.append(float(sim_imp))
+
+        # ☘️ Impostor 소스 결정: unknown_test_file > between-class fallback
+        if unknown_impostor_scores is not None and len(unknown_impostor_scores) >= 10:
+            impostor_scores = unknown_impostor_scores  # open-set 평가 표준
+        else:
+            # ☘️ fallback: between-class (unknown_test_file 미설정 시)
+            if unknown_impostor_scores is None:
+                print(f"   [Evaluator] WARNING: unknown_test_file not set. "
+                      f"Using between-class impostor for user {user_id} (verification-style).")
+            impostor_scores = np.array(between_class_scores)
 
         # Calculate metrics
-        if not genuine_scores or not impostor_scores:
+        if not genuine_scores or len(impostor_scores) == 0:
             print(f"[Warning] Insufficient scores for user {user_id}")
             return {
                 'eer': 1.0, 'tar_001': 0.0, 'margin': 0.0,
@@ -191,7 +233,7 @@ class ContinualLearningEvaluator:
 
         # Add raw scores to metrics for later aggregation
         metrics['genuine_scores'] = genuine_scores
-        metrics['impostor_scores'] = impostor_scores
+        metrics['impostor_scores'] = list(impostor_np)  # ☘️ list로 변환 (ndarray 호환)
 
         return metrics
 
@@ -217,6 +259,14 @@ class ContinualLearningEvaluator:
         print(f" Evaluating All {len(self.registered_users)} Users (Step {self.test_step})")
         print(f"{'='*60}")
 
+        # ☘️ unknown_test_file에서 unknown impostor max scores 한 번 계산 (모든 사용자 공유)
+        unknown_impostor_scores = self._compute_unknown_impostor_scores(trainer)
+        if unknown_impostor_scores is not None:
+            print(f"   [Evaluator] Unknown impostor scores: {len(unknown_impostor_scores)} samples "
+                  f"(mean={unknown_impostor_scores.mean():.3f})")
+        else:
+            print("   [Evaluator] WARNING: unknown_test_file not set → between-class fallback")
+
         # Collect all scores for aggregate curves
         all_genuine_scores = []
         all_impostor_scores = []
@@ -225,8 +275,9 @@ class ContinualLearningEvaluator:
         for user_id in sorted(self.registered_users):
             print(f"\nEvaluating User {user_id}...", end=' ')
 
-            # Get performance metrics
-            metrics = self.evaluate_single_user(trainer, user_id, use_tta)
+            # ☘️ unknown_impostor_scores 전달
+            metrics = self.evaluate_single_user(trainer, user_id, use_tta,
+                                                unknown_impostor_scores=unknown_impostor_scores)
 
             # Collect scores for aggregate analysis
             if 'genuine_scores' in metrics:
@@ -287,11 +338,15 @@ class ContinualLearningEvaluator:
 
         return report
 
-    def get_forgetting_measure(self, metric: str = '1-eer') -> float:
+    def get_forgetting_measure(self, metric: str = 'tar_001') -> float:
         """Get average forgetting across all users."""
         return self.forgetting_tracker.get_average_forgetting(metric)
 
-    def get_average_performance(self, metric: str = '1-eer') -> float:
+    def get_bwt(self, metric: str = 'tar_001') -> float:
+        """☘️ Backward Transfer: R(T,u) - R(u,u) 평균. 음수일수록 망각 심함."""
+        return self.forgetting_tracker.get_bwt(metric)
+
+    def get_average_performance(self, metric: str = 'tar_001') -> float:
         """Get average current performance across all users."""
         performances = []
         for user_id, user_data in self.forgetting_tracker.performance_matrix.items():
@@ -340,7 +395,8 @@ class ContinualLearningEvaluator:
                 row = [user_id]
 
                 for eval_record in user_data['evaluations']:
-                    metric_value = eval_record['metrics'].get('1-eer', 0)
+                    # ☘️ '1-eer' → primary_metric (tar_001)
+                    metric_value = eval_record['metrics'].get(self.forgetting_tracker.primary_metric, 0)
                     row.append(f"{metric_value:.4f}")
 
                 # Pad with empty cells if needed
@@ -372,7 +428,8 @@ class ContinualLearningEvaluator:
                     ax1.plot(steps, trajectory, marker='o', label=f'User {user_id}')
 
             ax1.set_xlabel('Test Step')
-            ax1.set_ylabel('1-EER Performance')
+            # ☘️ '1-EER' → primary_metric (TAR@1%FPIR)
+            ax1.set_ylabel(f'{self.forgetting_tracker.primary_metric} Performance')
             ax1.set_title(f'Performance Trajectories (Top {top_k} Forgetting)')
             ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
             ax1.grid(True, alpha=0.3)
