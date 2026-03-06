@@ -360,27 +360,67 @@ class COCONUTTrainer:
 
         return optim.Adam(param_groups)
 
-    def _recreate_optimizer_with_proxies(self):
-        """[CORE] 핵심 수정: 프록시 추가 시 옵티마이저 안전 재생성 (상태 복원 제거)"""
+    def _recreate_optimizer_with_proxies(self, old_proxy_state=None, n_old=0):
+        """프록시 추가 시 옵티마이저 재생성 + 기존 state 보존"""
         if not self.use_proxy_anchor or self.proxy_anchor_loss.proxies is None:
             return
 
         current_num_proxies = self.proxy_anchor_loss.num_classes
 
-        # 프록시 수가 변경된 경우에만 재생성
         if current_num_proxies != self.last_num_proxies:
-            # 새 옵티마이저 생성 (그룹별 학습률 적용)
+            # 백본/프로젝션 헤드 state 저장 (파라미터 객체가 동일하므로 복원 가능)
+            old_model_states = {}
+            for param in self.model.parameters():
+                if param in self.optimizer.state and self.optimizer.state[param]:
+                    old_model_states[param] = {
+                        k: v.clone() if torch.is_tensor(v) else v
+                        for k, v in self.optimizer.state[param].items()
+                    }
+
+            # 스케줄러 step 위치 저장
+            old_scheduler_state = self.scheduler.state_dict() if hasattr(self, 'scheduler') else None
+
+            # 새 옵티마이저 생성
             self.optimizer = self._create_optimizer_with_grouped_params(include_proxies=True)
 
-            # 스케줄러 재생성
+            # 백본/프로젝션 state 복원
+            for param, state in old_model_states.items():
+                self.optimizer.state[param] = state
+
+            # 프록시 state 이전: 기존 N개 복원 + 새 슬롯은 0으로 초기화
+            if old_proxy_state and n_old > 0:
+                n_new = current_num_proxies - n_old
+                D = self.proxy_anchor_loss.embedding_size
+                device = self.proxy_anchor_loss.proxies.device
+
+                new_proxy_state = {}
+                if 'exp_avg' in old_proxy_state:
+                    new_proxy_state['exp_avg'] = torch.cat([
+                        old_proxy_state['exp_avg'].to(device),
+                        torch.zeros(n_new, D, device=device)
+                    ], dim=0)
+                if 'exp_avg_sq' in old_proxy_state:
+                    new_proxy_state['exp_avg_sq'] = torch.cat([
+                        old_proxy_state['exp_avg_sq'].to(device),
+                        torch.zeros(n_new, D, device=device)
+                    ], dim=0)
+                if 'step' in old_proxy_state:
+                    new_proxy_state['step'] = old_proxy_state['step']
+
+                self.optimizer.state[self.proxy_anchor_loss.proxies] = new_proxy_state
+
+            # 스케줄러 재생성 + step 위치 복원
             self.scheduler = lr_scheduler.StepLR(
                 self.optimizer,
                 step_size=self.config.training.scheduler_step_size,
                 gamma=self.config.training.scheduler_gamma
             )
+            if old_scheduler_state is not None:
+                self.scheduler.load_state_dict(old_scheduler_state)
 
             self.last_num_proxies = current_num_proxies
-            print(f" Optimizer recreated with {current_num_proxies} proxies (fresh state)")
+            print(f" Optimizer recreated: {current_num_proxies} proxies "
+                  f"(preserved {n_old} existing, fresh {current_num_proxies - n_old} new)")
 
     def _dedup_negative_classes(self, paths, labels, max_per_class=1):
         """네거티브 클래스 중복 제거"""
@@ -477,14 +517,27 @@ class COCONUTTrainer:
 
         print(f"\n=== Training Experience {self.experience_count}: User {user_id} ===")
 
-        # [CORE] 핵심 수정: 프록시 추가 및 옵티마이저 재생성
+        # 프록시 추가 및 옵티마이저 재생성 (기존 state 보존)
         if self.use_proxy_anchor:
             unique_labels = set(labels)
             real_classes = [l for l in unique_labels if l < self.base_id]
 
             if real_classes:
+                # add_classes() 전에 현재 프록시 참조와 optimizer state 저장
+                old_proxy_param = self.proxy_anchor_loss.proxies
+                n_old = old_proxy_param.shape[0] if old_proxy_param is not None else 0
+                old_proxy_state = {}
+                if old_proxy_param is not None and old_proxy_param in self.optimizer.state:
+                    old_proxy_state = {
+                        k: v.clone() if torch.is_tensor(v) else v
+                        for k, v in self.optimizer.state[old_proxy_param].items()
+                    }
+
                 self.proxy_anchor_loss.add_classes(real_classes)
-                self._recreate_optimizer_with_proxies()
+                self._recreate_optimizer_with_proxies(
+                    old_proxy_state=old_proxy_state,
+                    n_old=n_old
+                )
 
         # 원본 labels를 보존
         original_labels = labels.copy()
@@ -659,16 +712,15 @@ class COCONUTTrainer:
                 avg_loss = epoch_loss / self.config.training.iterations_per_epoch
                 print(f"  Epoch [{epoch+1}/{self.config.training.epochs_per_experience}] Loss: {avg_loss:.4f}")
 
-                #  에포크마다 코사인 유사도 분포 분석
-                if (epoch + 1) % 5 == 0 or epoch == self.config.training.epochs_per_experience - 1:
-                    self._analyze_cosine_distribution_epoch()
-
         # 메모리 버퍼 업데이트
         self.memory_buffer.update_from_dataset(train_paths, train_labels)
         print(f"Memory buffer size after update: {len(self.memory_buffer)}")
 
         # NCM 업데이트
         self._update_ncm()
+
+        # NCM 갱신 후 코사인 유사도 분포 분석 (현재 백본 + 현재 프로토타입 기준으로 정확한 측정)
+        self._analyze_cosine_distribution_epoch()
 
         # 디버깅: NCM과 버퍼 동기화 확인
         all_paths, all_labels = self.memory_buffer.get_all_data()
