@@ -609,18 +609,18 @@ def main(args):
             training_history['forgetting_reports'].append(report)
 
             if verbose:
-                print(f"\nSummary:")
-                print(f"Average TAR@1%FPIR (true accept rate at 1% FAR): {avg_performance:.3f}")
-                print(f"Mean Forgetting (TAR@1%FPIR): {report['overall']['mean_forgetting']:.4f}")
+                print(f"\n요약:")
+                print(f"Average TAR@1%FPIR (1% 오탐률에서 진짜 수락률): {avg_performance:.3f}")
+                print(f"Mean Forgetting (TAR@1%FPIR 기준 망각률): {report['overall']['mean_forgetting']:.4f}")
                 print(f"Std Forgetting: {report['overall']['std_forgetting']:.4f}")
-                print(f"BWT: {bwt:.4f}  (< 0 = forgetting, 0 = stable, > 0 = transfer)")
+                print(f"BWT: {bwt:.4f}  (< 0 = 망각, 0 = 유지, > 0 = 전이)")
                 print(f"Memory Buffer Size: {len(memory_buffer)}")
 
             # Compact 평가 출력 (한국어 설명 포함)
             if not verbose:
-                print(f"  TAR@1%={avg_performance:.3f} (1% 오인식 허용 시 정상 사용자 수락률) | "
-                      f"Forget={report['overall']['mean_forgetting']:.4f} (이전 사용자 성능 저하 평균) | "
-                      f"BWT={bwt:.4f} (역방향 전이, 음수=망각) | "
+                print(f"  TAR@1%={avg_performance:.3f} (1% 오탐 허용 시 정상 수락률) | "
+                      f"Forget={report['overall']['mean_forgetting']:.4f} (망각률 평균) | "
+                      f"BWT={bwt:.4f} (음수=망각, 양수=전이) | "
                       f"Buf={len(memory_buffer)}")
 
             # Herding Buffer drift 통계
