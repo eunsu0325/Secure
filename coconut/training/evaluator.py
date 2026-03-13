@@ -14,7 +14,7 @@ from datetime import datetime
 
 from ..evaluation import ForgettingTracker, calculate_all_metrics, save_evaluation_curves
 from ..openset import extract_features
-from ..openset.score_extraction import extract_scores_impostor_unknown  # ☘️ unknown max score 추출용
+from ..openset.score_extraction import extract_scores_impostor_unknown
 from ..data import BaseVeinDataset, get_scr_transforms
 from torch.utils.data import DataLoader, Subset
 
@@ -36,8 +36,7 @@ class ContinualLearningEvaluator:
         self.config = config
         self.test_file = test_file
 
-        # ☘️ primary_metric '1-eer' → 'tar_001' (open-set 논문 표준: TAR@FPIR=1%)
-        # '1-eer'는 verification 지표로 open-set identification 망각 측정에 부적합
+        # primary_metric: TAR@FPIR=1% (open-set identification 표준 지표)
         self.forgetting_tracker = ForgettingTracker(primary_metric='tar_001')
 
         # User-specific test data storage
@@ -112,7 +111,7 @@ class ContinualLearningEvaluator:
     def _compute_unknown_impostor_scores(self, trainer,
                                          max_samples: int = 500) -> Optional[np.ndarray]:
         """
-        ☘️ unknown_test_file에서 unknown 사용자의 max NCM 유사도 스코어를 추출.
+        unknown_test_file에서 unknown 사용자의 max NCM 유사도 스코어를 추출.
         TAR@FPIR 계산 시 올바른 impostor 소스로 사용 (between-class 대체).
 
         Args:
@@ -127,7 +126,6 @@ class ContinualLearningEvaluator:
             return None
 
         seed = getattr(self.config.training, 'seed', 42)
-        # ☘️ extract_scores_impostor_unknown: unknown 이미지 → max(cosine_sim over all class means)
         scores = extract_scores_impostor_unknown(
             model=trainer.model,
             ncm=trainer.ncm,
@@ -150,7 +148,7 @@ class ContinualLearningEvaluator:
             trainer: COCONUT trainer instance
             user_id: User to evaluate
             use_tta: Whether to use test-time augmentation
-            unknown_impostor_scores: ☘️ Pre-computed max scores for unknown users
+            unknown_impostor_scores: Pre-computed max scores for unknown users
                 (from unknown_test_file). If None, falls back to between-class scores.
 
         Returns:
@@ -170,7 +168,6 @@ class ContinualLearningEvaluator:
 
         # Extract genuine scores (user authenticating as themselves)
         genuine_scores = []
-        # ☘️ impostor_scores는 아래에서 unknown 또는 between-class로 분기
         between_class_scores = []
 
         # Create dataloader
@@ -200,7 +197,6 @@ class ContinualLearningEvaluator:
                     if sim_genuine is not None:
                         genuine_scores.append(float(sim_genuine))
 
-                    # ☘️ between-class fallback용으로만 수집
                     if unknown_impostor_scores is None:
                         for other_id in self.registered_users:
                             if other_id != user_id:
@@ -208,11 +204,9 @@ class ContinualLearningEvaluator:
                                 if sim_imp is not None:
                                     between_class_scores.append(float(sim_imp))
 
-        # ☘️ Impostor 소스 결정: unknown_test_file > between-class fallback
         if unknown_impostor_scores is not None and len(unknown_impostor_scores) >= 10:
             impostor_scores = unknown_impostor_scores  # open-set 평가 표준
         else:
-            # ☘️ fallback: between-class (unknown_test_file 미설정 시)
             if unknown_impostor_scores is None:
                 print(f"   [Evaluator] WARNING: unknown_test_file not set. "
                       f"Using between-class impostor for user {user_id} (verification-style).")
@@ -233,7 +227,7 @@ class ContinualLearningEvaluator:
 
         # Add raw scores to metrics for later aggregation
         metrics['genuine_scores'] = genuine_scores
-        metrics['impostor_scores'] = list(impostor_np)  # ☘️ list로 변환 (ndarray 호환)
+        metrics['impostor_scores'] = list(impostor_np)
 
         return metrics
 
@@ -259,7 +253,6 @@ class ContinualLearningEvaluator:
         print(f" Evaluating All {len(self.registered_users)} Users (Step {self.test_step})")
         print(f"{'='*60}")
 
-        # ☘️ unknown_test_file에서 unknown impostor max scores 한 번 계산 (모든 사용자 공유)
         unknown_impostor_scores = self._compute_unknown_impostor_scores(trainer)
         if unknown_impostor_scores is not None:
             print(f"   [Evaluator] Unknown impostor scores: {len(unknown_impostor_scores)} samples "
@@ -275,7 +268,6 @@ class ContinualLearningEvaluator:
         for user_id in sorted(self.registered_users):
             print(f"\nEvaluating User {user_id}...", end=' ')
 
-            # ☘️ unknown_impostor_scores 전달
             metrics = self.evaluate_single_user(trainer, user_id, use_tta,
                                                 unknown_impostor_scores=unknown_impostor_scores)
 
@@ -297,7 +289,9 @@ class ContinualLearningEvaluator:
             )
 
             print(f"1-EER: {metrics.get('1-eer', 0):.3f}, "
-                  f"TAR@1%: {metrics.get('tar_001', 0):.3f}")
+                  f"TAR@1%: {metrics.get('tar_001', 0):.3f}, "
+                  f"TAR@5%: {metrics.get('tar_005', 0):.3f}, "
+                  f"TAR@10%: {metrics.get('tar_010', 0):.3f}")
 
         # Generate report
         report = self.forgetting_tracker.get_report(self.test_step, experience_id)
@@ -343,7 +337,7 @@ class ContinualLearningEvaluator:
         return self.forgetting_tracker.get_average_forgetting(metric)
 
     def get_bwt(self, metric: str = 'tar_001') -> float:
-        """☘️ Backward Transfer: R(T,u) - R(u,u) 평균. 음수일수록 망각 심함."""
+        """Backward Transfer: R(T,u) - R(u,u) 평균. 음수일수록 망각 심함."""
         return self.forgetting_tracker.get_bwt(metric)
 
     def get_average_performance(self, metric: str = 'tar_001') -> float:
@@ -395,7 +389,6 @@ class ContinualLearningEvaluator:
                 row = [user_id]
 
                 for eval_record in user_data['evaluations']:
-                    # ☘️ '1-eer' → primary_metric (tar_001)
                     metric_value = eval_record['metrics'].get(self.forgetting_tracker.primary_metric, 0)
                     row.append(f"{metric_value:.4f}")
 
@@ -428,7 +421,6 @@ class ContinualLearningEvaluator:
                     ax1.plot(steps, trajectory, marker='o', label=f'User {user_id}')
 
             ax1.set_xlabel('Test Step')
-            # ☘️ '1-EER' → primary_metric (TAR@1%FPIR)
             ax1.set_ylabel(f'{self.forgetting_tracker.primary_metric} Performance')
             ax1.set_title(f'Performance Trajectories (Top {top_k} Forgetting)')
             ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')

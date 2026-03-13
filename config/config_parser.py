@@ -132,18 +132,10 @@ class ConfigParser:
             if 'tta_n_repeats_between' not in openset_dict:
                 openset_dict['tta_n_repeats_between'] = None
             
-            #  Impostor 비율 기본값 추가
-            if 'impostor_ratio_between' not in openset_dict:
-                openset_dict['impostor_ratio_between'] = 1.0
-            if 'impostor_balance_total' not in openset_dict:
-                openset_dict['impostor_balance_total'] = 6000
-            
             self.openset = Openset(**openset_dict)
             
-            # ☘️ FAR 모드 단독 출력 (EER 분기 제거)
             mode_info = f" (FPIR target {self.openset.target_far*100:.1f}%)"
-            # ☘️ mode_info = ... if ... == 'far' else " (EER)"  # 삭제
-            print(f"☘️ Open-set configuration loaded{mode_info}")
+            print(f"Open-set configuration loaded{mode_info}")
             
             #  TTA 설정 출력
             if openset_dict.get('tta_n_views', 1) > 1:
@@ -166,13 +158,10 @@ class ConfigParser:
                 print(f"     - Genuine: {total_evals_genuine}")
                 print(f"     - Between: {total_evals_between}")
             
-            # ☘️ Impostor 비율 출력 — between-class impostor calibration 제거됨
-            # ☘️ print(f" Impostor score settings: Between={...}, Total={...}")  # 삭제
-            # ☘️ τ는 unknown_dev_file 기반으로 계산됨 (config.dataset.unknown_dev_file)
             unknown_dev = getattr(self.dataset, 'unknown_dev_file', None)
             unknown_test = getattr(self.dataset, 'unknown_test_file', None)
-            print(f"☘️ τ calibration source: {'unknown_dev_file = ' + str(unknown_dev) if unknown_dev else 'WARNING: unknown_dev_file not set'}")
-            print(f"☘️ FPIR evaluation source: {'unknown_test_file = ' + str(unknown_test) if unknown_test else 'WARNING: unknown_test_file not set'}")
+            print(f"τ calibration source: {'unknown_dev_file = ' + str(unknown_dev) if unknown_dev else 'WARNING: unknown_dev_file not set'}")
+            print(f"FPIR evaluation source: {'unknown_test_file = ' + str(unknown_test) if unknown_test else 'WARNING: unknown_test_file not set'}")
             
         else:
             self.openset = Openset(enabled=False)

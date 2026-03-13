@@ -32,7 +32,7 @@ Model:
 
 Training:
   experience_batch_size: 16
-  memory_batch_size: 112
+  memory_batch_size: 200  # 112→200 (clipping 적용으로 초반 과적합 방지됨)
   num_experiences: 100
   memory_size: 1000
   min_samples_per_class: 9
@@ -57,8 +57,7 @@ Training:
   gpu_ids: "0"
   ncm_momentum: 1.0
   seed: 42
-  # ☘️ Curriculum Loss Schedule
-  curriculum_ramp_users: 12  # ☘️ SupCon 최대 가중치(0.5) 도달 등록자 수
+  curriculum_ramp_users: 12
 
   # ProxyAnchorLoss settings
   use_proxy_anchor: true
@@ -71,8 +70,7 @@ Training:
 Openset:
   enabled: true
 
-  # ☘️ Threshold settings — FAR 모드 단독 (EER 제거)
-  threshold_mode: 'far'      # ☘️ 'far' 단독 ('eer' 옵션 제거됨)
+  threshold_mode: 'far'
   target_far: 0.01            # FAR target 1% (0.001→0.01: τ 과도하게 높아지는 문제 완화)
   threshold_alpha: 0.2       # EMA smoothing coefficient (0.8→0.2: τ 급변 방지)
   threshold_max_delta: 0.05  # Maximum change limit (1.0→0.05: τ 급변 방지)
@@ -99,8 +97,4 @@ Openset:
   tta_n_repeats_between: 3      # Between impostor: 3 repeats (balanced)
   tta_repeat_aggregation: 'mean'  # Inter-repeat aggregation method
   tta_verbose: true  # TTA debugging output
-
-  # ☘️ Impostor score settings — between-class impostor calibration 제거됨
-  # ☘️ impostor_ratio_between: 1.0    # 삭제 — τ는 unknown_dev_file 기반으로 계산
-  # ☘️ impostor_balance_total: 6000   # 삭제 — balance_impostor_scores 미사용
 

@@ -65,8 +65,7 @@ class Training:
     proxy_lr_ratio: float = 10       # 프록시 학습률 배수
     proxy_lambda: float = 0.3        # 고정 가중치 (SupCon: 0.7, ProxyAnchor: 0.3)
 
-    # ☘️ Curriculum Loss Schedule 설정
-    curriculum_ramp_users: int = 12  # ☘️ SupCon이 최대 가중치(0.5)에 도달하는 등록자 수
+    curriculum_ramp_users: int = 12
 
     # Herding buffer 설정
     use_herding: bool = False  # Herding buffer 사용 여부
@@ -81,7 +80,7 @@ class Openset:
     initial_tau: float = 0.7
     
     # 통일된 임계치 파라미터
-    threshold_mode: str = 'far'           # ☘️ 'far' 단독 (EER 모드 제거)
+    threshold_mode: str = 'far'
     target_far: float = 0.01              # FAR 타겟 (1%)
     threshold_alpha: float = 0.2          # EMA 계수 (기존 smoothing_alpha)
     threshold_max_delta: float = 0.03     # 최대 변화폭 (기존 max_delta)
@@ -107,21 +106,13 @@ class Openset:
     tta_n_repeats_genuine: Optional[int] = None      # Genuine 점수용
     tta_n_repeats_between: Optional[int] = None      # Between impostor용
     
-    # Impostor 점수 비율 설정 추가
-    impostor_ratio_between: float = 1.0   # Between impostor 비율 (100%)
-    impostor_balance_total: int = 6000    # 균형 맞출 총 샘플 수
-    
     def __post_init__(self):
         """타입별 반복 설정이 없으면 기본값 사용"""
         # Genuine: 기본값 사용
         if self.tta_n_repeats_genuine is None:
             self.tta_n_repeats_genuine = self.tta_n_repeats
-        
+
         # Between: 기본값 사용
         if self.tta_n_repeats_between is None:
             self.tta_n_repeats_between = self.tta_n_repeats
-        
-        # Between ratio validation (should be 1.0)
-        if abs(self.impostor_ratio_between - 1.0) > 1e-6:
-            self.impostor_ratio_between = 1.0  # Force to 100%
 

@@ -132,7 +132,7 @@ class ForgettingTracker:
 
     def get_bwt(self, metric: Optional[str] = None) -> float:
         """
-        ☘️ Backward Transfer (BWT) 계산.
+        Backward Transfer (BWT) 계산.
 
         BWT = (1 / N) * sum_u [ R(T, u) - R(u, u) ]
         - R(T, u) : 최종 경험 이후 사용자 u의 성능
@@ -237,7 +237,6 @@ class ForgettingTracker:
         # Overall statistics
         forgetting_values = list(forgetting.values())
 
-        # ☘️ BWT 계산 추가
         bwt = self.get_bwt()
 
         report = {
@@ -252,7 +251,7 @@ class ForgettingTracker:
                 'std_forgetting': np.std(forgetting_values) if forgetting_values else 0.0,
                 'max_forgetting': np.max(forgetting_values) if forgetting_values else 0.0,
                 'min_forgetting': np.min(forgetting_values) if forgetting_values else 0.0,
-                'bwt': bwt  # ☘️ 추가: Backward Transfer
+                'bwt': bwt
             },
             'timestamp': datetime.now().isoformat()
         }

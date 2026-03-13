@@ -7,11 +7,6 @@ TTA Support Included
 """
 
 import os
-# ☘️ PYTHONHASHSEED는 config seed 결정 후 main() 내부에서 설정함 (아래 233행 참고)
-# ☘️ os.environ['PYTHONHASHSEED'] = '42'  # 삭제 — 하드코딩, config 로드 전 설정 불필요
-# ☘️ 참고: PYTHONHASHSEED는 프로세스 시작 전 설정 시에만 해시 무작위화에 영향을 줌.
-# ☘️ 런타임 설정(아래 233행)은 해시 무작위화에 소급 효과가 없으나 seed 값 기록 용도로 유지.
-
 import argparse
 import time
 import numpy as np
@@ -236,16 +231,8 @@ def main(args):
                   f"B={config_obj.openset.tta_n_repeats_between}")
             print(f"      Aggregation: {config_obj.openset.tta_aggregation} (repeat: {config_obj.openset.tta_repeat_aggregation})")
 
-        # Impostor 설정 정보
-        print(f"   Impostor Settings:")
-        print(f"      Between impostor: {config_obj.openset.impostor_ratio_between*100:.0f}%")
-        print(f"      Total samples for balancing: {config_obj.openset.impostor_balance_total}")
-
-        # FAR/EER 모드 표시
-        if config_obj.openset.threshold_mode == 'far':
-            print(f"   Threshold mode: FAR Target ({config_obj.openset.target_far*100:.1f}%)")
-        else:
-            print(f"   Threshold mode: EER")
+        # Threshold 모드 표시
+        print(f"   Threshold mode: FAR Target ({config_obj.openset.target_far*100:.1f}%)")
 
         print("=========================================\n")
 
@@ -355,18 +342,7 @@ def main(args):
         device=device
     )
 
-    # ☘️ Negative 샘플 학습 초기화 블록 제거 (NegRef 학습 오염 방지)
-    # ☘️ xdomain_file(IITD)은 이제 FPIR_xdom 평가 전용으로만 사용
-    # ☘️ 기존 코드:
-    # ☘️ print("\n=== Initializing with Negative Samples ===")
-    # ☘️ neg_paths, neg_labels = data_stream.get_negative_samples()
-    # ☘️ if len(neg_paths) > config_obj.training.memory_batch_size:
-    # ☘️     selected_indices = np.random.choice(len(neg_paths), ...)
-    # ☘️     neg_paths = [neg_paths[i] for i in selected_indices]
-    # ☘️     neg_labels = [neg_labels[i] for i in selected_indices]
-    # ☘️ memory_buffer.update_from_dataset(neg_paths, neg_labels)
-
-    print("\n☘️ NegRef 학습 제거됨 — NCM starts empty, no NegRef contamination")
+    print("\nNCM starts empty (no NegRef in training)")
     print(f"Initial buffer size: {len(memory_buffer)}")
 
     # 6. 평가자 초기화 (새로운 per-user 평가 시스템)
@@ -430,7 +406,7 @@ def main(args):
                     space='fe',
                     perplexity=30,
                     max_points=5000,
-                    seed=seed  # ☘️ config seed 사용 (기존: seed=42 하드코딩)
+                    seed=seed
                 )
 
                 if config_obj.model.use_projection:
@@ -442,7 +418,7 @@ def main(args):
                         space='z',
                         perplexity=30,
                         max_points=5000,
-                        seed=seed  # ☘️ config seed 사용 (기존: seed=42 하드코딩)
+                        seed=seed
                     )
 
             # 모든 사용자 개별 평가 (새로운 방식)
@@ -455,10 +431,9 @@ def main(args):
                 curves_dir=curves_dir
             )
 
-            # ☘️ 평균 성능 / Forgetting / BWT 계산 — '1-eer' → 'tar_001' (TAR@FPIR=1%)
             avg_performance = evaluator.get_average_performance('tar_001')
             forgetting = evaluator.get_forgetting_measure('tar_001')
-            bwt = evaluator.get_bwt('tar_001')  # ☘️ 추가: Backward Transfer
+            bwt = evaluator.get_bwt('tar_001')
 
             # BWT를 trainer.evaluation_history의 마지막 항목에 병합 (eval_curve.csv에 포함되도록)
             if hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
@@ -470,11 +445,11 @@ def main(args):
                 'experience': exp_id + 1,
                 'average_tar_001': avg_performance,
                 'forgetting': forgetting,
-                'bwt': bwt,  # ☘️ 추가
+                'bwt': bwt,
                 'evaluated_users': report['evaluated_users'],
                 'mean_forgetting': report['overall']['mean_forgetting'],
                 'std_forgetting': report['overall']['std_forgetting'],
-                'bwt_overall': report['overall'].get('bwt', 0.0)  # ☘️ 추가
+                'bwt_overall': report['overall'].get('bwt', 0.0)
             }
 
             training_history['accuracies'].append(accuracy_record)
@@ -541,16 +516,15 @@ def main(args):
 
     # 최종 통계
     final_result = training_history['accuracies'][-1] if training_history['accuracies'] else {}
-    # ☘️ 'average_1_eer' → 'average_tar_001'
     final_tar_001 = final_result.get('average_tar_001', 0)
     final_forget = final_result.get('mean_forgetting', 0)
     final_forget_std = final_result.get('std_forgetting', 0)
-    final_bwt = final_result.get('bwt', 0)  # ☘️ 추가
+    final_bwt = final_result.get('bwt', 0)
 
     print(f"\n=== Final Results ===")
     print(f"Final Average TAR@1%FPIR: {final_tar_001:.3f}")
     print(f"Final Mean Forgetting (TAR@1%FPIR): {final_forget:.4f} (±{final_forget_std:.4f})")
-    print(f"Final BWT: {final_bwt:.4f}")  # ☘️ 추가
+    print(f"Final BWT: {final_bwt:.4f}")
     print(f"Evaluated Users: {final_result.get('evaluated_users', 0)}")
 
     print(f"\nTotal Training Time: {(time.time() - start_time)/60:.1f} minutes")
@@ -563,7 +537,6 @@ def main(args):
     forgetting_plot_path = os.path.join(results_dir, "forgetting_curves.png")
     evaluator.plot_forgetting_curves(forgetting_plot_path)
 
-    # ☘️ Phase 4-[7]: eval_curve.csv 저장 + Performance vs Users PNG
     if openset_enabled and hasattr(trainer, 'save_eval_curve'):
         eval_curve_path = os.path.join(results_dir, "eval_curve.csv")
         trainer.save_eval_curve(eval_curve_path)
@@ -573,7 +546,6 @@ def main(args):
             eval_plot_path = os.path.join(results_dir, "performance_vs_users.png")
             trainer.save_eval_curve_plot(eval_plot_path)
 
-    # ☘️ Phase 4-[8]: det_curve.csv 저장 + DET curve PNG
     if openset_enabled and hasattr(trainer, 'save_det_curve'):
         det_curve_path = os.path.join(results_dir, "det_curve.csv")
         trainer.save_det_curve(det_curve_path)
@@ -618,7 +590,7 @@ def main(args):
         'final_average_tar_001': final_tar_001,
         'final_mean_forgetting': final_forget,
         'final_std_forgetting': final_forget_std,
-        'final_bwt': final_bwt,  # ☘️ 추가: Backward Transfer
+        'final_bwt': final_bwt,
         'evaluated_users': final_result.get('evaluated_users', 0),
         'total_time_minutes': (time.time() - start_time) / 60,
         'negative_removal_history': training_history['negative_removal_history'],
@@ -627,28 +599,20 @@ def main(args):
         'trainer_type': 'COCONUTTrainer'
     }
 
-    # ☘️ 오픈셋 요약 추가 — evaluation_history에서 마지막 값 사용 (새 키 이름 반영)
     if openset_enabled and hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
         last_eval = trainer.evaluation_history[-1]
         last_metrics = last_eval.get('metrics', {})
         summary['final_openset'] = {
-            'Rank1':       last_metrics.get('Rank1', 0),       # ☘️ TAR → Rank1
-            'FNIR':        last_metrics.get('FNIR', 0),        # ☘️ 추가
+            'Rank1':       last_metrics.get('Rank1', 0),
+            'FNIR':        last_metrics.get('FNIR', 0),
             'FRR':         last_metrics.get('FRR', 0),
-            'MisID':       last_metrics.get('MisID', 0),       # ☘️ 추가
-            'FPIR_in':     last_metrics.get('FPIR_in', 0),     # ☘️ FAR_unknown → FPIR_in
-            'FPIR_xdom':   last_metrics.get('FPIR_xdom', None),# ☘️ FAR_negref → FPIR_xdom
+            'MisID':       last_metrics.get('MisID', 0),
+            'FPIR_in':     last_metrics.get('FPIR_in', 0),
+            'FPIR_xdom':   last_metrics.get('FPIR_xdom', None),
             'tau_s':       last_eval.get('tau_s', 0),
             'num_users':   last_eval.get('num_users', 0),
             'tta_enabled': last_metrics.get('tta_enabled', False)
         }
-        # ☘️ 삭제된 코드:
-        # ☘️ summary['final_openset'] = {
-        # ☘️     'TAR': final_result.get('TAR', 0),
-        # ☘️     'TRR_unknown': final_result.get('TRR_unknown', 0),
-        # ☘️     'FAR_unknown': final_result.get('FAR_unknown', 0),  # ← accuracy_record에 없던 키
-        # ☘️     'tau_s': final_result.get('tau_s', 0),
-        # ☘️ }
 
     summary_path = os.path.join(results_dir, 'summary.json')
     with open(summary_path, 'w') as f:

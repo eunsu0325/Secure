@@ -27,8 +27,8 @@ class ProxyAnchorLoss(nn.Module):
         self.num_classes = 0
 
     @torch.no_grad()
-    def add_classes(self, class_ids):
-        """새 클래스 프록시 추가 (gradient 계산 없음)"""
+    def add_classes(self, class_ids, feature_means: dict = None):
+        """새 클래스 프록시 추가. feature_means 제공 시 피처 평균으로 초기화."""
         new_ids = [c for c in class_ids if c not in self.class_to_idx]
         if not new_ids:
             return
@@ -37,9 +37,19 @@ class ProxyAnchorLoss(nn.Module):
         device = (self.proxies.device if self.proxies is not None
                   else torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
-        # 새 프록시 초기화 (kaiming_normal)
-        new_p = torch.randn(n_new, self.embedding_size, device=device)
-        nn.init.kaiming_normal_(new_p, mode='fan_out')
+        if feature_means is not None:
+            # 피처 평균으로 초기화 (proxy 공간과 동일한 차원이어야 함)
+            new_p = torch.stack([
+                feature_means[cid].float().to(device)
+                if cid in feature_means
+                else torch.randn(self.embedding_size, device=device)
+                for cid in new_ids
+            ])
+            new_p = F.normalize(new_p, p=2, dim=1)
+        else:
+            # fallback: kaiming_normal
+            new_p = torch.randn(n_new, self.embedding_size, device=device)
+            nn.init.kaiming_normal_(new_p, mode='fan_out')
 
         if self.proxies is None:
             self.proxies = nn.Parameter(new_p)
@@ -112,7 +122,7 @@ class ProxyAnchorLoss(nn.Module):
 
         # 수치 안정성: log1p + clamp_min
         pos_term = torch.log1p(P_sim_sum[with_pos].clamp_min(1e-12)).sum() / num_valid
-        neg_term = torch.log1p(N_sim_sum.clamp_min(1e-12)).sum() / self.num_classes
+        neg_term = torch.log1p(N_sim_sum[with_pos].clamp_min(1e-12)).sum() / num_valid
 
         return pos_term + neg_term
 

@@ -201,6 +201,8 @@ def calculate_all_metrics(genuine_scores: np.ndarray,
     metrics = {
         'eer': calculate_eer(genuine_scores, impostor_scores),
         'tar_001': calculate_tar_at_far(genuine_scores, impostor_scores, 0.01),
+        'tar_005': calculate_tar_at_far(genuine_scores, impostor_scores, 0.05),
+        'tar_010': calculate_tar_at_far(genuine_scores, impostor_scores, 0.10),
         'tar_0001': calculate_tar_at_far(genuine_scores, impostor_scores, 0.001),
         'tar_00001': calculate_tar_at_far(genuine_scores, impostor_scores, 0.0001),
         'margin': calculate_similarity_margin(genuine_scores, impostor_scores),

@@ -262,17 +262,16 @@ class COCONUTTrainer:
             )
 
             # Dev/Train 데이터 관리
-            self.probe_data = {}  # ☘️ dev_data → probe_data (evaluation 전용, calibration 미사용)
+            self.probe_data = {}
             self.train_data = {}
-            # ☘️ self.dev_data = {}  # 삭제 — probe_data로 rename
             self.registered_users = set()
 
             # 평가 히스토리
             self.evaluation_history = []
 
-            # ☘️ Phase 4-[7][8]: DET curve용 마지막 스코어 캐시
-            self._last_genuine_scores = np.array([])   # ☘️ 추가: probe genuine max scores
-            self._last_impostor_scores = np.array([])  # ☘️ 추가: unknown dev impostor scores
+            # DET curve용 마지막 스코어 캐시
+            self._last_genuine_scores = np.array([])
+            self._last_impostor_scores = np.array([])
 
             # 초기 임계치 설정
             initial_tau = config.openset.initial_tau
@@ -281,10 +280,8 @@ class COCONUTTrainer:
             else:
                 self.ncm.tau_s = initial_tau
 
-            # ☘️ FAR 모드 단독 (EER 분기 제거)
             print(f"[TARGET] FAR Target mode enabled")
             print(f"   Target FAR: {config.openset.target_far*100:.1f}%")
-            # ☘️ if config.openset.threshold_mode == 'far': ... else: print("EER mode")  # 삭제
 
             print(f"   Initial τ_s: {initial_tau}")
         else:
@@ -495,6 +492,24 @@ class COCONUTTrainer:
             real_classes = list(unique_labels)
 
             if real_classes:
+                # 새 클래스 피처 평균 계산 — proxy 초기화용 (512D projection 공간)
+                new_class_ids = [c for c in real_classes
+                                 if c not in self.proxy_anchor_loss.class_to_idx]
+                feature_means = {}
+                if new_class_ids:
+                    self.model.eval()
+                    with torch.no_grad():
+                        for cid in new_class_ids:
+                            cls_paths = [p for p, l in zip(image_paths, labels) if l == cid]
+                            feats = []
+                            for p in cls_paths:
+                                img = _open_with_channels(p, self.config.dataset.channels)
+                                img = self.test_transform(img).unsqueeze(0).to(self.device)
+                                feat = self.model.getFeatureCode(img, use_projection=True)
+                                feats.append(feat.squeeze(0))
+                            feature_means[cid] = torch.stack(feats).mean(dim=0)
+                    self.model.train()
+
                 # add_classes() 전에 현재 프록시 참조와 optimizer state 저장
                 old_proxy_param = self.proxy_anchor_loss.proxies
                 n_old = old_proxy_param.shape[0] if old_proxy_param is not None else 0
@@ -505,7 +520,7 @@ class COCONUTTrainer:
                         for k, v in self.optimizer.state[old_proxy_param].items()
                     }
 
-                self.proxy_anchor_loss.add_classes(real_classes)
+                self.proxy_anchor_loss.add_classes(real_classes, feature_means=feature_means)
                 self._recreate_optimizer_with_proxies(
                     old_proxy_state=old_proxy_state,
                     n_old=n_old
@@ -519,14 +534,14 @@ class COCONUTTrainer:
             train_paths, train_labels, dev_paths, dev_labels = split_user_data(
                 image_paths, original_labels,
                 dev_ratio=self.openset_config.dev_ratio,
-                min_dev=2
+                min_dev=1 if len(image_paths) <= 5 else 2
             )
 
             # 저장
-            self.probe_data[user_id] = (dev_paths, dev_labels)  # ☘️ dev_data → probe_data
+            self.probe_data[user_id] = (dev_paths, dev_labels)
             self.train_data[user_id] = (train_paths, train_labels)
 
-            print(f"[INFO] Data split: Train={len(train_paths)}, Probe={len(dev_paths)}")  # ☘️ Dev→Probe
+            print(f"[INFO] Data split: Train={len(train_paths)}, Probe={len(dev_paths)}")
         else:
             train_paths = image_paths
             train_labels = original_labels
@@ -563,19 +578,22 @@ class COCONUTTrainer:
 
                 # 메모리에서 샘플링
                 if len(self.memory_buffer) > 0:
+                    # Clipping: 실제 저장 수를 초과하지 않도록 제한 (초반 과적합 방지)
+                    effective_memory_batch = min(
+                        self.config.training.memory_batch_size,
+                        len(self.memory_buffer)
+                    )
                     memory_paths, memory_labels = self.memory_buffer.sample(
-                        self.config.training.memory_batch_size
+                        effective_memory_batch
                     )
 
                     if torch.is_tensor(memory_labels):
                         memory_labels = memory_labels.cpu().tolist()
 
-                    pass  # 메모리 버퍼에는 실제 사용자만 존재하므로 필터링 불필요
-
                     if memory_paths:
-                        #  메모리 데이터를 memory_batch_size만큼 증강
+                        #  메모리 데이터를 effective_memory_batch만큼 증강 (clipping 적용)
                         augmented_memory_paths, augmented_memory_labels = repeat_and_augment_data(
-                            memory_paths, memory_labels, self.config.training.memory_batch_size
+                            memory_paths, memory_labels, effective_memory_batch
                         )
 
                         memory_dataset = MemoryDataset(
@@ -623,35 +641,32 @@ class COCONUTTrainer:
                     # CCNet 결과 그대로 사용
                     features_paired = torch.stack([f1, f2], dim=1)
 
-                    # ☘️ Curriculum Loss Schedule + Batch Gating
+                    # Curriculum Loss Schedule + Batch Gating
                     ramp_users = getattr(self.config.training, 'curriculum_ramp_users', 12)
                     num_users = len(self.registered_users)
-                    w_supcon = min(0.5, num_users / ramp_users)  # ☘️ 연속 스케줄: 등록자 수 비례
+                    w_supcon = min(0.5, num_users / ramp_users)
                     w_proxy = 1.0 - w_supcon
 
-                    # ☘️ Batch Gating: 배치 내 클래스 수가 1이면 SupCon 수학적으로 불가 → 비활성화
+                    # Batch Gating: 배치 내 클래스 < 2이면 SupCon 비활성화
                     unique_in_batch = len(set(batch_labels.tolist()))
                     if unique_in_batch < 2:
                         w_supcon = 0.0
                         w_proxy = 1.0
 
-                    # SupConLoss (gating 통과 시에만)
                     if w_supcon > 0:
                         loss_supcon = self.criterion(features_paired, batch_labels)
                     else:
-                        loss_supcon = torch.tensor(0.0, device=self.device)  # ☘️ Gating: SupCon 비활성화
+                        loss_supcon = torch.tensor(0.0, device=self.device)
 
                     # ProxyAnchorLoss
                     if self.use_proxy_anchor and self.proxy_anchor_loss.proxies is not None:
                         all_labels = batch_labels.repeat(2)
                         loss_proxy = self.proxy_anchor_loss(features_all, all_labels)
 
-                        # ☘️ Curriculum 가중치 적용 (고정 proxy_lambda 대체)
                         loss = w_proxy * loss_proxy + w_supcon * loss_supcon
-                        # ☘️ loss = (1 - self.proxy_lambda) * loss_supcon + self.proxy_lambda * loss_proxy  # 삭제
 
                         if iteration == 0 and epoch == 0:
-                            print(f"☘️ [Curriculum] users={num_users}, w_proxy={w_proxy:.2f}, w_supcon={w_supcon:.2f}, gate={'ON' if unique_in_batch >= 2 else 'OFF'}")
+                            print(f"[Curriculum] users={num_users}, w_proxy={w_proxy:.2f}, w_supcon={w_supcon:.2f}, gate={'ON' if unique_in_batch >= 2 else 'OFF'}")
                             print(f"   SupCon: {loss_supcon.item():.4f}, ProxyAnchor: {loss_proxy.item():.4f}")
                     else:
                         loss = loss_supcon
@@ -703,9 +718,8 @@ class COCONUTTrainer:
                 self._calibrate_threshold()
                 metrics = self._evaluate_openset()
 
-                # ☘️ Phase 4-[7]: experience 필드 추가 (eval_curve.csv 로깅용)
                 self.evaluation_history.append({
-                    'experience': self.experience_count,  # ☘️ 추가
+                    'experience': self.experience_count,
                     'num_users': len(self.registered_users),
                     'tau_s': self.ncm.tau_s,
                     'metrics': metrics
@@ -755,10 +769,8 @@ class COCONUTTrainer:
             print(f"   Between: {self.openset_config.tta_n_views} views × {n_repeats_between} repeats")
             print(f"   NegRef: {self.openset_config.tta_n_views} views × {n_repeats_negref} repeats")
 
-        # ☘️ Unknown Dev 기반 τ 계산 (기존: between-class impostor 100% 사용 → 제거)
-        print(f"\n☘️ Extracting Unknown Dev scores for FPIR calibration...")
+        print(f"\nExtracting Unknown Dev scores for FPIR calibration...")
 
-        # ☘️ unknown_dev_file에서 impostor 점수 추출 (등록 사용자와 무관한 비등록 사용자)
         unknown_dev_file = getattr(self.config.dataset, 'unknown_dev_file', None)
         s_impostor = np.array([])
 
@@ -773,13 +785,12 @@ class COCONUTTrainer:
             )
             print(f"   Unknown Dev: {len(s_impostor)} scores from {unknown_dev_file}")
         else:
-            # ☘️ unknown_dev_file 미설정 시 경고 (논문용 실험에서는 반드시 설정 필요)
             print("   WARNING: unknown_dev_file not set. τ calibration skipped.")
 
-        # ☘️ probe_data에서 genuine 점수 추출 (FRR 참고용 — calibration에는 미사용)
+        # probe_data에서 genuine 점수 추출 (참고용)
         all_probe_paths = []
         all_probe_labels = []
-        for uid, (paths, labels) in self.probe_data.items():  # ☘️ dev_data → probe_data
+        for uid, (paths, labels) in self.probe_data.items():
             all_probe_paths.extend(paths)
             all_probe_labels.extend([uid] * len(paths))
 
@@ -790,22 +801,17 @@ class COCONUTTrainer:
             channels=channels
         )
 
-        # ☘️ impostor_ratio_config 삭제 — unknown_dev 직접 사용으로 불필요
-        # ☘️ impostor_ratio_config = {'between': 1.0, 'unknown': 0.0, 'negref': 0.0}  # 삭제
-        # ☘️ s_imp_between, s_imp_negref, balance_impostor_scores 호출 제거
-
         print(f"   Genuine (probe, 참고용): {len(s_genuine)} scores")
         print(f"   Impostor (unknown_dev): {len(s_impostor)} scores")
 
-        # ☘️ Phase 4-[8]: DET curve용 스코어 캐시 (마지막 캘리브레이션 시점 기준)
-        self._last_genuine_scores = s_genuine.copy() if len(s_genuine) > 0 else np.array([])   # ☘️ 추가
-        self._last_impostor_scores = s_impostor.copy() if len(s_impostor) > 0 else np.array([])  # ☘️ 추가
+        # DET curve용 스코어 캐시
+        self._last_genuine_scores = s_genuine.copy() if len(s_genuine) > 0 else np.array([])
+        self._last_impostor_scores = s_impostor.copy() if len(s_impostor) > 0 else np.array([])
 
-        # ☘️ τ = quantile(unknown_dev_scores, 1 - target_FPIR)
         if len(s_impostor) >= 10:
             result = self.threshold_calibrator.calibrate(
                 genuine_scores=s_genuine,
-                impostor_scores=s_impostor,  # ☘️ unknown dev scores
+                impostor_scores=s_impostor,
                 old_tau=None if not self._first_calibration_done else self.ncm.tau_s
             )
             self._first_calibration_done = True
@@ -817,8 +823,7 @@ class COCONUTTrainer:
             else:
                 self.ncm.tau_s = new_tau
 
-            # ☘️ FAR 모드 단독 출력 (EER 분기 제거)
-            print(f"☘️ FPIR Target Results:")
+            print(f"FPIR Target Results:")
             print(f"   Target FPIR: {self.openset_config.target_far*100:.1f}%")
             print(f"   Achieved FPIR: {result.get('current_far', 0)*100:.1f}%")
             print(f"   Threshold τ: {result['tau_smoothed']:.4f}")
@@ -844,14 +849,14 @@ class COCONUTTrainer:
 
         # 변수 초기화
         TAR = FRR = 0.0
-        MisID_rate = FNIR = 0.0  # ☘️ 추가
+        MisID_rate = FNIR = 0.0
         TRR_u = FAR_u = 0.0
         TRR_n = FAR_n = None
 
-        # 1. Known-Probe (TAR/FRR) ☘️ dev_data → probe_data
+        # 1. Known-Probe (TAR/FRR)
         all_dev_paths = []
         all_dev_labels = []
-        for uid, (paths, labels) in self.probe_data.items():  # ☘️ dev_data → probe_data
+        for uid, (paths, labels) in self.probe_data.items():
             all_dev_paths.extend(paths)
             all_dev_labels.extend([uid] * len(paths))
 
@@ -885,16 +890,15 @@ class COCONUTTrainer:
                     channels=channels
                 )
 
-            # ☘️ TAR/FRR/MisID/FNIR 계산 (Misidentification 분리 보고)
             n = max(1, len(preds))
             correct  = sum(1 for p, l in zip(preds, all_dev_labels) if p == l)
             rejected = sum(1 for p in preds if p == -1)
-            misid    = sum(1 for p, l in zip(preds, all_dev_labels) if p != l and p != -1)  # ☘️ 추가
+            misid    = sum(1 for p, l in zip(preds, all_dev_labels) if p != l and p != -1)
 
             TAR          = correct  / n
             FRR          = rejected / n
-            MisID_rate   = misid    / n        # ☘️ 추가: 오인식율
-            FNIR         = 1.0 - TAR           # ☘️ 추가: = FRR + MisID_rate
+            MisID_rate   = misid    / n
+            FNIR         = 1.0 - TAR
 
         # 2. Unknown FPIR_in — unknown_test_file 고정 파일 로드 (매 experience 동일한 pool)
         unknown_test_file = getattr(self.config.dataset, 'unknown_test_file', None)
@@ -912,11 +916,6 @@ class COCONUTTrainer:
             )
             unknown_filtered = [p for p, l in zip(unknown_paths, unknown_labels)
                                 if l not in self.registered_users]
-            # ☘️ 기존 코드 삭제됨:
-            # ☘️ unknown_filtered = []
-            # ☘️ for p, l in zip(unknown_paths, unknown_labels):
-            # ☘️     if l not in self.registered_users:
-            # ☘️         unknown_filtered.append(p)
 
         if len(unknown_filtered) > 1000:
             np.random.seed(eval_seed + 1000)
@@ -976,17 +975,13 @@ class COCONUTTrainer:
             FAR_n = 1 - TRR_n
 
         # 결과 출력
-        # ☘️ FNIR = FRR + MisID 분리 보고 (논문 표준 지표)
         print(f"   Known-Probe: Rank-1={TAR:.3f}, FNIR={FNIR:.3f} (FRR={FRR:.3f}, MisID={MisID_rate:.3f})")
-        # ☘️ print(f"   Known-Dev: TAR={TAR:.3f}, FRR={FRR:.3f}")  # 삭제 — 아래로 대체
         print(f"   Unknown: TRR={TRR_u:.3f}, FPIR_in={FAR_u:.3f}")
         if TRR_n is not None:
             print(f"   NegRef: TRR={TRR_n:.3f}, FPIR_xdom={FAR_n:.3f}")
         print(f"   Threshold: τ_s={self.ncm.tau_s:.4f}")
 
-        # ☘️ FAR 모드 단독 출력 (EER 분기 제거)
         print(f"   Mode: FPIR Target ({self.openset_config.target_far*100:.1f}%)")
-        # ☘️ if self.openset_config.threshold_mode == 'far': ... else: print("Mode: EER")  # 삭제
 
         print(f"   Score: Max")
 
@@ -994,11 +989,10 @@ class COCONUTTrainer:
             print(f"   [TARGET] TTA: {self.openset_config.tta_n_views} views, agree_k={self.openset_config.tta_agree_k}")
 
         return {
-            'Rank1': TAR, 'FNIR': FNIR,         # ☘️ 추가: FNIR = 1 - TAR
-            'FRR': FRR, 'MisID': MisID_rate,    # ☘️ 추가: FRR + MisID 분리
-            # ☘️ 'TAR': TAR, 'FRR': FRR,  # 삭제 — Rank1/FNIR/FRR/MisID로 대체
-            'TRR_unknown': TRR_u, 'FPIR_in': FAR_u,      # ☘️ FAR_unknown → FPIR_in
-            'TRR_negref': TRR_n, 'FPIR_xdom': FAR_n,     # ☘️ FAR_negref → FPIR_xdom
+            'Rank1': TAR, 'FNIR': FNIR,
+            'FRR': FRR, 'MisID': MisID_rate,
+            'TRR_unknown': TRR_u, 'FPIR_in': FAR_u,
+            'TRR_negref': TRR_n, 'FPIR_xdom': FAR_n,
             'mode': self.openset_config.threshold_mode,
             'score_type': 'max',
             'tta_enabled': use_tta,
@@ -1385,10 +1379,9 @@ class COCONUTTrainer:
 
         print(f"[OK] Checkpoint loaded from: {path} (experience={self.experience_count})")
 
-    # ☘️ Phase 4-[7]: Experience별 성능 변화 CSV 저장
     def save_eval_curve(self, path: str):
         """
-        ☘️ evaluation_history를 flat CSV로 저장 (논문 Figure용)
+        evaluation_history를 flat CSV로 저장 (논문 Figure용)
         컬럼: experience, num_users, tau_s, Rank1, FNIR, FRR, MisID, FPIR_in, FPIR_xdom
         """
         if not self.evaluation_history:
@@ -1427,7 +1420,7 @@ class COCONUTTrainer:
                 }
                 writer.writerow(row)
 
-        print(f"☘️ [Phase 4-7] eval_curve.csv saved: {path} ({len(self.evaluation_history)} rows)")
+        print(f"[eval_curve] saved: {path} ({len(self.evaluation_history)} rows)")
 
     def save_eval_curve_plot(self, path: str):
         """
@@ -1519,10 +1512,9 @@ class COCONUTTrainer:
         plt.close()
         print(f"[Plot] Performance vs Users saved: {path}")
 
-    # ☘️ Phase 4-[8]: FPIR–FNIR trade-off 곡선 (τ sweep) — DET curve 데이터 저장
     def save_det_curve(self, path: str, n_points: int = 200):
         """
-        ☘️ τ를 sweep하여 FNIR vs FPIR 곡선 데이터를 CSV로 저장 (논문 DET curve용)
+        τ를 sweep하여 FNIR vs FPIR 곡선 데이터를 CSV로 저장 (논문 DET curve용)
 
         FNIR(τ) = P(genuine_max_score < τ)  ← 거부율 (reject at threshold τ)
         FPIR(τ) = P(unknown_max_score >= τ) ← 오수락율
@@ -1557,9 +1549,8 @@ class COCONUTTrainer:
             writer.writeheader()
             writer.writerows(rows)
 
-        print(f"☘️ [Phase 4-8] det_curve.csv saved: {path} ({n_points} τ points)")
+        print(f"[det_curve] saved: {path} ({n_points} τ points)")
 
-        # ☘️ 특정 FPIR 기준점에서 FNIR 값 출력 (논문 Table용)
         print(f"   DET curve operating points:")
         for target_fpir in [0.001, 0.01, 0.05]:
             # target_fpir에 가장 가까운 τ 찾기

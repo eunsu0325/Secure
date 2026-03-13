@@ -105,6 +105,21 @@ def plot_det_curve(
     far_plot = far_percent[valid_mask]
     frr_plot = frr_percent[valid_mask]
 
+    # Skip if no valid points (perfect separation)
+    if len(far_plot) == 0:
+        ax.text(0.5, 0.5, 'Perfect Separation\n(No errors to plot)',
+                transform=ax.transAxes, ha='center', va='center', fontsize=14)
+        ax.set_xlim([0.01, 100])
+        ax.set_ylim([0.01, 100])
+        ax.set_xlabel('False Accept Rate (FAR) [%]', fontsize=12)
+        ax.set_ylabel('False Reject Rate (FRR) [%]', fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        if save_path:
+            fig = ax.get_figure()
+            fig.savefig(save_path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+        return ax
+
     # Plot DET curve
     ax.loglog(far_plot, frr_plot, 'b-', linewidth=2, label='DET Curve')
 
