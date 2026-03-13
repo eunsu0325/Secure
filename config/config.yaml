@@ -26,7 +26,7 @@ Model:
   use_pretrained: true
   pretrained_path: /content/drive/MyDrive/tongji.pth
   # Projection head settings
-  projection_dim: 512  # 🍑 6144D -> 512D projection
+  projection_dim: 1024  # 🍑 6144D -> 512D projection
   use_projection: true
   use_projection_for_ncm: false  # 🍑 NCM도 512D projection 사용할지 (false=6144D, true=512D)
 
@@ -62,7 +62,7 @@ Training:
   # ProxyAnchorLoss settings
   use_proxy_anchor: true
   proxy_margin: 0.1        # Proxy Anchor margin delta
-  proxy_alpha: 16          # Proxy Anchor scaling alpha
+  proxy_alpha: 8          # Proxy Anchor scaling alpha
   proxy_lr_ratio: 5        # Proxy learning rate multiplier (10x backbone)
   proxy_lambda: 0.7        # Fixed weight (0.3 = 30% ProxyAnchor, 70% SupCon)
 
