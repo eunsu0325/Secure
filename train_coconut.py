@@ -59,7 +59,8 @@ def plot_tsne_from_memory(trainer,
                           space='fe',
                           perplexity=30,
                           max_points=5000,
-                          seed=42):
+                          seed=42,
+                          verbose=False):
     """메모리 버퍼의 임베딩을 t-SNE로 시각화 (디버깅용)"""
     model = trainer.model
     model.eval()
@@ -67,13 +68,15 @@ def plot_tsne_from_memory(trainer,
 
     paths, labels = trainer.memory_buffer.get_all_data()
     if len(paths) == 0:
-        print("[t-SNE] Memory buffer is empty.")
+        if verbose:
+            print("[t-SNE] Memory buffer is empty.")
         return
 
     real_data = list(zip(paths, labels))
 
     if len(real_data) == 0:
-        print("[t-SNE] No real users in buffer.")
+        if verbose:
+            print("[t-SNE] No real users in buffer.")
         return
 
     from collections import defaultdict
@@ -90,7 +93,8 @@ def plot_tsne_from_memory(trainer,
     if len(sampled) > max_points:
         sampled = rng.sample(sampled, max_points)
 
-    print(f"[t-SNE] Processing {len(sampled)} samples from {len(by_cls)} classes")
+    if verbose:
+        print(f"[t-SNE] Processing {len(sampled)} samples from {len(by_cls)} classes")
 
     transform = trainer.test_transform
     ch = trainer.config.dataset.channels
@@ -122,7 +126,8 @@ def plot_tsne_from_memory(trainer,
 
     perplexity = min(perplexity, max(5, len(Y)//4))
 
-    print(f"[t-SNE] Running t-SNE with perplexity={perplexity}...")
+    if verbose:
+        print(f"[t-SNE] Running t-SNE with perplexity={perplexity}...")
     tsne = TSNE(
         n_components=2,
         perplexity=perplexity,
@@ -166,34 +171,118 @@ def plot_tsne_from_memory(trainer,
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
 
-    print(f"[t-SNE] Saved to {save_path}")
+    if verbose:
+        print(f"[t-SNE] Saved to {save_path}")
+
+
+def plot_fpir_drift_graphs(drift_log: list, results_dir: str, verbose: bool = False):
+    """
+    FPIR drift 핵심 그래프 3개 생성:
+      1) num_classes vs avg_tar@1%  — 클래스 증가에 따른 인식 성능 추이
+      2) num_classes vs fpir_in     — 클래스 증가에 따른 미등록자 오수락률 추이
+      3) num_classes vs tau         — 클래스 증가에 따른 임계값 추이
+
+    class 수 증가 → unknown score 증가 → threshold 증가 패턴 모니터링용
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("WARNING: matplotlib not available. Skipping FPIR drift plots.")
+        return
+
+    x = [d['num_classes'] for d in drift_log]
+    tar_vals = [d['avg_tar_001'] for d in drift_log]
+    fpir_vals = [d['fpir_in'] for d in drift_log]
+    tau_vals = [d['tau'] for d in drift_log]
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle('FPIR Drift Analysis (class count increase monitoring)',
+                 fontsize=14, fontweight='bold')
+
+    # 1) num_classes vs avg_tar@1%
+    ax = axes[0]
+    ax.plot(x, tar_vals, 'b-o', markersize=4, linewidth=1.5)
+    ax.set_xlabel('Number of Registered Classes', fontsize=11)
+    ax.set_ylabel('Avg TAR@1%FPIR', fontsize=11)
+    ax.set_title('TAR@1% vs Classes\n(1% 오인식 허용 시 수락률)', fontsize=11)
+    ax.set_ylim(0, 1.05)
+    ax.grid(True, alpha=0.3)
+    # 추세선
+    if len(x) >= 3:
+        z = np.polyfit(x, tar_vals, 1)
+        p = np.poly1d(z)
+        ax.plot(x, p(x), 'b--', alpha=0.4, linewidth=1,
+                label=f'Trend: {z[0]:+.4f}/class')
+        ax.legend(fontsize=9)
+
+    # 2) num_classes vs fpir_in
+    ax = axes[1]
+    ax.plot(x, fpir_vals, 'r-s', markersize=4, linewidth=1.5)
+    ax.set_xlabel('Number of Registered Classes', fontsize=11)
+    ax.set_ylabel('FPIR_in', fontsize=11)
+    ax.set_title('FPIR_in vs Classes\n(미등록자 오수락률)', fontsize=11)
+    ax.set_ylim(0, max(0.1, max(fpir_vals) * 1.2) if fpir_vals else 0.1)
+    ax.grid(True, alpha=0.3)
+    if len(x) >= 3:
+        z = np.polyfit(x, fpir_vals, 1)
+        p = np.poly1d(z)
+        ax.plot(x, p(x), 'r--', alpha=0.4, linewidth=1,
+                label=f'Trend: {z[0]:+.6f}/class')
+        ax.legend(fontsize=9)
+
+    # 3) num_classes vs tau
+    ax = axes[2]
+    ax.plot(x, tau_vals, 'k-^', markersize=4, linewidth=1.5)
+    ax.set_xlabel('Number of Registered Classes', fontsize=11)
+    ax.set_ylabel('Threshold (tau)', fontsize=11)
+    ax.set_title('Tau vs Classes\n(임계값 변화 추이)', fontsize=11)
+    ax.grid(True, alpha=0.3)
+    if len(x) >= 3:
+        z = np.polyfit(x, tau_vals, 1)
+        p = np.poly1d(z)
+        ax.plot(x, p(x), 'k--', alpha=0.4, linewidth=1,
+                label=f'Trend: {z[0]:+.6f}/class')
+        ax.legend(fontsize=9)
+
+    plt.tight_layout()
+    save_path = os.path.join(results_dir, "fpir_drift_analysis.png")
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    if verbose:
+        print(f"[Plot] FPIR drift analysis saved: {save_path}")
+    else:
+        print(f"  [Drift] FPIR drift graph saved: {save_path}")
 
 
 def main(args):
     """메인 실행 함수"""
 
-    print("\n" + "="*60)
-    print("[COCONUT] COCONUT Training Starting")
-    print("   CCNet + ProxyAnchor + SupCon")
-    print("="*60 + "\n")
-
     # 1. Configuration 로드 (seed 설정 전에)
     config = ConfigParser(args.config)
     config_obj = config.get_config()
-    print(f"Using config: {args.config}")
-    print(config)
+    verbose = getattr(config_obj.training, 'verbose', False)
+
+    if verbose:
+        print("\n" + "="*60)
+        print("[COCONUT] COCONUT Training Starting")
+        print("   CCNet + ProxyAnchor + SupCon")
+        print("="*60 + "\n")
+        print(f"Using config: {args.config}")
+        print(config)
 
     # 2. Seed 결정: config에 있으면 사용, 없으면 args.seed 사용
-    # args.seed가 기본값(42)이 아니면 override
-    if args.seed != 42:  # Command line에서 명시적으로 설정한 경우
+    if args.seed != 42:
         seed = args.seed
-        print(f"Using seed from command line: {seed}")
     elif hasattr(config_obj.training, 'seed'):
         seed = config_obj.training.seed
-        print(f"Using seed from config: {seed}")
     else:
-        seed = args.seed  # 기본값 42 사용
-        print(f"Using default seed: {seed}")
+        seed = args.seed
+
+    if verbose:
+        print(f"Using seed: {seed}")
 
     # 3. Set environment variables for complete reproducibility
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -211,39 +300,36 @@ def main(args):
     if hasattr(torch, 'use_deterministic_algorithms'):
         torch.use_deterministic_algorithms(True)
 
-    print(f"🔒 Reproducibility enabled with seed={seed}")
+    if verbose:
+        print(f"Reproducibility enabled with seed={seed}")
 
     # 6. Config에 최종 seed 저장 (COCONUTTrainer가 사용)
     config_obj.training.seed = seed
 
     # 오픈셋 모드 확인
     openset_enabled = hasattr(config_obj, 'openset') and config_obj.openset.enabled
-    if openset_enabled:
-        print("\n========== OPEN-SET MODE ENABLED ==========")
-        print(f"   Warmup users: {config_obj.openset.warmup_users}")
-        print(f"   Initial tau: {config_obj.openset.initial_tau}")
 
-        # TTA 설정 (시작 시 한 번만 자세히 출력)
-        if config_obj.openset.tta_n_views > 1:
-            print(f"   TTA Configuration:")
-            print(f"      Views: {config_obj.openset.tta_n_views} (+original: {config_obj.openset.tta_include_original})")
-            print(f"      Type-specific repeats: G={config_obj.openset.tta_n_repeats_genuine}, "
-                  f"B={config_obj.openset.tta_n_repeats_between}")
-            print(f"      Aggregation: {config_obj.openset.tta_aggregation} (repeat: {config_obj.openset.tta_repeat_aggregation})")
+    if verbose:
+        if openset_enabled:
+            print("\n========== OPEN-SET MODE ENABLED ==========")
+            print(f"   Warmup users: {config_obj.openset.warmup_users}")
+            print(f"   Initial tau: {config_obj.openset.initial_tau}")
+            if config_obj.openset.tta_n_views > 1:
+                print(f"   TTA Configuration:")
+                print(f"      Views: {config_obj.openset.tta_n_views} (+original: {config_obj.openset.tta_include_original})")
+                print(f"      Type-specific repeats: G={config_obj.openset.tta_n_repeats_genuine}, "
+                      f"B={config_obj.openset.tta_n_repeats_between}")
+                print(f"      Aggregation: {config_obj.openset.tta_aggregation} (repeat: {config_obj.openset.tta_repeat_aggregation})")
+            print(f"   Threshold mode: FAR Target ({config_obj.openset.target_far*100:.1f}%)")
+            print("=========================================\n")
 
-        # Threshold 모드 표시
-        print(f"   Threshold mode: FAR Target ({config_obj.openset.target_far*100:.1f}%)")
-
-        print("=========================================\n")
-
-    # ProxyAnchorLoss 설정 확인
-    if hasattr(config_obj.training, 'use_proxy_anchor') and config_obj.training.use_proxy_anchor:
-        print("\n========== PROXY ANCHOR LOSS ENABLED ==========")
-        print(f"   Margin (δ): {config_obj.training.proxy_margin}")
-        print(f"   Alpha (α): {config_obj.training.proxy_alpha}")
-        print(f"   LR Ratio: {config_obj.training.proxy_lr_ratio}x")
-        print(f"   Lambda (fixed): {config_obj.training.proxy_lambda}")
-        print("===============================================\n")
+        if hasattr(config_obj.training, 'use_proxy_anchor') and config_obj.training.use_proxy_anchor:
+            print("\n========== PROXY ANCHOR LOSS ENABLED ==========")
+            print(f"   Margin (delta): {config_obj.training.proxy_margin}")
+            print(f"   Alpha: {config_obj.training.proxy_alpha}")
+            print(f"   LR Ratio: {config_obj.training.proxy_lr_ratio}x")
+            print(f"   Lambda (fixed): {config_obj.training.proxy_lambda}")
+            print("===============================================\n")
 
     # GPU 설정
     device = torch.device(
@@ -251,27 +337,30 @@ def main(args):
         if torch.cuda.is_available() and not args.no_cuda
         else "cpu"
     )
-    print(f'Device: {device}')
 
     # 2. 결과 저장 디렉토리 생성
     results_dir = os.path.join(config_obj.training.results_path, 'coconut_results')
     os.makedirs(results_dir, exist_ok=True)
 
     # 3. 데이터 스트림 초기화
-    print("\n=== Initializing Data Stream ===")
+    if verbose:
+        print("\n=== Initializing Data Stream ===")
+
     data_stream = ExperienceStream(
-        train_file=str(config_obj.dataset.enroll_file),        # 등록 대상 사용자 파일
-        negative_file=str(config_obj.dataset.xdomain_file),   # 크로스도메인 파일 (평가 전용)
+        train_file=str(config_obj.dataset.enroll_file),
+        negative_file=str(config_obj.dataset.xdomain_file),
         num_negative_classes=config_obj.dataset.num_xdomain_classes
     )
 
     stats = data_stream.get_statistics()
-    print(f"Total users: {stats['num_users']}")
-    print(f"Samples per user: {stats['samples_per_user']}")
-    print(f"Negative samples: {stats['negative_samples']}")
+    if verbose:
+        print(f"Total users: {stats['num_users']}")
+        print(f"Samples per user: {stats['samples_per_user']}")
+        print(f"Negative samples: {stats['negative_samples']}")
 
     # 4. 모델 및 컴포넌트 초기화
-    print("\n=== Initializing Model and Components ===")
+    if verbose:
+        print("\n=== Initializing Model and Components ===")
 
     # CCNet 모델
     model = ccnet(
@@ -280,34 +369,31 @@ def main(args):
         projection_dim=config_obj.model.projection_dim
     )
 
-    # 프로젝션 헤드 설정 출력
-    if config_obj.model.use_projection:
-        print(f"Projection Head Configuration:")
-        print(f"   Enabled: True")
-        print(f"   Dimension: 6144 -> 2048 -> {config_obj.model.projection_dim}")
-        print(f"   Structure: 2 layers with LayerNorm")
-        print(f"   Training: Uses projection ({config_obj.model.projection_dim}D)")
-        print(f"   NCM/Eval: Uses original features (6144D)")
-    else:
-        print(f"Projection Head: Disabled (using raw 6144D features)")
+    if verbose:
+        if config_obj.model.use_projection:
+            print(f"Projection Head Configuration:")
+            print(f"   Enabled: True")
+            print(f"   Dimension: 6144 -> 2048 -> {config_obj.model.projection_dim}")
+            print(f"   Structure: 2 layers with LayerNorm")
+            print(f"   Training: Uses projection ({config_obj.model.projection_dim}D)")
+            print(f"   NCM/Eval: Uses original features (6144D)")
+        else:
+            print(f"Projection Head: Disabled (using raw 6144D features)")
 
-    # 사전훈련 가중치는 COCONUTTrainer에서 로드함
-    # (중복 로딩 방지)
     model = model.to(device)
 
-    # COCONUT 컴포넌트 사용
     # NCM Classifier
     ncm_classifier = NCMClassifier(normalize=True).to(device)
 
     # Memory Buffer (Herding or Random)
     if hasattr(config_obj.training, 'use_herding') and config_obj.training.use_herding:
-        print("\n========== HERDING BUFFER ENABLED ==========")
-        print(f"   Max samples per class: {config_obj.training.max_samples_per_class}")
-        print(f"   Drift threshold: {config_obj.training.drift_threshold}")
-        print("   Using iCaRL-inspired representative sampling")
-        print("===============================================\n")
+        if verbose:
+            print("\n========== HERDING BUFFER ENABLED ==========")
+            print(f"   Max samples per class: {config_obj.training.max_samples_per_class}")
+            print(f"   Drift threshold: {config_obj.training.drift_threshold}")
+            print("   Using iCaRL-inspired representative sampling")
+            print("===============================================\n")
 
-        # Transform for feature extraction
         transform = get_scr_transforms(
             train=False,
             imside=config_obj.dataset.height,
@@ -324,10 +410,10 @@ def main(args):
             use_projection=config_obj.model.use_projection,
             channels=config_obj.dataset.channels
         )
-        # drift_threshold 설정
         memory_buffer.drift_threshold = config_obj.training.drift_threshold
     else:
-        print("Using standard Class-Balanced Buffer with random sampling")
+        if verbose:
+            print("Using standard Class-Balanced Buffer with random sampling")
         memory_buffer = ClassBalancedBuffer(
             max_size=config_obj.training.memory_size,
             min_samples_per_class=config_obj.training.min_samples_per_class
@@ -342,13 +428,14 @@ def main(args):
         device=device
     )
 
-    print("\nNCM starts empty (no NegRef in training)")
-    print(f"Initial buffer size: {len(memory_buffer)}")
+    if verbose:
+        print("\nNCM starts empty (no NegRef in training)")
+        print(f"Initial buffer size: {len(memory_buffer)}")
 
-    # 6. 평가자 초기화 (새로운 per-user 평가 시스템)
+    # 6. 평가자 초기화
     evaluator = ContinualLearningEvaluator(
         config=config_obj,
-        test_file=str(config_obj.dataset.eval_probe_file)  # BWT/forgetting 측정용 독립 probe
+        test_file=str(config_obj.dataset.eval_probe_file)
     )
 
     # 7. 학습 결과 저장용
@@ -367,14 +454,58 @@ def main(args):
         'trainer_type': 'COCONUTTrainer'
     }
 
-    # 8. Continual Learning 시작
-    print("\n=== Starting Continual Learning ===")
-    print(f"Total experiences: {config_obj.training.num_experiences}")
-    print(f"Evaluation interval: every {config_obj.training.test_interval} users")
-    print(f"Learning rate: {config_obj.training.learning_rate}")
-    print(f"Memory batch size: {config_obj.training.memory_batch_size}")
-    print(f"Temperature: {config_obj.training.temperature}")
-    print(f"Random seed: {config_obj.training.seed}")
+    # FPIR drift 기록용
+    fpir_drift_log = []
+
+    # --- Compact 초기화 출력 (verbose=false) ---
+    if not verbose:
+        # Pretrained info
+        pretrained_info = ""
+        if config_obj.model.use_pretrained and hasattr(model, '_pretrained_load_info'):
+            info = model._pretrained_load_info
+            pretrained_info = f"Pretrained: {os.path.basename(info['path'])} ({info['loaded']}/{info['total']} layers)"
+        elif config_obj.model.use_pretrained:
+            pretrained_info = f"Pretrained: {os.path.basename(str(config_obj.model.pretrained_path))}"
+        else:
+            pretrained_info = "Pretrained: OFF"
+
+        # Projection info
+        if config_obj.model.use_projection:
+            proj_info = f"Projection: {config_obj.model.projection_dim}D"
+        else:
+            proj_info = f"Projection: OFF (6144D)"
+
+        # ProxyAnchor info
+        pa_info = ""
+        if hasattr(config_obj.training, 'use_proxy_anchor') and config_obj.training.use_proxy_anchor:
+            pa_info = (f"ProxyAnchor: delta={config_obj.training.proxy_margin}, "
+                      f"alpha={config_obj.training.proxy_alpha}, "
+                      f"lambda={config_obj.training.proxy_lambda}")
+        else:
+            pa_info = "ProxyAnchor: OFF"
+
+        # Open-set info
+        os_info = ""
+        if openset_enabled:
+            os_info = f"Open-set: FAR Target {config_obj.openset.target_far*100:.1f}% | tau_init={config_obj.openset.initial_tau}"
+        else:
+            os_info = "Open-set: OFF"
+
+        print(f"\n[COCONUT] CCNet + ProxyAnchor + SupCon | {device} | Seed={seed}")
+        print(f"  {pretrained_info} | {proj_info}")
+        print(f"  {pa_info} | LR={config_obj.training.learning_rate}")
+        print(f"  {os_info}")
+        print(f"  Data: {stats['num_users']} users, Memory: {config_obj.training.memory_size}, "
+              f"Epochs/exp: {config_obj.training.num_epochs}")
+
+    if verbose:
+        print("\n=== Starting Continual Learning ===")
+        print(f"Total experiences: {config_obj.training.num_experiences}")
+        print(f"Evaluation interval: every {config_obj.training.test_interval} users")
+        print(f"Learning rate: {config_obj.training.learning_rate}")
+        print(f"Memory batch size: {config_obj.training.memory_batch_size}")
+        print(f"Temperature: {config_obj.training.temperature}")
+        print(f"Random seed: {config_obj.training.seed}")
 
     start_time = time.time()
 
@@ -391,7 +522,8 @@ def main(args):
         # 평가 주기 확인
         if (exp_id + 1) % config_obj.training.test_interval == 0 or exp_id == config_obj.training.num_experiences - 1:
 
-            print(f"\n=== Evaluation at Experience {exp_id + 1} ===")
+            if verbose:
+                print(f"\n=== Evaluation at Experience {exp_id + 1} ===")
 
             # t-SNE 시각화 (디버깅용)
             if (exp_id + 1) % 10 == 0 or exp_id == config_obj.training.num_experiences - 1:
@@ -406,7 +538,8 @@ def main(args):
                     space='fe',
                     perplexity=30,
                     max_points=5000,
-                    seed=seed
+                    seed=seed,
+                    verbose=verbose
                 )
 
                 if config_obj.model.use_projection:
@@ -418,10 +551,11 @@ def main(args):
                         space='z',
                         perplexity=30,
                         max_points=5000,
-                        seed=seed
+                        seed=seed,
+                        verbose=verbose
                     )
 
-            # 모든 사용자 개별 평가 (새로운 방식)
+            # 모든 사용자 개별 평가
             curves_dir = os.path.join(results_dir, "evaluation_curves", f"exp_{exp_id+1:03d}")
             report = evaluator.evaluate_all_users(
                 trainer=trainer,
@@ -435,10 +569,28 @@ def main(args):
             forgetting = evaluator.get_forgetting_measure('tar_001')
             bwt = evaluator.get_bwt('tar_001')
 
-            # BWT를 trainer.evaluation_history의 마지막 항목에 병합 (eval_curve.csv에 포함되도록)
+            # BWT를 trainer.evaluation_history의 마지막 항목에 병합
             if hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
                 trainer.evaluation_history[-1]['bwt'] = bwt
                 trainer.evaluation_history[-1]['mean_forgetting'] = forgetting
+
+            # FPIR drift 기록
+            tau_val = getattr(trainer.ncm, 'tau_s', None)
+            fpir_in = None
+            if hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
+                last_eval = trainer.evaluation_history[-1]
+                metrics = last_eval.get('metrics', {})
+                fpir_in = metrics.get('FPIR_in', None)
+
+            fpir_drift_log.append({
+                'experience': exp_id + 1,
+                'num_classes': exp_id + 1,
+                'avg_tar_001': avg_performance,
+                'fpir_in': fpir_in if fpir_in is not None else 0.0,
+                'tau': tau_val if tau_val is not None else 0.0,
+                'forgetting': report['overall']['mean_forgetting'],
+                'bwt': bwt
+            })
 
             # 기록 저장
             accuracy_record = {
@@ -456,20 +608,28 @@ def main(args):
             training_history['forgetting_reports'] = training_history.get('forgetting_reports', [])
             training_history['forgetting_reports'].append(report)
 
-            print(f"\n📊 Summary:")
-            print(f"Average TAR@1%FPIR: {avg_performance:.3f}")
-            print(f"Mean Forgetting (TAR@1%FPIR): {report['overall']['mean_forgetting']:.4f}")
-            print(f"Std Forgetting: {report['overall']['std_forgetting']:.4f}")
-            print(f"BWT: {bwt:.4f}  (< 0 = 망각, 0 = 유지, > 0 = 전이)")
-            print(f"Memory Buffer Size: {len(memory_buffer)}")
+            if verbose:
+                print(f"\nSummary:")
+                print(f"Average TAR@1%FPIR (true accept rate at 1% FAR): {avg_performance:.3f}")
+                print(f"Mean Forgetting (TAR@1%FPIR): {report['overall']['mean_forgetting']:.4f}")
+                print(f"Std Forgetting: {report['overall']['std_forgetting']:.4f}")
+                print(f"BWT: {bwt:.4f}  (< 0 = forgetting, 0 = stable, > 0 = transfer)")
+                print(f"Memory Buffer Size: {len(memory_buffer)}")
 
-            # Herding Buffer의 경우 drift 통계 출력
+            # Compact 평가 출력 (한국어 설명 포함)
+            if not verbose:
+                print(f"  TAR@1%={avg_performance:.3f} (1% 오인식 허용 시 정상 사용자 수락률) | "
+                      f"Forget={report['overall']['mean_forgetting']:.4f} (이전 사용자 성능 저하 평균) | "
+                      f"BWT={bwt:.4f} (역방향 전이, 음수=망각) | "
+                      f"Buf={len(memory_buffer)}")
+
+            # Herding Buffer drift 통계
             if isinstance(memory_buffer, HerdingBuffer):
                 drift_stats = memory_buffer.get_drift_statistics()
-                if drift_stats:
+                if drift_stats and verbose:
                     avg_drift = sum(drift_stats.values()) / len(drift_stats)
                     max_drift_class = max(drift_stats.items(), key=lambda x: x[1])
-                    print(f"\n📈 Feature Drift Analysis:")
+                    print(f"\nFeature Drift Analysis:")
                     print(f"   Average drift: {avg_drift:.4f}")
                     print(f"   Max drift: Class {max_drift_class[0]} ({max_drift_class[1]:.4f})")
                     print(f"   Classes monitored: {len(drift_stats)}")
@@ -493,41 +653,67 @@ def main(args):
         if (exp_id + 1) % 10 == 0:
             elapsed = time.time() - start_time
             eta = elapsed / (exp_id + 1) * (config_obj.training.num_experiences - exp_id - 1)
-            print(f"Progress: {exp_id + 1}/{config_obj.training.num_experiences} "
+            print(f"[Progress] {exp_id + 1}/{config_obj.training.num_experiences} "
                   f"({100 * (exp_id + 1) / config_obj.training.num_experiences:.1f}%) "
                   f"| Elapsed: {elapsed/60:.1f}m | ETA: {eta/60:.1f}m")
 
     # 9. 최종 결과 저장
-    print("\n=== Saving Final Results ===")
+    if verbose:
+        print("\n=== Saving Final Results ===")
 
     # 학습 기록 저장
     history_path = os.path.join(results_dir, 'training_history.json')
     with open(history_path, 'w') as f:
         json.dump(training_history, f, indent=4)
 
+    # FPIR drift 로그 저장 (JSON + CSV)
+    if fpir_drift_log:
+        drift_json_path = os.path.join(results_dir, 'fpir_drift_log.json')
+        with open(drift_json_path, 'w') as f:
+            json.dump(fpir_drift_log, f, indent=2)
+
+        import csv as csv_mod
+        drift_csv_path = os.path.join(results_dir, 'fpir_drift_log.csv')
+        with open(drift_csv_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv_mod.DictWriter(f, fieldnames=['experience', 'num_classes', 'avg_tar_001', 'fpir_in', 'tau', 'forgetting', 'bwt'])
+            writer.writeheader()
+            for row in fpir_drift_log:
+                writer.writerow({k: f"{v:.6f}" if isinstance(v, float) else v for k, v in row.items()})
+
     # t-SNE 시각화 경로 추가
     tsne_images = []
     tsne_dir = os.path.join(results_dir, "tsne")
     if os.path.exists(tsne_dir):
         tsne_images = sorted([f for f in os.listdir(tsne_dir) if f.endswith('.png')])
-        if tsne_images:
+        if tsne_images and verbose:
             print(f"\nt-SNE visualizations saved: {len(tsne_images)} images")
             print(f"   Location: {tsne_dir}")
 
     # 최종 통계
+    total_time = (time.time() - start_time) / 60
     final_result = training_history['accuracies'][-1] if training_history['accuracies'] else {}
     final_tar_001 = final_result.get('average_tar_001', 0)
     final_forget = final_result.get('mean_forgetting', 0)
     final_forget_std = final_result.get('std_forgetting', 0)
     final_bwt = final_result.get('bwt', 0)
 
-    print(f"\n=== Final Results ===")
-    print(f"Final Average TAR@1%FPIR: {final_tar_001:.3f}")
-    print(f"Final Mean Forgetting (TAR@1%FPIR): {final_forget:.4f} (±{final_forget_std:.4f})")
-    print(f"Final BWT: {final_bwt:.4f}")
-    print(f"Evaluated Users: {final_result.get('evaluated_users', 0)}")
+    if verbose:
+        print(f"\n=== Final Results ===")
+        print(f"Final Average TAR@1%FPIR: {final_tar_001:.3f}")
+        print(f"Final Mean Forgetting (TAR@1%FPIR): {final_forget:.4f} (+/-{final_forget_std:.4f})")
+        print(f"Final BWT: {final_bwt:.4f}")
+        print(f"Evaluated Users: {final_result.get('evaluated_users', 0)}")
+        print(f"\nTotal Training Time: {total_time:.1f} minutes")
 
-    print(f"\nTotal Training Time: {(time.time() - start_time)/60:.1f} minutes")
+    # --- Compact 최종 결과 (한국어 설명) ---
+    if not verbose:
+        print(f"\n{'='*50}")
+        print(f"[COCONUT] Training Complete! ({total_time:.1f} minutes)")
+        print(f"  Final TAR@1% (1% 오인식 허용 시 정상 사용자 수락률): {final_tar_001:.3f}")
+        print(f"  Final Forgetting (이전 사용자 성능 저하 평균): {final_forget:.4f} (+/-{final_forget_std:.4f})")
+        print(f"  Final BWT (역방향 전이, 음수일수록 망각 심함): {final_bwt:.4f}")
+        print(f"  Evaluated Users (평가된 사용자 수): {final_result.get('evaluated_users', 0)}")
+        print(f"{'='*50}")
 
     # Export performance matrix to CSV
     performance_csv_path = os.path.join(results_dir, "performance_matrix.csv")
@@ -541,7 +727,6 @@ def main(args):
         eval_curve_path = os.path.join(results_dir, "eval_curve.csv")
         trainer.save_eval_curve(eval_curve_path)
 
-        # Performance vs Users 그래프 PNG
         if hasattr(trainer, 'save_eval_curve_plot'):
             eval_plot_path = os.path.join(results_dir, "performance_vs_users.png")
             trainer.save_eval_curve_plot(eval_plot_path)
@@ -550,19 +735,15 @@ def main(args):
         det_curve_path = os.path.join(results_dir, "det_curve.csv")
         trainer.save_det_curve(det_curve_path)
 
-        # DET curve PNG — visualization.py의 plot_det_curve 사용
+        # DET curve PNG
         try:
             import pandas as pd
-            import matplotlib
-            matplotlib.use('Agg')
-            import matplotlib.pyplot as plt
             det_df = pd.read_csv(det_curve_path)
             fpir_arr = det_df['FPIR'].values.astype(float)
             fnir_arr = det_df['FNIR'].values.astype(float)
 
             fig, ax = plt.subplots(figsize=(8, 8))
             ax.plot(fpir_arr * 100, fnir_arr * 100, 'b-', linewidth=2)
-            # 운영 기준점 표시
             for fp_target in [0.1, 1.0, 5.0]:
                 idx = int(np.argmin(np.abs(fpir_arr * 100 - fp_target)))
                 ax.plot(fpir_arr[idx] * 100, fnir_arr[idx] * 100,
@@ -572,15 +753,20 @@ def main(args):
             ax.set_yscale('log')
             ax.set_xlabel('FPIR (%)', fontsize=12)
             ax.set_ylabel('FNIR (%)', fontsize=12)
-            ax.set_title('DET Curve (FPIR–FNIR Trade-off)', fontsize=14, fontweight='bold')
+            ax.set_title('DET Curve (FPIR-FNIR Trade-off)', fontsize=14, fontweight='bold')
             ax.legend(fontsize=9)
             ax.grid(True, which='both', alpha=0.3)
             det_plot_path = os.path.join(results_dir, "det_curve.png")
             plt.savefig(det_plot_path, dpi=150, bbox_inches='tight')
             plt.close()
-            print(f"[Plot] DET curve saved: {det_plot_path}")
+            if verbose:
+                print(f"[Plot] DET curve saved: {det_plot_path}")
         except Exception as e:
             print(f"WARNING: Could not generate DET curve plot: {e}")
+
+    # --- FPIR Drift 그래프 3개 생성 ---
+    if fpir_drift_log and len(fpir_drift_log) >= 2:
+        plot_fpir_drift_graphs(fpir_drift_log, results_dir, verbose=verbose)
 
     # 결과 요약 저장
     summary = {
@@ -592,7 +778,7 @@ def main(args):
         'final_std_forgetting': final_forget_std,
         'final_bwt': final_bwt,
         'evaluated_users': final_result.get('evaluated_users', 0),
-        'total_time_minutes': (time.time() - start_time) / 60,
+        'total_time_minutes': total_time,
         'negative_removal_history': training_history['negative_removal_history'],
         'openset_enabled': openset_enabled,
         'seed': config_obj.training.seed,
@@ -618,11 +804,11 @@ def main(args):
     with open(summary_path, 'w') as f:
         json.dump(summary, f, indent=4)
 
-    print(f"\nResults saved to: {results_dir}")
-
-    print("\n" + "="*60)
-    print("[COCONUT] COCONUT Training Complete!")
-    print("="*60 + "\n")
+    if verbose:
+        print(f"\nResults saved to: {results_dir}")
+        print("\n" + "="*60)
+        print("[COCONUT] COCONUT Training Complete!")
+        print("="*60 + "\n")
 
 
 if __name__ == "__main__":

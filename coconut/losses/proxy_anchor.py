@@ -27,7 +27,7 @@ class ProxyAnchorLoss(nn.Module):
         self.num_classes = 0
 
     @torch.no_grad()
-    def add_classes(self, class_ids, feature_means: dict = None):
+    def add_classes(self, class_ids, feature_means: dict = None, verbose: bool = True):
         """새 클래스 프록시 추가. feature_means 제공 시 피처 평균으로 초기화."""
         new_ids = [c for c in class_ids if c not in self.class_to_idx]
         if not new_ids:
@@ -62,7 +62,8 @@ class ProxyAnchorLoss(nn.Module):
             self.class_to_idx[cid] = self.num_classes + i
         self.num_classes += n_new
 
-        print(f"ProxyAnchor: Added {n_new} proxies, Total: {self.num_classes}")
+        if verbose:
+            print(f"ProxyAnchor: Added {n_new} proxies, Total: {self.num_classes}")
 
     def forward(self, X, T):
         """

@@ -46,6 +46,9 @@ class ContinualLearningEvaluator:
         # Test dataset
         self.test_dataset = self._load_test_dataset()
 
+        # verbose 설정
+        self.verbose = getattr(config.training, 'verbose', False)
+
         # Test step counter
         self.test_step = 0
 
@@ -71,7 +74,8 @@ class ContinualLearningEvaluator:
             dual_views=False
         )
 
-        print(f"[Evaluator] Loaded test dataset with {len(dataset)} samples")
+        if self.verbose:
+            print(f"[Evaluator] Loaded test dataset with {len(dataset)} samples")
         return dataset
 
     def prepare_user_test_data(self, user_id: int):
@@ -101,7 +105,8 @@ class ContinualLearningEvaluator:
             'num_samples': len(user_indices)
         }
 
-        print(f"[Evaluator] Prepared {len(user_indices)} test samples for user {user_id}")
+        if self.verbose:
+            print(f"[Evaluator] Prepared {len(user_indices)} test samples for user {user_id}")
 
     def register_user(self, user_id: int):
         """Register a new user for tracking."""
@@ -250,16 +255,18 @@ class ContinualLearningEvaluator:
             Dictionary with evaluation results
         """
         self.test_step += 1
-        print(f"\n{'='*60}")
-        print(f" Evaluating All {len(self.registered_users)} Users (Step {self.test_step})")
-        print(f"{'='*60}")
+        if self.verbose:
+            print(f"\n{'='*60}")
+            print(f" Evaluating All {len(self.registered_users)} Users (Step {self.test_step})")
+            print(f"{'='*60}")
 
         unknown_impostor_scores = self._compute_unknown_impostor_scores(trainer)
-        if unknown_impostor_scores is not None:
-            print(f"   [Evaluator] Unknown impostor scores: {len(unknown_impostor_scores)} samples "
-                  f"(mean={unknown_impostor_scores.mean():.3f})")
-        else:
-            print("   [Evaluator] WARNING: unknown_test_file not set → between-class fallback")
+        if self.verbose:
+            if unknown_impostor_scores is not None:
+                print(f"   [Evaluator] Unknown impostor scores: {len(unknown_impostor_scores)} samples "
+                      f"(mean={unknown_impostor_scores.mean():.3f})")
+            else:
+                print("   [Evaluator] WARNING: unknown_test_file not set → between-class fallback")
 
         # Collect all scores for aggregate curves
         all_genuine_scores = []
@@ -267,7 +274,8 @@ class ContinualLearningEvaluator:
 
         # Evaluate each user
         for user_id in sorted(self.registered_users):
-            print(f"\nEvaluating User {user_id}...", end=' ')
+            if self.verbose:
+                print(f"\nEvaluating User {user_id}...", end=' ')
 
             metrics = self.evaluate_single_user(trainer, user_id, use_tta,
                                                 unknown_impostor_scores=unknown_impostor_scores)
@@ -289,10 +297,11 @@ class ContinualLearningEvaluator:
                 experience_id=experience_id
             )
 
-            print(f"1-EER: {metrics.get('1-eer', 0):.3f}, "
-                  f"TAR@1%: {metrics.get('tar_001', 0):.3f}, "
-                  f"TAR@5%: {metrics.get('tar_005', 0):.3f}, "
-                  f"TAR@10%: {metrics.get('tar_010', 0):.3f}")
+            if self.verbose:
+                print(f"1-EER: {metrics.get('1-eer', 0):.3f}, "
+                      f"TAR@1%: {metrics.get('tar_001', 0):.3f}, "
+                      f"TAR@5%: {metrics.get('tar_005', 0):.3f}, "
+                      f"TAR@10%: {metrics.get('tar_010', 0):.3f}")
 
         # Generate report
         report = self.forgetting_tracker.get_report(self.test_step, experience_id)
@@ -302,7 +311,8 @@ class ContinualLearningEvaluator:
             if curves_dir is None:
                 curves_dir = f"evaluation_curves/exp_{experience_id}"
 
-            print(f"\n📊 Generating evaluation curves...")
+            if self.verbose:
+                print(f"\n📊 Generating evaluation curves...")
 
             # Calculate overall EER and threshold
             genuine_np = np.array(all_genuine_scores)
@@ -315,8 +325,9 @@ class ContinualLearningEvaluator:
                 output_dir=curves_dir,
                 experience_id=experience_id,
                 eer_value=overall_metrics['eer'],
-                threshold=None,  # Will be calculated if needed
-                n_points=1000
+                threshold=None,
+                n_points=1000,
+                verbose=self.verbose
             )
 
             # Add saved file paths to report
@@ -326,7 +337,7 @@ class ContinualLearningEvaluator:
             report['aggregate_metrics'] = overall_metrics
 
         # Print summary
-        self.forgetting_tracker.print_summary(self.test_step)
+        self.forgetting_tracker.print_summary(self.test_step, verbose=self.verbose)
 
         # Store in history
         self.evaluation_history.append(report)
@@ -369,7 +380,8 @@ class ContinualLearningEvaluator:
         with open(history_path, 'w') as f:
             json.dump(self.evaluation_history, f, indent=2, default=str)
 
-        print(f"[Evaluator] Results saved to {save_dir}")
+        if self.verbose:
+            print(f"[Evaluator] Results saved to {save_dir}")
 
     def create_performance_matrix_csv(self, save_path: str):
         """Export performance matrix to CSV for analysis."""
@@ -399,7 +411,8 @@ class ContinualLearningEvaluator:
 
                 writer.writerow(row)
 
-        print(f"[Evaluator] Performance matrix exported to {save_path}")
+        if self.verbose:
+            print(f"[Evaluator] Performance matrix exported to {save_path}")
 
     def plot_forgetting_curves(self, save_path: str, top_k: int = 10):
         """Plot forgetting curves for top-k users with highest forgetting."""
@@ -442,7 +455,8 @@ class ContinualLearningEvaluator:
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             plt.close()
 
-            print(f"[Evaluator] Forgetting curves saved to {save_path}")
+            if self.verbose:
+                print(f"[Evaluator] Forgetting curves saved to {save_path}")
 
         except ImportError:
             print("[Warning] matplotlib not available, skipping plot")

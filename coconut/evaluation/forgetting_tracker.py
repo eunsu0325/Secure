@@ -289,8 +289,11 @@ class ForgettingTracker:
         self.total_users = data['total_users']
         self.total_evaluations = data['total_evaluations']
 
-    def print_summary(self, test_step: int, top_k: int = 10):
+    def print_summary(self, test_step: int, top_k: int = 10, verbose: bool = True):
         """Print formatted summary of forgetting analysis."""
+        if not verbose:
+            return  # compact 모드에서는 호출자가 출력 담당
+
         report = self.get_report(test_step, len(self.performance_matrix))
 
         print("\n" + "="*60)

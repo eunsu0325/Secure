@@ -67,6 +67,9 @@ class Training:
 
     curriculum_ramp_users: int = 12
 
+    # 로그 출력 설정
+    verbose: bool = False  # True: 전체 출력, False: compact 출력 (논문 지표 중심)
+
     # Herding buffer 설정
     use_herding: bool = False  # Herding buffer 사용 여부
     max_samples_per_class: int = 20  # Herding 시 클래스당 최대 샘플 수

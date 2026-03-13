@@ -52,18 +52,21 @@ Training:
   scheduler_gamma: 0.8
   temperature: 0.07  # SupConLoss temperature
   test_interval: 1  # Evaluation and calibration frequency
-  checkpoint_path: /content/drive/MyDrive/coconut_update
-  results_path: /content/drive/MyDrive/coconut_update
+  checkpoint_path: /content/drive/MyDrive/coconut_update1
+  results_path: /content/drive/MyDrive/coconut_update1
   gpu_ids: "0"
   ncm_momentum: 1.0
   seed: 42
   curriculum_ramp_users: 12
 
+  # Logging
+  verbose: false  # true: 전체 출력, false: compact 출력 (논문 지표 중심)
+
   # ProxyAnchorLoss settings
   use_proxy_anchor: true
   proxy_margin: 0.1        # Proxy Anchor margin delta
   proxy_alpha: 8          # Proxy Anchor scaling alpha
-  proxy_lr_ratio: 5        # Proxy learning rate multiplier (10x backbone)
+  proxy_lr_ratio: 10        # Proxy learning rate multiplier (10x backbone)
   proxy_lambda: 0.7        # Fixed weight (0.3 = 30% ProxyAnchor, 70% SupCon)
 
 # Open-set recognition settings

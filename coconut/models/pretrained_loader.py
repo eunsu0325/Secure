@@ -16,10 +16,11 @@ class PretrainedLoader:
         """
         ArcLayer가 제거된 CCNet 사전훈련 가중치 로드
         """
-        print("\n" + "="*60)
-        print(" Loading Pretrained CCNet (No ArcLayer)")
-        print("="*60)
-        print(f" Path: {checkpoint_path}")
+        if verbose:
+            print("\n" + "="*60)
+            print(" Loading Pretrained CCNet (No ArcLayer)")
+            print("="*60)
+            print(f" Path: {checkpoint_path}")
         
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -69,15 +70,24 @@ class PretrainedLoader:
                 skipped.append(f"{name} (not found)")
         
         # 5. 통계 출력
-        print(f"\n Loaded: {len(loaded)}/{len(state_dict)} layers")
-        if skipped and verbose:
-            print(f"WARNING:  Skipped: {len(skipped)} layers")
-        
+        if verbose:
+            print(f"\n Loaded: {len(loaded)}/{len(state_dict)} layers")
+            if skipped:
+                print(f"WARNING:  Skipped: {len(skipped)} layers")
+
         # 6. 가중치 업데이트
         model_dict.update(loaded)
         model.load_state_dict(model_dict, strict=False)
-        
-        print("[OK] Pretrained weights loaded successfully!\n")
-        print("="*60 + "\n")
+
+        if verbose:
+            print("[OK] Pretrained weights loaded successfully!\n")
+            print("="*60 + "\n")
+
+        # compact 모드에서도 로드 결과 요약은 저장 (trainer에서 사용)
+        model._pretrained_load_info = {
+            'loaded': len(loaded),
+            'total': len(state_dict),
+            'path': str(checkpoint_path)
+        }
         
         return model

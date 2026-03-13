@@ -17,7 +17,8 @@ def plot_roc_curve(
     title: str = "ROC Curve",
     save_path: Optional[str] = None,
     show_eer: bool = True,
-    eer_value: Optional[float] = None
+    eer_value: Optional[float] = None,
+    verbose: bool = True
 ) -> plt.Figure:
     """
     Plot ROC curve (FAR vs TAR).
@@ -66,7 +67,8 @@ def plot_roc_curve(
     # Save if path provided
     if save_path:
         fig.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"ROC curve saved to: {save_path}")
+        if verbose:
+            print(f"ROC curve saved to: {save_path}")
 
     plt.close()
     return fig
@@ -78,7 +80,8 @@ def plot_det_curve(
     title: str = "DET Curve",
     save_path: Optional[str] = None,
     show_eer: bool = True,
-    eer_value: Optional[float] = None
+    eer_value: Optional[float] = None,
+    verbose: bool = True
 ) -> plt.Figure:
     """
     Plot DET curve (FAR vs FRR in log scale).
@@ -153,7 +156,8 @@ def plot_det_curve(
     # Save if path provided
     if save_path:
         fig.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"DET curve saved to: {save_path}")
+        if verbose:
+            print(f"DET curve saved to: {save_path}")
 
     plt.close()
     return fig
@@ -164,7 +168,8 @@ def generate_far_tar_table(
     tar_array: np.ndarray,
     thresholds: np.ndarray,
     far_points: Optional[List[float]] = None,
-    save_path: Optional[str] = None
+    save_path: Optional[str] = None,
+    verbose: bool = True
 ) -> pd.DataFrame:
     """
     Generate TAR values at specific FAR points.
@@ -234,7 +239,8 @@ def generate_far_tar_table(
         # Save as CSV
         csv_path = Path(save_path).with_suffix('.csv')
         df.to_csv(csv_path, index=False)
-        print(f"FAR-TAR table saved to: {csv_path}")
+        if verbose:
+            print(f"FAR-TAR table saved to: {csv_path}")
 
         # Also save as formatted text
         txt_path = Path(save_path).with_suffix('.txt')
@@ -243,7 +249,8 @@ def generate_far_tar_table(
             f.write("FAR vs TAR Performance Table\n")
             f.write("="*80 + "\n\n")
             f.write(df[['FAR (%)', 'TAR (%)', 'FRR (%)', 'Threshold']].to_string(index=False))
-        print(f"FAR-TAR table (text) saved to: {txt_path}")
+        if verbose:
+            print(f"FAR-TAR table (text) saved to: {txt_path}")
 
     return df
 
@@ -253,7 +260,8 @@ def plot_score_distributions(
     impostor_scores: np.ndarray,
     threshold: Optional[float] = None,
     title: str = "Score Distributions",
-    save_path: Optional[str] = None
+    save_path: Optional[str] = None,
+    verbose: bool = True
 ) -> plt.Figure:
     """
     Plot genuine and impostor score distributions.
@@ -310,7 +318,8 @@ def plot_score_distributions(
     # Save if path provided
     if save_path:
         fig.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Score distribution plot saved to: {save_path}")
+        if verbose:
+            print(f"Score distribution plot saved to: {save_path}")
 
     plt.close()
     return fig
@@ -323,7 +332,8 @@ def save_evaluation_curves(
     experience_id: Optional[int] = None,
     eer_value: Optional[float] = None,
     threshold: Optional[float] = None,
-    n_points: int = 1000
+    n_points: int = 1000,
+    verbose: bool = True
 ) -> Dict:
     """
     Generate and save all evaluation curves and tables.
@@ -368,7 +378,8 @@ def save_evaluation_curves(
         title=f"ROC Curve{' - Experience ' + str(experience_id) if experience_id else ''}",
         save_path=str(roc_path),
         show_eer=True,
-        eer_value=eer_value
+        eer_value=eer_value,
+        verbose=verbose
     )
     saved_files['roc_curve'] = str(roc_path)
 
@@ -379,7 +390,8 @@ def save_evaluation_curves(
         title=f"DET Curve{' - Experience ' + str(experience_id) if experience_id else ''}",
         save_path=str(det_path),
         show_eer=True,
-        eer_value=eer_value
+        eer_value=eer_value,
+        verbose=verbose
     )
     saved_files['det_curve'] = str(det_path)
 
@@ -389,7 +401,8 @@ def save_evaluation_curves(
     df_table = generate_far_tar_table(
         far_array, tar_array, thresholds,
         far_points=far_points,
-        save_path=str(table_path)
+        save_path=str(table_path),
+        verbose=verbose
     )
     saved_files['far_tar_table_csv'] = str(table_path.with_suffix('.csv'))
     saved_files['far_tar_table_txt'] = str(table_path.with_suffix('.txt'))
@@ -400,7 +413,8 @@ def save_evaluation_curves(
         genuine_scores, impostor_scores,
         threshold=threshold,
         title=f"Score Distributions{' - Experience ' + str(experience_id) if experience_id else ''}",
-        save_path=str(dist_path)
+        save_path=str(dist_path),
+        verbose=verbose
     )
     saved_files['score_distributions'] = str(dist_path)
 
@@ -430,11 +444,12 @@ def save_evaluation_curves(
         json.dump(evaluation_data, f, indent=2)
     saved_files['evaluation_data'] = str(data_path)
 
-    print(f"\n📊 Evaluation curves and tables saved to: {output_path}")
-    print(f"   - ROC curve: {roc_path.name}")
-    print(f"   - DET curve: {det_path.name}")
-    print(f"   - FAR-TAR table: {table_path.name}.csv/.txt")
-    print(f"   - Score distributions: {dist_path.name}")
-    print(f"   - Raw data: {data_path.name}")
+    if verbose:
+        print(f"\n📊 Evaluation curves and tables saved to: {output_path}")
+        print(f"   - ROC curve: {roc_path.name}")
+        print(f"   - DET curve: {det_path.name}")
+        print(f"   - FAR-TAR table: {table_path.name}.csv/.txt")
+        print(f"   - Score distributions: {dist_path.name}")
+        print(f"   - Raw data: {data_path.name}")
 
     return saved_files
