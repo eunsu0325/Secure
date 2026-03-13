@@ -134,7 +134,8 @@ class ContinualLearningEvaluator:
             transform=trainer.test_transform,
             device=trainer.device,
             max_eval=max_samples,
-            channels=self.config.dataset.channels
+            channels=self.config.dataset.channels,
+            use_projection=getattr(trainer.config.model, 'use_projection_for_ncm', False)
         )
         return scores if len(scores) >= 10 else None
 

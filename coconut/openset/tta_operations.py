@@ -76,7 +76,8 @@ def predict_batch_tta(
     img_size: int = 128,
     channels: int = 1,
     verbose: bool = False,
-    seed: int = 42
+    seed: int = 42,
+    use_projection: bool = False
 ) -> Union[np.ndarray, Tuple[np.ndarray, List[Dict]]]:
     """
     Test-Time Augmentation based multi-view consensus prediction
@@ -111,7 +112,8 @@ def predict_batch_tta(
     if n_views <= 1:
         from .utils import predict_batch
         preds = predict_batch(model, ncm, paths, base_transform, device,
-                            batch_size, channels)
+                            batch_size, channels,
+                            use_projection=use_projection)
         if return_details:
             details = [{
                 'view_scores': [0.0],
@@ -183,7 +185,7 @@ def predict_batch_tta(
         B = batch_tensor.shape[0]
         batch_flat = batch_tensor.view(B * n_views, *batch_tensor.shape[2:]).to(device)
 
-        features = model.getFeatureCode(batch_flat)
+        features = model.getFeatureCode(batch_flat, use_projection=use_projection)
         features = features.view(B, n_views, -1)
 
         for i in range(B):
@@ -313,7 +315,8 @@ def extract_scores_genuine_tta(
     img_size: int = 128,
     channels: int = 1,
     verbose: bool = False,
-    seed: int = 42
+    seed: int = 42,
+    use_projection: bool = False
 ) -> np.ndarray:
     """
     Extract genuine scores with TTA
@@ -357,14 +360,14 @@ def extract_scores_genuine_tta(
     # Process in batches
     try:
         batch_tensor = torch.stack(all_views).to(device)
-        features = model.getFeatureCode(batch_tensor)
+        features = model.getFeatureCode(batch_tensor, use_projection=use_projection)
     except torch.cuda.OutOfMemoryError:
         print("WARNING: OOM detected, splitting batch...")
         features = []
         batch_size = 50
         for i in range(0, len(all_views), batch_size):
             batch = torch.stack(all_views[i:i+batch_size]).to(device)
-            feat_batch = model.getFeatureCode(batch)
+            feat_batch = model.getFeatureCode(batch, use_projection=use_projection)
             features.append(feat_batch)
         features = torch.cat(features, dim=0)
 
@@ -430,7 +433,8 @@ def extract_scores_impostor_between_tta(
     img_size: int = 128,
     channels: int = 1,
     verbose: bool = False,
-    seed: int = 42
+    seed: int = 42,
+    use_projection: bool = False
 ) -> np.ndarray:
     """
     Extract between-class impostor scores with TTA
@@ -490,14 +494,14 @@ def extract_scores_impostor_between_tta(
     # Process features
     try:
         batch_tensor = torch.stack(all_views).to(device)
-        features = model.getFeatureCode(batch_tensor)
+        features = model.getFeatureCode(batch_tensor, use_projection=use_projection)
     except torch.cuda.OutOfMemoryError:
         print("WARNING: OOM detected, splitting batch...")
         features = []
         batch_size = 50
         for i in range(0, len(all_views), batch_size):
             batch = torch.stack(all_views[i:i+batch_size]).to(device)
-            feat_batch = model.getFeatureCode(batch)
+            feat_batch = model.getFeatureCode(batch, use_projection=use_projection)
             features.append(feat_batch)
         features = torch.cat(features, dim=0)
 
@@ -565,7 +569,8 @@ def extract_scores_impostor_negref_tta(
     img_size: int = 128,
     channels: int = 1,
     verbose: bool = False,
-    seed: int = 42
+    seed: int = 42,
+    use_projection: bool = False
 ) -> np.ndarray:
     """
     Extract impostor scores from negative reference with TTA
@@ -635,13 +640,13 @@ def extract_scores_impostor_negref_tta(
 
     try:
         batch_tensor = batch_tensor.to(device)
-        features = model.getFeatureCode(batch_tensor)
+        features = model.getFeatureCode(batch_tensor, use_projection=use_projection)
         features_list.append(features.cpu())
     except torch.cuda.OutOfMemoryError:
         print(f"WARNING: OOM at batch size {len(batch_tensor)}, splitting...")
         for i in range(0, len(batch_tensor), 32):
             mini_batch = batch_tensor[i:i+32].to(device)
-            feat = model.getFeatureCode(mini_batch)
+            feat = model.getFeatureCode(mini_batch, use_projection=use_projection)
             features_list.append(feat.cpu())
             del feat, mini_batch
             torch.cuda.empty_cache()

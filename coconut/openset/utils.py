@@ -166,7 +166,8 @@ def balance_impostor_scores(
 
 @torch.no_grad()
 def predict_batch(model, ncm, paths: List[str], transform, device,
-                 batch_size: int = 32, channels: int = 1) -> np.ndarray:
+                 batch_size: int = 32, channels: int = 1,
+                 use_projection: bool = False) -> np.ndarray:
     """
     Batch prediction using NCM classifier
 
@@ -196,7 +197,7 @@ def predict_batch(model, ncm, paths: List[str], transform, device,
             batch.append(img)
 
         x = torch.stack(batch, dim=0).to(device)
-        feat = model.getFeatureCode(x)
+        feat = model.getFeatureCode(x, use_projection=use_projection)
         # Normalization handled by NCM
         pred = ncm.predict_openset(feat)
         preds.extend(pred.cpu().numpy())

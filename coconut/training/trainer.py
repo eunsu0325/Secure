@@ -663,10 +663,14 @@ class COCONUTTrainer:
                         all_labels = batch_labels.repeat(2)
                         loss_proxy = self.proxy_anchor_loss(features_all, all_labels)
 
-                        loss = w_proxy * loss_proxy + w_supcon * loss_supcon
+                        # proxy_lambda는 ProxyAnchor 비중을 조절하는 명시적 가중치
+                        proxy_weight = w_proxy * self.proxy_lambda
+                        supcon_weight = w_supcon
+                        loss = proxy_weight * loss_proxy + supcon_weight * loss_supcon
 
                         if iteration == 0 and epoch == 0:
                             print(f"[Curriculum] users={num_users}, w_proxy={w_proxy:.2f}, w_supcon={w_supcon:.2f}, gate={'ON' if unique_in_batch >= 2 else 'OFF'}")
+                            print(f"   Weights → proxy:{proxy_weight:.2f}, supcon:{supcon_weight:.2f}")
                             print(f"   SupCon: {loss_supcon.item():.4f}, ProxyAnchor: {loss_proxy.item():.4f}")
                     else:
                         loss = loss_supcon
@@ -773,6 +777,7 @@ class COCONUTTrainer:
 
         unknown_dev_file = getattr(self.config.dataset, 'unknown_dev_file', None)
         s_impostor = np.array([])
+        use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
 
         if unknown_dev_file and str(unknown_dev_file) != 'None':
             s_impostor = extract_scores_impostor_unknown(
@@ -781,7 +786,8 @@ class COCONUTTrainer:
                 self.registered_users,
                 self.test_transform, self.device,
                 max_eval=3000,
-                channels=channels
+                channels=channels,
+                use_projection=use_projection
             )
             print(f"   Unknown Dev: {len(s_impostor)} scores from {unknown_dev_file}")
         else:
@@ -798,7 +804,8 @@ class COCONUTTrainer:
             self.model, self.ncm,
             all_probe_paths, all_probe_labels,
             self.test_transform, self.device,
-            channels=channels
+            channels=channels,
+            use_projection=use_projection
         )
 
         print(f"   Genuine (probe, 참고용): {len(s_genuine)} scores")
@@ -841,6 +848,7 @@ class COCONUTTrainer:
         use_tta = self.use_tta and TTA_FUNCTIONS_AVAILABLE
         img_size = self.config.dataset.height
         channels = self.config.dataset.channels
+        use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
 
         if use_tta:
             print(f"\n Open-set Evaluation with TTA (n={self.openset_config.tta_n_views}):")
@@ -872,7 +880,8 @@ class COCONUTTrainer:
                     return_details=True,
                     img_size=img_size,
                     channels=channels,
-                    seed=eval_seed + 5000  #  재현성: seed 전달
+                    seed=eval_seed + 5000,  #  재현성: seed 전달
+                    use_projection=use_projection
                 )
 
                 # TTA 통계 출력
@@ -887,7 +896,8 @@ class COCONUTTrainer:
                 preds = predict_batch(
                     self.model, self.ncm,
                     all_dev_paths, self.test_transform, self.device,
-                    channels=channels
+                    channels=channels,
+                    use_projection=use_projection
                 )
 
             n = max(1, len(preds))
@@ -932,13 +942,15 @@ class COCONUTTrainer:
                     aug_strength=self.openset_config.tta_augmentation_strength,
                     img_size=img_size,
                     channels=channels,
-                    seed=eval_seed + 3000  #  재현성: seed 전달
+                    seed=eval_seed + 3000,  #  재현성: seed 전달
+                    use_projection=use_projection
                 )
             else:
                 preds_unk = predict_batch(
                     self.model, self.ncm,
                     unknown_filtered, self.test_transform, self.device,
-                    channels=channels
+                    channels=channels,
+                    use_projection=use_projection
                 )
             TRR_u = sum(1 for p in preds_unk if p == -1) / len(preds_unk)
             FAR_u = 1 - TRR_u
@@ -963,13 +975,15 @@ class COCONUTTrainer:
                     aug_strength=self.openset_config.tta_augmentation_strength,
                     img_size=img_size,
                     channels=channels,
-                    seed=eval_seed + 4000  #  재현성: seed 전달
+                    seed=eval_seed + 4000,  #  재현성: seed 전달
+                    use_projection=use_projection
                 )
             else:
                 preds_neg = predict_batch(
                     self.model, self.ncm,
                     negref_paths, self.test_transform, self.device,
-                    channels=channels
+                    channels=channels,
+                    use_projection=use_projection
                 )
             TRR_n = sum(1 for p in preds_neg if p == -1) / len(preds_neg)
             FAR_n = 1 - TRR_n
