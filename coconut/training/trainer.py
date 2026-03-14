@@ -720,8 +720,8 @@ class COCONUTTrainer:
                 self._first_epoch_loss = avg_loss
             self._last_epoch_loss = avg_loss
 
-            if self.verbose:
-                print(f"  Epoch [{epoch+1}/{self.config.training.epochs_per_experience}] Loss: {avg_loss:.4f}")
+            # 에포크 진행률과 평균 손실은 항상 표시해 학습 상황을 바로 확인 가능하게 함
+            print(f"  [에포크 {epoch+1}/{self.config.training.epochs_per_experience}] 평균 손실: {avg_loss:.4f}")
 
         # 메모리 버퍼 업데이트
         self.memory_buffer.update_from_dataset(train_paths, train_labels)

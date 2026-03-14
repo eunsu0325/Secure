@@ -27,7 +27,7 @@ Model:
   pretrained_path: /content/drive/MyDrive/tongji.pth
   # Projection head settings
   projection_dim: 512  # 🍑 6144D -> 512D projection
-  use_projection: true
+  use_projection: false
   use_projection_for_ncm: false  # 🍑 NCM도 512D projection 사용할지 (false=6144D, true=512D)
 
 Training:
@@ -64,9 +64,9 @@ Training:
 
   # ProxyAnchorLoss settings
   use_proxy_anchor: true
-  proxy_margin: 0.1        # Proxy Anchor margin delta
-  proxy_alpha: 8          # Proxy Anchor scaling alpha
-  proxy_lr_ratio: 10        # Proxy learning rate multiplier (10x backbone)
+  proxy_margin: 0.2        # Proxy Anchor margin delta
+  proxy_alpha: 16          # Proxy Anchor scaling alpha
+  proxy_lr_ratio: 100        # Proxy learning rate multiplier (10x backbone)
   proxy_lambda: 0.7        # Fixed weight (0.3 = 30% ProxyAnchor, 70% SupCon)
 
 # Open-set recognition settings
@@ -79,8 +79,8 @@ Openset:
   threshold_max_delta: 0.05  # Maximum change limit (1.0→0.05: τ 급변 방지)
 
   # Initial values and warmup
-  warmup_users: 10           # Warmup period
-  initial_tau: 0.5           # Initial threshold
+  warmup_users: 1           # Warmup period
+  initial_tau: 0.3           # Initial threshold
 
   # Data split
   dev_ratio: 0.1             # Dev set ratio (0.4→0.1: 학습 데이터 더 확보)
@@ -89,7 +89,7 @@ Openset:
   verbose_calibration: true  # Verbose output
 
   # TTA settings (Test-Time Augmentation)
-  tta_n_views: 3  # 1=disabled, 2-3 recommended
+  tta_n_views: 1  # 1=disabled, 2-3 recommended
   tta_include_original: true  # Include original recommended
   tta_agree_k: 0  # 0=auto majority, 2=2+ agreement
   tta_augmentation_strength: 0.5  # 0.3-0.7 recommended (1.0→0.5: TTA 왜곡 과도 방지)

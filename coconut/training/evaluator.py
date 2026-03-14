@@ -36,6 +36,9 @@ class ContinualLearningEvaluator:
         self.config = config
         self.test_file = test_file
 
+        # verbose 설정 (데이터셋 로드 전에 설정해야 경고 없음)
+        self.verbose = getattr(config.training, 'verbose', False)
+
         # primary_metric: TAR@FPIR=1% (open-set identification 표준 지표)
         self.forgetting_tracker = ForgettingTracker(primary_metric='tar_001')
 
@@ -45,9 +48,6 @@ class ContinualLearningEvaluator:
 
         # Test dataset
         self.test_dataset = self._load_test_dataset()
-
-        # verbose 설정
-        self.verbose = getattr(config.training, 'verbose', False)
 
         # Test step counter
         self.test_step = 0

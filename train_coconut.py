@@ -496,7 +496,7 @@ def main(args):
         print(f"  {pa_info} | LR={config_obj.training.learning_rate}")
         print(f"  {os_info}")
         print(f"  Data: {stats['num_users']} users, Memory: {config_obj.training.memory_size}, "
-              f"Epochs/exp: {config_obj.training.num_epochs}")
+              f"Epochs/exp: {config_obj.training.epochs_per_experience}")
 
     if verbose:
         print("\n=== Starting Continual Learning ===")
