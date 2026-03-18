@@ -69,6 +69,20 @@ Training:
   proxy_lr_ratio: 100        # Proxy learning rate multiplier (10x backbone)
   proxy_lambda: 0.7        # Fixed weight (0.3 = 30% ProxyAnchor, 70% SupCon)
 
+  # IDL+RTM Loss (Open-set representation 최적화)
+  use_idl_rtm: true
+  idl_alpha_det: 1.0          # Detection loss 내부 가중치
+  idl_beta_id: 1.0            # Identification loss 내부 가중치
+  idl_gamma_rtm: 0.5          # RTM loss 내부 가중치
+  idl_rtm_lambda: 0.3         # 전체 손실 내 IDL+RTM 가중치
+  idl_rtm_warmup_users: 5     # warmup 기간 (사용자 수)
+  idl_n_quantiles: 5          # Detection threshold quantile 후보 수
+  idl_rank_temperature: 0.5   # soft rank 스케일링 (수치 안정성)
+  idl_rtm_temperature: 0.1    # RTM softmax temperature
+  idl_det_steepness: 10.0     # Detection sigmoid steepness
+  idl_min_gallery_classes: 2  # 최소 gallery 클래스 수
+  idl_gallery_fraction: 0.7   # gallery로 사용할 클래스 비율
+
 # Open-set recognition settings
 Openset:
   enabled: true

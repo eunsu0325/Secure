@@ -76,6 +76,22 @@ class Training:
     herding_batch_size: int = 32  # Feature extraction 배치 크기
     drift_threshold: float = 0.5  # Feature drift 감지 임계값
 
+    # IDL+RTM Loss 설정 (Open-set representation 최적화)
+    use_idl_rtm: bool = False
+    idl_alpha_det: float = 1.0          # Detection loss 내부 가중치
+    idl_beta_id: float = 1.0            # Identification loss 내부 가중치
+    idl_gamma_rtm: float = 0.5          # RTM loss 내부 가중치
+    idl_rtm_lambda: float = 0.3         # 전체 손실 내 IDL+RTM 가중치
+    idl_rtm_warmup_users: int = 5       # warmup 기간 (사용자 수)
+    idl_n_quantiles: int = 5            # Detection threshold quantile 후보 수
+    idl_rank_target: float = 1.0        # Identification target rank
+    idl_rank_gamma: float = 1.0         # Identification rank loss temperature
+    idl_rank_temperature: float = 0.5   # soft rank 스케일링 (수치 안정성)
+    idl_rtm_temperature: float = 0.1    # RTM softmax temperature
+    idl_det_steepness: float = 10.0     # Detection sigmoid steepness
+    idl_min_gallery_classes: int = 2    # 최소 gallery 클래스 수
+    idl_gallery_fraction: float = 0.7   # gallery로 사용할 클래스 비율
+
 @dataclasses.dataclass
 class Openset:
     enabled: bool = True

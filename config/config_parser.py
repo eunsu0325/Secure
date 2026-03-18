@@ -82,6 +82,27 @@ class ConfigParser:
             if 'verbose' not in training_dict:
                 training_dict['verbose'] = False
 
+            # IDL+RTM Loss 기본값
+            idl_rtm_defaults = {
+                'use_idl_rtm': False,
+                'idl_alpha_det': 1.0,
+                'idl_beta_id': 1.0,
+                'idl_gamma_rtm': 0.5,
+                'idl_rtm_lambda': 0.3,
+                'idl_rtm_warmup_users': 5,
+                'idl_n_quantiles': 5,
+                'idl_rank_target': 1.0,
+                'idl_rank_gamma': 1.0,
+                'idl_rank_temperature': 0.5,
+                'idl_rtm_temperature': 0.1,
+                'idl_det_steepness': 10.0,
+                'idl_min_gallery_classes': 2,
+                'idl_gallery_fraction': 0.7,
+            }
+            for key, default in idl_rtm_defaults.items():
+                if key not in training_dict:
+                    training_dict[key] = default
+
             self.training = Training(**training_dict)
 
             #  ProxyAnchorLoss 설정 출력 (verbose만)

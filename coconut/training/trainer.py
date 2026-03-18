@@ -199,6 +199,32 @@ class COCONUTTrainer:
             self.proxy_anchor_loss = None
             self.proxy_lambda = 0.0
 
+        # IDL+RTM Loss 초기화
+        self.use_idl_rtm = getattr(config.training, 'use_idl_rtm', False)
+        if self.use_idl_rtm:
+            from coconut.losses import IDL_RTMLoss
+            self.idl_rtm_loss = IDL_RTMLoss(
+                alpha_det=getattr(config.training, 'idl_alpha_det', 1.0),
+                beta_id=getattr(config.training, 'idl_beta_id', 1.0),
+                gamma_rtm=getattr(config.training, 'idl_gamma_rtm', 0.5),
+                n_quantiles=getattr(config.training, 'idl_n_quantiles', 5),
+                rank_target=getattr(config.training, 'idl_rank_target', 1.0),
+                rank_gamma=getattr(config.training, 'idl_rank_gamma', 1.0),
+                rank_temperature=getattr(config.training, 'idl_rank_temperature', 0.5),
+                rtm_temperature=getattr(config.training, 'idl_rtm_temperature', 0.1),
+                det_steepness=getattr(config.training, 'idl_det_steepness', 10.0),
+                min_gallery_classes=getattr(config.training, 'idl_min_gallery_classes', 2),
+                gallery_fraction=getattr(config.training, 'idl_gallery_fraction', 0.7),
+            )
+            self.idl_rtm_lambda = getattr(config.training, 'idl_rtm_lambda', 0.3)
+            self.idl_rtm_warmup_users = getattr(config.training, 'idl_rtm_warmup_users', 5)
+            if self.verbose:
+                print(f"[COCONUT] IDL+RTM Loss enabled: λ={self.idl_rtm_lambda}, warmup={self.idl_rtm_warmup_users} users")
+        else:
+            self.idl_rtm_loss = None
+            self.idl_rtm_lambda = 0.0
+            self.idl_rtm_warmup_users = 0
+
         # [CORE] 핵심 수정: 옵티마이저 관리 개선
         self.base_lr = config.training.learning_rate
         self.proxy_lr_ratio = getattr(config.training, 'proxy_lr_ratio', 10) if self.use_proxy_anchor else 1
@@ -664,6 +690,15 @@ class COCONUTTrainer:
                     # CCNet 결과 그대로 사용
                     features_paired = torch.stack([f1, f2], dim=1)
 
+                    # IDL+RTM Loss 계산 (배치 내 episode splitting)
+                    if self.use_idl_rtm and len(set(batch_labels.tolist())) >= 2:
+                        # 랜덤 view 선택으로 augmentation 편향 감소
+                        idl_features = f1 if random.random() < 0.5 else f2
+                        idl_rtm_loss_val, idl_rtm_info = self.idl_rtm_loss(idl_features, batch_labels)
+                    else:
+                        idl_rtm_loss_val = torch.tensor(0.0, device=self.device)
+                        idl_rtm_info = {}
+
                     # Curriculum Loss Schedule + Batch Gating
                     ramp_users = getattr(self.config.training, 'curriculum_ramp_users', 12)
                     num_users = len(self.registered_users)
@@ -689,7 +724,14 @@ class COCONUTTrainer:
                         # proxy_lambda는 ProxyAnchor 비중을 조절하는 명시적 가중치
                         proxy_weight = w_proxy * self.proxy_lambda
                         supcon_weight = w_supcon
-                        loss = proxy_weight * loss_proxy + supcon_weight * loss_supcon
+
+                        # IDL+RTM warmup: 사용자 수에 따라 가중치 점진 증가
+                        if self.use_idl_rtm:
+                            idl_rtm_weight = self.idl_rtm_lambda * min(1.0, num_users / max(1, self.idl_rtm_warmup_users))
+                        else:
+                            idl_rtm_weight = 0.0
+
+                        loss = proxy_weight * loss_proxy + supcon_weight * loss_supcon + idl_rtm_weight * idl_rtm_loss_val
 
                         if iteration == 0 and epoch == 0:
                             # compact 모드용: curriculum weights 저장
@@ -697,12 +739,24 @@ class COCONUTTrainer:
                                 'w_proxy': proxy_weight, 'w_supcon': supcon_weight,
                                 'loss_supcon': loss_supcon.item(), 'loss_proxy': loss_proxy.item()
                             }
+                            if self.use_idl_rtm:
+                                self._last_curriculum['w_idl_rtm'] = idl_rtm_weight
+                                self._last_curriculum['loss_idl_rtm'] = idl_rtm_loss_val.item()
+                                self._last_idl_rtm_info = idl_rtm_info
                             if self.verbose:
                                 print(f"[Curriculum] users={num_users}, w_proxy={w_proxy:.2f}, w_supcon={w_supcon:.2f}, gate={'ON' if unique_in_batch >= 2 else 'OFF'}")
                                 print(f"   Weights → proxy:{proxy_weight:.2f}, supcon:{supcon_weight:.2f}")
                                 print(f"   SupCon: {loss_supcon.item():.4f}, ProxyAnchor: {loss_proxy.item():.4f}")
+                                if self.use_idl_rtm and not idl_rtm_info.get('skipped', True):
+                                    print(f"   IDL+RTM: w={idl_rtm_weight:.2f}, L_det={idl_rtm_info['L_det']:.4f}, L_id={idl_rtm_info['L_id']:.4f}, L_rtm={idl_rtm_info['L_rtm']:.4f}")
+                                    print(f"   Episode: G={idl_rtm_info['n_gallery']}, NM={idl_rtm_info['n_nonmated']}")
                     else:
-                        loss = loss_supcon
+                        # IDL+RTM도 포함
+                        if self.use_idl_rtm:
+                            idl_rtm_weight = self.idl_rtm_lambda * min(1.0, num_users / max(1, self.idl_rtm_warmup_users))
+                            loss = loss_supcon + idl_rtm_weight * idl_rtm_loss_val
+                        else:
+                            loss = loss_supcon
 
                     loss_avg.update(loss.item(), batch_size)
 
@@ -783,7 +837,16 @@ class COCONUTTrainer:
                     first_loss = getattr(self, '_first_epoch_loss', 0)
                     last_loss = getattr(self, '_last_epoch_loss', 0)
                     epochs = self.config.training.epochs_per_experience
-                    print(f"  Loss: {first_loss:.4f} -> {last_loss:.4f} ({epochs}ep) | w_proxy={w_proxy:.2f}, w_supcon={w_supcon:.2f}")
+                    w_idl_rtm = curriculum.get('w_idl_rtm', 0)
+                    loss_line = f"  Loss: {first_loss:.4f} -> {last_loss:.4f} ({epochs}ep) | w_proxy={w_proxy:.2f}, w_supcon={w_supcon:.2f}"
+                    if self.use_idl_rtm and w_idl_rtm > 0:
+                        loss_line += f", w_idl_rtm={w_idl_rtm:.2f}"
+                    print(loss_line)
+
+                    # IDL+RTM 손실 상세 (활성화 시)
+                    idl_info = getattr(self, '_last_idl_rtm_info', {})
+                    if self.use_idl_rtm and not idl_info.get('skipped', True):
+                        print(f"  IDL+RTM: L_det={idl_info['L_det']:.4f}, L_id={idl_info['L_id']:.4f}, L_rtm={idl_info['L_rtm']:.4f} | G={idl_info['n_gallery']}, NM={idl_info['n_nonmated']}")
 
                     # Line 3: Threshold + open-set metrics (한국어 설명)
                     tau = self.ncm.tau_s
