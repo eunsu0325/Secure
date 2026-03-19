@@ -199,27 +199,24 @@ class COCONUTTrainer:
             self.proxy_anchor_loss = None
             self.proxy_lambda = 0.0
 
-        # IDL+RTM Loss 초기화
+        # IDL+RTM Loss 초기화 (Su et al., "Open-Set Biometrics")
         self.use_idl_rtm = getattr(config.training, 'use_idl_rtm', False)
         if self.use_idl_rtm:
             from coconut.losses import IDL_RTMLoss
             self.idl_rtm_loss = IDL_RTMLoss(
-                alpha_det=getattr(config.training, 'idl_alpha_det', 1.0),
-                beta_id=getattr(config.training, 'idl_beta_id', 1.0),
-                gamma_rtm=getattr(config.training, 'idl_gamma_rtm', 0.5),
-                n_quantiles=getattr(config.training, 'idl_n_quantiles', 5),
-                rank_target=getattr(config.training, 'idl_rank_target', 1.0),
-                rank_gamma=getattr(config.training, 'idl_rank_gamma', 1.0),
-                rank_temperature=getattr(config.training, 'idl_rank_temperature', 0.5),
-                rtm_temperature=getattr(config.training, 'idl_rtm_temperature', 0.1),
-                det_steepness=getattr(config.training, 'idl_det_steepness', 10.0),
+                alpha=getattr(config.training, 'idl_alpha_det', 6.0),
+                beta=getattr(config.training, 'idl_beta_id', 0.2),
+                gamma=getattr(config.training, 'idl_gamma_rank', 6.0),
+                rtm_lambda=getattr(config.training, 'idl_rtm_weight', 4.0),
                 min_gallery_classes=getattr(config.training, 'idl_min_gallery_classes', 2),
                 gallery_fraction=getattr(config.training, 'idl_gallery_fraction', 0.7),
             )
             self.idl_rtm_lambda = getattr(config.training, 'idl_rtm_lambda', 0.3)
             self.idl_rtm_warmup_users = getattr(config.training, 'idl_rtm_warmup_users', 5)
             if self.verbose:
-                print(f"[COCONUT] IDL+RTM Loss enabled: λ={self.idl_rtm_lambda}, warmup={self.idl_rtm_warmup_users} users")
+                print(f"[COCONUT] IDL+RTM Loss enabled: ext_λ={self.idl_rtm_lambda}, "
+                      f"α={self.idl_rtm_loss.alpha}, β={self.idl_rtm_loss.beta}, "
+                      f"γ={self.idl_rtm_loss.gamma}, RTM_λ={self.idl_rtm_loss.rtm_lambda}")
         else:
             self.idl_rtm_loss = None
             self.idl_rtm_lambda = 0.0
@@ -748,8 +745,8 @@ class COCONUTTrainer:
                                 print(f"   Weights → proxy:{proxy_weight:.2f}, supcon:{supcon_weight:.2f}")
                                 print(f"   SupCon: {loss_supcon.item():.4f}, ProxyAnchor: {loss_proxy.item():.4f}")
                                 if self.use_idl_rtm and not idl_rtm_info.get('skipped', True):
-                                    print(f"   IDL+RTM: w={idl_rtm_weight:.2f}, L_det={idl_rtm_info['L_det']:.4f}, L_id={idl_rtm_info['L_id']:.4f}, L_rtm={idl_rtm_info['L_rtm']:.4f}")
-                                    print(f"   Episode: G={idl_rtm_info['n_gallery']}, NM={idl_rtm_info['n_nonmated']}")
+                                    print(f"   IDL+RTM: w={idl_rtm_weight:.2f}, L_IDL={idl_rtm_info['L_IDL']:.4f}, L_RTM={idl_rtm_info['L_RTM']:.4f}")
+                                    print(f"   S_det={idl_rtm_info['S_det_mean']:.4f}, S_id={idl_rtm_info['S_id_mean']:.4f} | G={idl_rtm_info['n_gallery']}, NM={idl_rtm_info['n_nonmated']}")
                     else:
                         # IDL+RTM도 포함
                         if self.use_idl_rtm:
@@ -846,7 +843,7 @@ class COCONUTTrainer:
                     # IDL+RTM 손실 상세 (활성화 시)
                     idl_info = getattr(self, '_last_idl_rtm_info', {})
                     if self.use_idl_rtm and not idl_info.get('skipped', True):
-                        print(f"  IDL+RTM: L_det={idl_info['L_det']:.4f}, L_id={idl_info['L_id']:.4f}, L_rtm={idl_info['L_rtm']:.4f} | G={idl_info['n_gallery']}, NM={idl_info['n_nonmated']}")
+                        print(f"  IDL+RTM: L_IDL={idl_info['L_IDL']:.4f}, L_RTM={idl_info['L_RTM']:.4f} | S_det={idl_info['S_det_mean']:.4f}, S_id={idl_info['S_id_mean']:.4f} | G={idl_info['n_gallery']}, NM={idl_info['n_nonmated']}")
 
                     # Line 3: Threshold + open-set metrics (한국어 설명)
                     tau = self.ncm.tau_s

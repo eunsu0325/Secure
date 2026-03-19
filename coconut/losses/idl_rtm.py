@@ -1,50 +1,42 @@
 """
 IDL + RTM Open-Set Loss for COCONUT
 
-논문 아이디어 기반:
-- IDL (Identification Loss): mated probe가 gallery에서 올바른 class를 top-r 안에 찾도록 soft rank 최소화
-- Detection Loss: genuine score가 impostor threshold 후보보다 높도록 유지
-- RTM (Relative Threshold Minimization): non-mated probe의 높은 impostor score를 직접 억제
+"Open-Set Biometrics: Beyond Good Closed-Set Models" (Su et al., MSU)
+
+논문 수식 충실 구현:
+- Eq. 7-8: Detection Score S^det — non-mated score를 threshold로 사용
+- Eq. 9-10: Identification Score S^id — sigmoid 기반 soft rank
+- Eq. 11: L^IDL = -(1/|P'_K|) Σ S^det_i · S^id_i (곱 결합)
+- Eq. 12: L^RTM = softmax-weighted max impostor score 억제
+- Eq. 13: L = L^IDL + λ · L^RTM
 """
 
-import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class IDL_RTMLoss(nn.Module):
     """
-    Open-set training loss combining:
-    - L_det: Detection loss (genuine similarity > threshold candidates)
-    - L_id:  Identification loss (soft rank minimization via logsumexp)
-    - L_rtm: Relative Threshold Minimization (suppress high impostor scores)
+    Open-set training loss (Su et al.):
+    - L^IDL: Joint detection-identification loss (Eq. 11)
+    - L^RTM: Relative Threshold Minimization (Eq. 12)
 
-    배치 내부에서 post-hoc episode splitting으로 gallery/mated-probe/non-mated-probe 역할을 할당.
+    배치 내부에서 post-hoc episode splitting으로
+    gallery / mated-probe / non-mated-probe 역할을 할당.
     """
 
     def __init__(self,
-                 alpha_det: float = 1.0,
-                 beta_id: float = 1.0,
-                 gamma_rtm: float = 0.5,
-                 n_quantiles: int = 5,
-                 rank_target: float = 1.0,
-                 rank_gamma: float = 1.0,
-                 rank_temperature: float = 0.5,
-                 rtm_temperature: float = 0.1,
-                 det_steepness: float = 10.0,
+                 alpha: float = 6.0,          # Detection sigmoid steepness (Eq. 7)
+                 beta: float = 0.2,           # Identification sigmoid steepness (Eq. 9)
+                 gamma: float = 6.0,          # Rank sigmoid steepness (Eq. 10)
+                 rtm_lambda: float = 4.0,     # λ: RTM weight (Eq. 13)
                  min_gallery_classes: int = 2,
                  gallery_fraction: float = 0.7):
         super().__init__()
-        self.alpha_det = alpha_det
-        self.beta_id = beta_id
-        self.gamma_rtm = gamma_rtm
-        self.n_quantiles = n_quantiles
-        self.rank_target = rank_target
-        self.rank_gamma = rank_gamma
-        self.rank_temperature = rank_temperature
-        self.rtm_temperature = rtm_temperature
-        self.det_steepness = det_steepness
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.rtm_lambda = rtm_lambda
         self.min_gallery_classes = min_gallery_classes
         self.gallery_fraction = gallery_fraction
 
@@ -56,9 +48,8 @@ class IDL_RTMLoss(nn.Module):
 
         Returns:
             loss: 스칼라 텐서
-            info: dict (L_det, L_id, L_rtm, n_gallery, n_nonmated, skipped)
+            info: dict with L_IDL, L_RTM, S_det_mean, S_id_mean, etc.
         """
-        B, D = features.shape
         device = features.device
 
         # 1. 클래스별 인덱스 수집
@@ -82,7 +73,6 @@ class IDL_RTMLoss(nn.Module):
         # 3. gallery / non-mated 분할
         n_gallery = max(self.min_gallery_classes,
                         int(self.gallery_fraction * len(eligible)))
-        # non-mated가 최소 1개 클래스 보장
         n_gallery = min(n_gallery, len(eligible) - 1)
 
         perm = torch.randperm(len(eligible))
@@ -93,7 +83,7 @@ class IDL_RTMLoss(nn.Module):
         ineligible = [c for c in class_indices if c not in eligible]
         nonmated_classes.extend(ineligible)
 
-        # 4. gallery / mated probe 인덱스 할당
+        # 4. gallery / mated probe 인덱스 할당 (클래스당 2샘플 → 1 gallery, 1 mated probe)
         gallery_idx_list = []
         mated_idx_list = []
         for c in gallery_classes:
@@ -115,105 +105,102 @@ class IDL_RTMLoss(nn.Module):
         else:
             nonmated_idx = torch.tensor([], dtype=torch.long, device=device)
 
-        # 6. Similarity matrix
+        # 6. Similarity matrix (cosine sim, L2-norm 전제)
         S = features @ features.T  # [B, B]
 
-        # 7. 세 손실 항 계산
-        L_det = self._compute_det_loss(S, gallery_idx, mated_idx, nonmated_idx)
-        L_id = self._compute_id_loss(S, gallery_idx, mated_idx)
-        L_rtm = self._compute_rtm_loss(S, gallery_idx, nonmated_idx)
+        G = len(gallery_idx)
 
-        # 8. 결합
-        loss = self.alpha_det * L_det + self.beta_id * L_id + self.gamma_rtm * L_rtm
+        # ===== L^IDL (Eq. 11): -(1/|P'_K|) Σ S^det_i · S^id_i =====
+        S_det = self._compute_S_det(S, gallery_idx, mated_idx, nonmated_idx)  # [G]
+        S_id = self._compute_S_id(S, gallery_idx, mated_idx)                   # [G]
+        L_IDL = -(S_det * S_id).mean()
+
+        # ===== L^RTM (Eq. 12) =====
+        L_RTM = self._compute_rtm_loss(S, gallery_idx, nonmated_idx)
+
+        # ===== Total (Eq. 13): L = L^IDL + λ · L^RTM =====
+        loss = L_IDL + self.rtm_lambda * L_RTM
 
         info = {
-            'L_det': L_det.item(),
-            'L_id': L_id.item(),
-            'L_rtm': L_rtm.item(),
-            'n_gallery': len(gallery_classes),
+            'L_IDL': L_IDL.item(),
+            'L_RTM': L_RTM.item(),
+            'S_det_mean': S_det.mean().item(),
+            'S_id_mean': S_id.mean().item(),
+            'n_gallery': G,
             'n_nonmated': len(nonmated_idx),
             'skipped': False,
         }
 
         return loss, info
 
-    def _compute_det_loss(self, S, gallery_idx, mated_idx, nonmated_idx):
-        """Detection Loss: genuine score가 impostor threshold 후보보다 높도록"""
+    def _compute_S_det(self, S, gallery_idx, mated_idx, nonmated_idx):
+        """
+        Detection Score (Eq. 7-8):
+        T = {s(n_j, g_k) : ∀j ∈ non-mated, ∀k ∈ gallery}
+        S^det_i = (1/|T|) Σ_{t∈T} σ_α(s(p_i, g_i) - t)
+
+        genuine score가 모든 impostor threshold보다 높으면 S^det → 1
+        """
         device = S.device
+        G = len(gallery_idx)
 
         if len(nonmated_idx) == 0:
-            return torch.tensor(0.0, device=device)
+            return torch.ones(G, device=device)
 
-        # Genuine similarities
+        # Genuine similarities: s(p_i, g_i)
         s_genuine = S[mated_idx, gallery_idx]  # [G]
 
-        # Non-mated probe → gallery similarities
+        # Threshold set T: s(n_j, g_k) for all j, k
         s_impostor = S[nonmated_idx][:, gallery_idx]  # [N, G]
+        T = s_impostor.reshape(-1)  # [N*G]
 
-        # Flatten impostor scores
-        s_imp_flat = s_impostor.reshape(-1)  # [N*G]
+        # S^det_i = mean σ_α(s(p_i,g_i) - t) over all t
+        # [G, 1] - [1, |T|] → [G, |T|]
+        margins = s_genuine.unsqueeze(1) - T.unsqueeze(0)
+        S_det = torch.sigmoid(self.alpha * margins).mean(dim=1)  # [G]
 
-        if len(s_imp_flat) < 2:
-            return torch.tensor(0.0, device=device)
+        return S_det
 
-        # 미분 가능한 soft quantile: sort 후 quantile 위치 주변 window의 mean
-        sorted_scores, _ = s_imp_flat.sort(descending=True)
-        n_scores = len(sorted_scores)
+    def _compute_S_id(self, S, gallery_idx, mated_idx):
+        """
+        Identification Score (Eq. 9-10):
+        softrank(p_i) = Σ_{j≠i} σ_γ(s(p_i, g_j) - s(p_i, g_i))   (Eq. 10)
+        S^id_i = σ_β(1 - softrank(p_i) / (K-1))                    (Eq. 9)
 
-        quantile_levels = torch.linspace(0.9, 0.99, self.n_quantiles, device=device)
-        tau_candidates = []
-        for q in quantile_levels:
-            # 상위 (1-q) 비율 위치
-            k = max(0, int((1.0 - q.item()) * n_scores))
-            # 주변 window로 smooth quantile
-            window_start = max(0, k - 2)
-            window_end = min(n_scores, k + 3)
-            tau_k = sorted_scores[window_start:window_end].mean()
-            tau_candidates.append(tau_k)
-
-        tau = torch.stack(tau_candidates)  # [K]
-
-        # Detection loss: sigmoid(steepness * (τ_k - s_genuine))
-        # s_genuine: [G], tau: [K] → broadcast: [G, K]
-        margins = tau.unsqueeze(0) - s_genuine.unsqueeze(1)  # [G, K]
-        L_det = torch.sigmoid(self.det_steepness * margins).mean()
-
-        return L_det
-
-    def _compute_id_loss(self, S, gallery_idx, mated_idx):
-        """Identification Loss: 정답 gallery가 top-1에 오도록 soft rank 최소화 (logsumexp 안정화)"""
+        정답 gallery가 top-1이면 softrank→0, S^id→σ_β(1)≈1
+        """
         device = S.device
         G = len(gallery_idx)
 
         if G < 2:
-            return torch.tensor(0.0, device=device)
+            return torch.ones(G, device=device)
 
-        # Mated probe → gallery similarity
+        # Mated probe → all gallery similarities: s(p_i, g_j)
         s_probe_gallery = S[mated_idx][:, gallery_idx]  # [G, G]
-        s_genuine_diag = s_probe_gallery.diag()          # [G]
+        s_genuine_diag = s_probe_gallery.diag()          # [G] = s(p_i, g_i)
 
-        # 대각선 제외 (자기 자신 제외)
+        # 대각선(자기 gallery) 제외
         mask = ~torch.eye(G, dtype=torch.bool, device=device)
-        s_others = s_probe_gallery[mask].view(G, G - 1)  # [G, G-1]
+        s_others = s_probe_gallery[mask].view(G, G - 1)  # [G, G-1] = s(p_i, g_j) j≠i
 
-        # rank_temperature로 스케일링
-        diff = (s_others - s_genuine_diag.unsqueeze(1)) / self.rank_temperature  # [G, G-1]
+        # softrank(p_i) = Σ_{j≠i} σ_γ(s(p_i,g_j) - s(p_i,g_i))
+        diff = s_others - s_genuine_diag.unsqueeze(1)  # [G, G-1]
+        softrank = torch.sigmoid(self.gamma * diff).sum(dim=1)  # [G]
 
-        # logsumexp로 안정적 계산: log(1 + Σ exp(diff))
-        # = logsumexp([0, diff_1, diff_2, ...])
-        zeros = torch.zeros(G, 1, device=device)
-        log_soft_rank = torch.logsumexp(torch.cat([zeros, diff], dim=1), dim=1)  # [G]
+        # S^id_i = σ_β(1 - softrank/(K-1))
+        K_minus_1 = max(G - 1, 1)
+        S_id = torch.sigmoid(self.beta * (1.0 - softrank / K_minus_1))  # [G]
 
-        # Rank loss: softplus((log_soft_rank - log(r_target)) / γ)
-        log_target = math.log(max(self.rank_target, 1e-6))
-        L_id = F.softplus(
-            (log_soft_rank - log_target) / self.rank_gamma
-        ).mean()
-
-        return L_id
+        return S_id
 
     def _compute_rtm_loss(self, S, gallery_idx, nonmated_idx):
-        """RTM: non-mated probe의 높은 impostor score를 softmax-weighted로 억제"""
+        """
+        RTM Loss (Eq. 12):
+        L^RTM = (1/|N_K|) Σ_j w_j · max_i s(n_j, g_i)
+        w_j = exp(max_i s(n_j, g_i)) / Σ_l exp(max_i s(n_l, g_i))
+
+        높은 impostor score를 가진 non-mated probe에 집중하여 억제
+        """
         device = S.device
 
         if len(nonmated_idx) == 0:
@@ -222,10 +209,14 @@ class IDL_RTMLoss(nn.Module):
         # Non-mated probe → gallery similarities
         s_nm = S[nonmated_idx][:, gallery_idx]  # [N, G]
 
-        # Softmax attention weights (높은 score에 집중)
-        w = F.softmax(s_nm / self.rtm_temperature, dim=1)  # [N, G]
+        # max_i s(n_j, g_i) per non-mated probe
+        max_scores, _ = s_nm.max(dim=1)  # [N]
 
-        # Weighted similarity 합계의 평균
-        L_rtm = (w * s_nm).sum(dim=1).mean()
+        # Softmax weights (논문: temperature 없음)
+        w = torch.softmax(max_scores, dim=0)  # [N]
 
-        return L_rtm
+        # L^RTM = (1/|N_K|) Σ_j w_j · max_scores_j
+        N_K = len(nonmated_idx)
+        L_RTM = (w * max_scores).sum() / N_K
+
+        return L_RTM

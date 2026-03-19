@@ -43,8 +43,8 @@ Training:
   herding_batch_size: 32  # Batch size for feature extraction
   drift_threshold: 0.5  # Threshold for feature drift detection
 
-  epochs_per_experience: 5
-  iterations_per_epoch: 10
+  epochs_per_experience: 10
+  iterations_per_epoch: 5
   num_workers: 8
   learning_rate: 0.0001
   projection_learning_rate: 0.0005  # 5x backbone LR
@@ -64,22 +64,19 @@ Training:
 
   # ProxyAnchorLoss settings
   use_proxy_anchor: true
-  proxy_margin: 0.2        # Proxy Anchor margin delta
+  proxy_margin: 0.15        # Proxy Anchor margin delta
   proxy_alpha: 16          # Proxy Anchor scaling alpha
   proxy_lr_ratio: 100        # Proxy learning rate multiplier (10x backbone)
   proxy_lambda: 0.7        # Fixed weight (0.3 = 30% ProxyAnchor, 70% SupCon)
 
-  # IDL+RTM Loss (Open-set representation 최적화)
+  # IDL+RTM Loss (Su et al., "Open-Set Biometrics" — Eq. 7-13)
   use_idl_rtm: true
-  idl_alpha_det: 1.0          # Detection loss 내부 가중치
-  idl_beta_id: 1.0            # Identification loss 내부 가중치
-  idl_gamma_rtm: 0.5          # RTM loss 내부 가중치
-  idl_rtm_lambda: 0.3         # 전체 손실 내 IDL+RTM 가중치
+  idl_alpha_det: 6.0          # α: Detection sigmoid steepness (Eq. 7, Table 2)
+  idl_beta_id: 0.2            # β: Identification sigmoid steepness (Eq. 9, Table 2)
+  idl_gamma_rank: 6.0         # γ: Rank sigmoid steepness (Eq. 10, Table 2)
+  idl_rtm_weight: 4.0         # λ: L^RTM weight in L = L^IDL + λ·L^RTM (Eq. 13, Table 2)
+  idl_rtm_lambda: 0.3         # COCONUT 전체 손실 내 IDL+RTM 외부 가중치
   idl_rtm_warmup_users: 5     # warmup 기간 (사용자 수)
-  idl_n_quantiles: 5          # Detection threshold quantile 후보 수
-  idl_rank_temperature: 0.5   # soft rank 스케일링 (수치 안정성)
-  idl_rtm_temperature: 0.1    # RTM softmax temperature
-  idl_det_steepness: 10.0     # Detection sigmoid steepness
   idl_min_gallery_classes: 2  # 최소 gallery 클래스 수
   idl_gallery_fraction: 0.7   # gallery로 사용할 클래스 비율
 
@@ -110,8 +107,8 @@ Openset:
   tta_aggregation: 'mean'  # 'median' or 'mean'
 
   # Type-specific TTA repeat settings
-  tta_n_repeats_genuine: 3      # Genuine scores: 3 repeats (accuracy important)
-  tta_n_repeats_between: 3      # Between impostor: 3 repeats (balanced)
+  tta_n_repeats_genuine: 1      # Genuine scores: 3 repeats (accuracy important)
+  tta_n_repeats_between: 1      # Between impostor: 3 repeats (balanced)
   tta_repeat_aggregation: 'mean'  # Inter-repeat aggregation method
   tta_verbose: true  # TTA debugging output
 
