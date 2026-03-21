@@ -642,12 +642,13 @@ def main(args):
             if hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
                 training_history['trainer_openset_history'] = trainer.evaluation_history
 
-            # 체크포인트 저장
-            checkpoint_path = os.path.join(
-                results_dir,
-                f'checkpoint_exp_{exp_id + 1}.pth'
-            )
-            trainer.save_checkpoint(checkpoint_path)
+            # 체크포인트 저장 (10 experience마다 + 마지막)
+            if (exp_id + 1) % 10 == 0 or (exp_id + 1) == config_obj.training.num_experiences:
+                checkpoint_path = os.path.join(
+                    results_dir,
+                    f'checkpoint_exp_{exp_id + 1}.pth'
+                )
+                trainer.save_checkpoint(checkpoint_path)
 
         # 진행 상황 출력
         if (exp_id + 1) % 10 == 0:
