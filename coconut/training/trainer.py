@@ -324,12 +324,8 @@ class COCONUTTrainer:
         # Statistics
         self.experience_count = 0
 
-        # CuDNN 최적화
-        if torch.backends.cudnn.is_available():
-            torch.backends.cudnn.benchmark = True
-            torch.backends.cudnn.deterministic = False
-            if self.verbose:
-                print("[INIT] CuDNN benchmark enabled (speed priority)")
+        # CuDNN 설정: train_coconut.py의 재현성 설정을 유지
+        # (128x128 고정 크기에서는 benchmark=True의 속도 이점 없음)
 
         if self.verbose:
             if hasattr(config.model, 'use_pretrained') and config.model.use_pretrained:
@@ -579,7 +575,8 @@ class COCONUTTrainer:
             train_paths, train_labels, dev_paths, dev_labels = split_user_data(
                 image_paths, original_labels,
                 dev_ratio=self.openset_config.dev_ratio,
-                min_dev=1 if len(image_paths) <= 5 else 2
+                min_dev=1 if len(image_paths) <= 5 else 2,
+                seed=self.seed + user_id  # user별 고유 시드로 재현성 보장
             )
 
             # 저장
@@ -1057,8 +1054,8 @@ class COCONUTTrainer:
                                 if l not in self.registered_users]
 
         if len(unknown_filtered) > 1000:
-            np.random.seed(eval_seed + 1000)
-            unknown_filtered = np.random.choice(unknown_filtered, 1000, replace=False).tolist()
+            rng = np.random.RandomState(eval_seed + 1000)
+            unknown_filtered = rng.choice(unknown_filtered, 1000, replace=False).tolist()
 
         if unknown_filtered:
             if use_tta:
@@ -1089,9 +1086,8 @@ class COCONUTTrainer:
         negref_paths, _ = load_paths_labels_from_txt(_negref_source)
 
         if len(negref_paths) > 1000:
-            #  재현성: config seed 기반 샘플링
-            np.random.seed(eval_seed + 2000)  # deterministic offset
-            negref_paths = np.random.choice(negref_paths, 1000, replace=False).tolist()
+            rng = np.random.RandomState(eval_seed + 2000)
+            negref_paths = rng.choice(negref_paths, 1000, replace=False).tolist()
 
         if negref_paths:
             if use_tta:
