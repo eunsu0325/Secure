@@ -584,7 +584,8 @@ def extract_scores_impostor_negref_tta(
         return np.array([])
 
     if len(paths) > max_eval:
-        idx = np.random.choice(len(paths), max_eval, replace=False)
+        rng = np.random.RandomState(seed)
+        idx = rng.choice(len(paths), max_eval, replace=False)
         paths = [paths[i] for i in idx]
 
     set_seed(seed)
