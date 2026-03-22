@@ -128,7 +128,8 @@ def extract_scores_impostor_between(model, ncm, dev_paths: List[str], dev_labels
 @torch.no_grad()
 def extract_scores_impostor_unknown(model, ncm, txt_file: str, registered_users: Set[int],
                                    transform, device, max_eval: int = 3000,
-                                   channels: int = 1, use_projection: bool = False) -> np.ndarray:
+                                   channels: int = 1, use_projection: bool = False,
+                                   seed: int = 42) -> np.ndarray:
     """Extract impostor scores from unregistered users"""
     paths, labels = load_paths_labels_excluding(txt_file, registered_users)
 
@@ -136,7 +137,8 @@ def extract_scores_impostor_unknown(model, ncm, txt_file: str, registered_users:
         return np.array([])
 
     if len(paths) > max_eval:
-        idx = np.random.choice(len(paths), max_eval, replace=False)
+        rng = np.random.RandomState(seed)
+        idx = rng.choice(len(paths), max_eval, replace=False)
         paths = [paths[i] for i in idx]
 
     feats = extract_features(model, paths, transform, device,
@@ -159,7 +161,7 @@ def extract_scores_impostor_unknown(model, ncm, txt_file: str, registered_users:
 
 
 @torch.no_grad()
-def extract_scores_impostor_negref(model, ncm, negref_file: str, transform, device,
+def extract_scores_impostor_negref(model, ncm, negref_file: str, transform, device, seed: int = 42,
                                   max_eval: int = 5000, channels: int = 1,
                                   use_projection: bool = False) -> np.ndarray:
     """Extract impostor scores from negative reference data"""
@@ -172,7 +174,8 @@ def extract_scores_impostor_negref(model, ncm, negref_file: str, transform, devi
         return np.array([])
 
     if len(paths) > max_eval:
-        idx = np.random.choice(len(paths), max_eval, replace=False)
+        rng = np.random.RandomState(seed)
+        idx = rng.choice(len(paths), max_eval, replace=False)
         paths = [paths[i] for i in idx]
 
     feats = extract_features(model, paths, transform, device,
