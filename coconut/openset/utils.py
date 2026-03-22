@@ -33,10 +33,12 @@ def _open_with_channels(path: str, channels: int) -> Image.Image:
 
 
 def split_user_data(paths: List[str], labels: List[int],
-                   dev_ratio: float = 0.2, min_dev: int = 2) -> Tuple:
+                   dev_ratio: float = 0.2, min_dev: int = 2,
+                   seed: int = 42) -> Tuple:
     """Split user data into train/dev sets"""
+    rng = np.random.RandomState(seed)
     idx = np.arange(len(paths))
-    np.random.shuffle(idx)
+    rng.shuffle(idx)
     n_dev = max(min_dev, int(len(paths) * dev_ratio))
 
     dev_idx = idx[:n_dev]
@@ -84,7 +86,8 @@ def balance_impostor_scores(
     s_negref: Optional[np.ndarray] = None,
     ratio_config: Optional[dict] = None,
     total: Optional[int] = None,
-    verbose: bool = False
+    verbose: bool = False,
+    seed: int = 42
 ) -> np.ndarray:
     """
     Balance impostor scores from different sources
@@ -141,18 +144,19 @@ def balance_impostor_scores(
         counts[0] += diff
 
     # Sample from each source
+    rng = np.random.RandomState(seed)
     balanced = []
     for scores, count in zip(available, counts):
         if count > 0:
             if count <= len(scores):
-                sampled = np.random.choice(scores, count, replace=False)
+                sampled = rng.choice(scores, count, replace=False)
             else:
                 sampled = scores  # Use all available
             balanced.append(sampled)
 
     if balanced:
         result = np.concatenate(balanced)
-        np.random.shuffle(result)
+        rng.shuffle(result)
 
         if verbose:
             print(f"Balanced impostor scores: total={len(result)}")
