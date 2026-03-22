@@ -1,4 +1,4 @@
-# COCONUT Configuration
+# COCONUT Configuration 
 
 Dataset:
   # 등록 대상 사용자 파일 — 내부에서 90% train/NCM + 10% probe로 자동 분리됨
@@ -52,8 +52,8 @@ Training:
   scheduler_gamma: 0.8
   temperature: 0.07  # SupConLoss temperature
   test_interval: 1  # Evaluation and calibration frequency
-  checkpoint_path: /content/drive/MyDrive/coconut_update1
-  results_path: /content/drive/MyDrive/coconut_update1
+  checkpoint_path: /content/drive/MyDrive/coconut_update_4
+  results_path: /content/drive/MyDrive/coconut_update_4
   gpu_ids: "0"
   ncm_momentum: 1.0
   seed: 42
@@ -71,11 +71,11 @@ Training:
 
   # IDL+RTM Loss (Su et al., "Open-Set Biometrics" — Eq. 7-13)
   use_idl_rtm: true
-  idl_alpha_det: 6.0          # α: Detection sigmoid steepness (Eq. 7, Table 2)
-  idl_beta_id: 0.2            # β: Identification sigmoid steepness (Eq. 9, Table 2)
-  idl_gamma_rank: 6.0         # γ: Rank sigmoid steepness (Eq. 10, Table 2)
+  idl_alpha_det: 3.0          # α: Detection sigmoid steepness (Eq. 7, Table 2)
+  idl_beta_id: 0.35            # β: Identification sigmoid steepness (Eq. 9, Table 2)
+  idl_gamma_rank: 3.0         # γ: Rank sigmoid steepness (Eq. 10, Table 2)
   idl_rtm_weight: 4.0         # λ: L^RTM weight in L = L^IDL + λ·L^RTM (Eq. 13, Table 2)
-  idl_rtm_lambda: 0.3         # COCONUT 전체 손실 내 IDL+RTM 외부 가중치
+  idl_rtm_lambda: 0.6         # COCONUT 전체 손실 내 IDL+RTM 외부 가중치
   idl_rtm_warmup_users: 5     # warmup 기간 (사용자 수)
   idl_min_gallery_classes: 2  # 최소 gallery 클래스 수
   idl_gallery_fraction: 0.7   # gallery로 사용할 클래스 비율
@@ -90,7 +90,7 @@ Openset:
   threshold_max_delta: 0.05  # Maximum change limit (1.0→0.05: τ 급변 방지)
 
   # Initial values and warmup
-  warmup_users: 1           # Warmup period
+  warmup_users: 5           # Warmup period
   initial_tau: 0.3           # Initial threshold
 
   # Data split
@@ -111,4 +111,3 @@ Openset:
   tta_n_repeats_between: 1      # Between impostor: 3 repeats (balanced)
   tta_repeat_aggregation: 'mean'  # Inter-repeat aggregation method
   tta_verbose: true  # TTA debugging output
-
