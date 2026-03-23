@@ -23,20 +23,26 @@ class ReservoirSamplingBuffer:
         super().__init__()
         self.max_size = max_size
         self._buffer_weights = torch.zeros(0)
-        self.buffer = []  # (data, label) 튜플 리스트
+        self.buffer = []  # (data, label, logit) 튜플 리스트
 
-    def update_from_dataset(self, new_data: List, new_labels: List):
+    def update_from_dataset(self, new_data: List, new_labels: List,
+                            new_logits: Optional[List] = None):
         """
         새로운 데이터로 버퍼를 업데이트합니다.
 
         :param new_data: 새로운 데이터 리스트 (이미지 경로 또는 텐서)
         :param new_labels: 새로운 레이블 리스트
+        :param new_logits: 새로운 logit 리스트 (DER++ feature distillation용, Optional)
         """
         # 새 데이터에 random weight 할당 (0~1 사이의 값)
         new_weights = torch.rand(len(new_data))
 
-        # 데이터와 레이블을 튜플로 묶어서 저장
-        new_buffer = list(zip(new_data, new_labels))
+        # logits가 없으면 None으로 채움
+        if new_logits is None:
+            new_logits = [None] * len(new_data)
+
+        # 데이터, 레이블, logit을 튜플로 묶어서 저장
+        new_buffer = list(zip(new_data, new_labels, new_logits))
         combined_buffer = self.buffer + new_buffer
 
         # 기존 weights와 새 weights 결합
@@ -64,15 +70,15 @@ class ReservoirSamplingBuffer:
         self.buffer = self.buffer[: self.max_size]
         self._buffer_weights = self._buffer_weights[: self.max_size]
 
-    def sample(self, n: int) -> Tuple[List, List]:
+    def sample(self, n: int) -> Tuple[List, List, List]:
         """
         버퍼에서 n개의 샘플을 무작위로 선택합니다.
 
         :param n: 선택할 샘플 수
-        :return: (데이터 리스트, 레이블 리스트) 튜플
+        :return: (데이터 리스트, 레이블 리스트, logit 리스트) 튜플
         """
         if not self.buffer:
-            return [], []
+            return [], [], []
 
         # 요청된 수와 버퍼 크기 중 작은 값 선택
         n = min(n, len(self.buffer))
@@ -81,12 +87,14 @@ class ReservoirSamplingBuffer:
 
         sampled_data = []
         sampled_labels = []
+        sampled_logits = []
         for i in indices:
-            data, label = self.buffer[i]
+            data, label, logit = self.buffer[i]
             sampled_data.append(data)
             sampled_labels.append(label)
+            sampled_logits.append(logit)
 
-        return sampled_data, sampled_labels
+        return sampled_data, sampled_labels, sampled_logits
 
 
 class ClassBalancedBuffer:
@@ -152,15 +160,21 @@ class ClassBalancedBuffer:
             ]
         return lengths
 
-    def update_from_dataset(self, new_data: List, new_labels: List):
+    def update_from_dataset(self, new_data: List, new_labels: List,
+                            new_logits: Optional[List] = None):
         """
         새로운 데이터로 버퍼를 업데이트합니다.
 
         :param new_data: 새로운 데이터 리스트
         :param new_labels: 새로운 레이블 리스트
+        :param new_logits: 새로운 logit 리스트 (DER++ feature distillation용, Optional)
         """
         if len(new_data) == 0:
             return
+
+        # logits가 없으면 None으로 채움
+        if new_logits is None:
+            new_logits = [None] * len(new_data)
 
         # 클래스별로 데이터 인덱스 수집
         cl_idxs: Dict[int, List[int]] = defaultdict(list)
@@ -172,9 +186,10 @@ class ClassBalancedBuffer:
         # 클래스별로 데이터 분리
         cl_datasets = {}
         for c, c_idxs in cl_idxs.items():
-            # 해당 클래스의 데이터와 레이블 추출
+            # 해당 클래스의 데이터, 레이블, logit 추출
             cl_datasets[c] = ([new_data[i] for i in c_idxs],
-                             [new_labels[i] for i in c_idxs])
+                             [new_labels[i] for i in c_idxs],
+                             [new_logits[i] for i in c_idxs])
 
         # 새로 본 클래스 추가
         self.seen_classes.update(cl_datasets.keys())
@@ -187,32 +202,32 @@ class ClassBalancedBuffer:
             class_to_len[class_id] = ll
 
         # 각 클래스별로 버퍼 업데이트
-        for class_id, (data_c, labels_c) in cl_datasets.items():
+        for class_id, (data_c, labels_c, logits_c) in cl_datasets.items():
             ll = class_to_len[class_id]
             if class_id in self.buffer_groups:
                 # 기존 클래스: 버퍼 업데이트
                 old_buffer_c = self.buffer_groups[class_id]
-                old_buffer_c.update_from_dataset(data_c, labels_c)
+                old_buffer_c.update_from_dataset(data_c, labels_c, logits_c)
                 old_buffer_c.resize(ll)
             else:
                 # 새 클래스: 버퍼 생성
                 new_buffer = ReservoirSamplingBuffer(ll)
-                new_buffer.update_from_dataset(data_c, labels_c)
+                new_buffer.update_from_dataset(data_c, labels_c, logits_c)
                 self.buffer_groups[class_id] = new_buffer
 
         # 모든 버퍼의 크기 재조정 (새 클래스 추가로 인한 재분배)
         for class_id, class_buf in self.buffer_groups.items():
             self.buffer_groups[class_id].resize(class_to_len[class_id])
 
-    def sample(self, n: int) -> Tuple[List, List]:
+    def sample(self, n: int) -> Tuple[List, List, List]:
         """
         모든 클래스에서 균등하게 n개의 샘플을 선택합니다.
 
         :param n: 선택할 총 샘플 수
-        :return: (데이터 리스트, 레이블 리스트) 튜플
+        :return: (데이터 리스트, 레이블 리스트, logit 리스트) 튜플
         """
         if not self.buffer_groups:
-            return [], []
+            return [], [], []
 
         # 각 클래스에서 뽑을 샘플 수 계산
         samples_per_class = n // len(self.buffer_groups)
@@ -220,6 +235,7 @@ class ClassBalancedBuffer:
 
         all_data = []
         all_labels = []
+        all_logits = []
 
         for i, (class_id, buffer) in enumerate(self.buffer_groups.items()):
             n_samples = samples_per_class
@@ -227,30 +243,34 @@ class ClassBalancedBuffer:
             if i < remainder:
                 n_samples += 1
 
-            data, labels = buffer.sample(n_samples)
+            data, labels, logits = buffer.sample(n_samples)
             all_data.extend(data)
             all_labels.extend(labels)
+            all_logits.extend(logits)
 
         # 클래스 순서가 예측 가능하지 않도록 섞기
         if all_data:
             indices = torch.randperm(len(all_data)).tolist()
             shuffled_data = [all_data[i] for i in indices]
             shuffled_labels = [all_labels[i] for i in indices]
-            return shuffled_data, shuffled_labels
+            shuffled_logits = [all_logits[i] for i in indices]
+            return shuffled_data, shuffled_labels, shuffled_logits
 
-        return all_data, all_labels
+        return all_data, all_labels, all_logits
 
-    def get_all_data(self) -> Tuple[List, List]:
+    def get_all_data(self) -> Tuple[List, List, List]:
         """버퍼의 모든 데이터를 반환"""
         all_data = []
         all_labels = []
+        all_logits = []
 
         for buffer in self.buffer_groups.values():
-            for data, label in buffer.buffer:
+            for data, label, logit in buffer.buffer:
                 all_data.append(data)
                 all_labels.append(label)
+                all_logits.append(logit)
 
-        return all_data, all_labels
+        return all_data, all_labels, all_logits
 
     def __len__(self):
         """버퍼에 저장된 총 샘플 수를 반환합니다."""

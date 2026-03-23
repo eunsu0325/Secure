@@ -222,6 +222,14 @@ class COCONUTTrainer:
             self.idl_rtm_lambda = 0.0
             self.idl_rtm_warmup_users = 0
 
+        # DER++ (Dark Experience Replay) — 6144D feature distillation
+        self.der_alpha = getattr(config.training, 'der_alpha', 0.0)
+        self.der_batch_size = getattr(config.training, 'der_batch_size', 32)
+        self.der_warmup_users = getattr(config.training, 'der_warmup_users', 3)
+        if self.der_alpha > 0 and self.verbose:
+            print(f"[COCONUT] DER++ enabled: α={self.der_alpha}, "
+                  f"batch_size={self.der_batch_size}, warmup={self.der_warmup_users}")
+
         # [CORE] 핵심 수정: 옵티마이저 관리 개선
         self.base_lr = config.training.learning_rate
         self.proxy_lr_ratio = getattr(config.training, 'proxy_lr_ratio', 10) if self.use_proxy_anchor else 1
@@ -626,7 +634,7 @@ class COCONUTTrainer:
                         self.config.training.memory_batch_size,
                         len(self.memory_buffer)
                     )
-                    memory_paths, memory_labels = self.memory_buffer.sample(
+                    memory_paths, memory_labels, _ = self.memory_buffer.sample(
                         effective_memory_batch
                     )
 
@@ -752,6 +760,57 @@ class COCONUTTrainer:
                         else:
                             loss = loss_supcon
 
+                    # === DER++ Feature Distillation ===
+                    if self.der_alpha > 0 and len(self.memory_buffer) > 0:
+                        num_users_der = len(self.registered_users)
+                        if num_users_der >= self.der_warmup_users:
+                            # 재현성: DER 샘플링을 위한 결정적 시드 (메인 학습 RNG에 영향 주지 않음)
+                            _rng_state = torch.random.get_rng_state()
+                            der_seed = self.seed + self.experience_count * 10000 + epoch * 100 + iteration
+                            torch.manual_seed(der_seed)
+
+                            der_sample_size = min(self.der_batch_size, len(self.memory_buffer))
+                            der_paths, _, der_stored_feats = self.memory_buffer.sample(der_sample_size)
+                            torch.random.set_rng_state(_rng_state)  # RNG 복원
+
+                            # None이 아닌 유효한 feature만 필터링
+                            valid = [(p, f) for p, f in zip(der_paths, der_stored_feats)
+                                     if f is not None]
+
+                            if valid:
+                                der_images = []
+                                stored_tensors = []
+                                for path, feat in valid:
+                                    img = _open_with_channels(path, self.config.dataset.channels)
+                                    der_images.append(self.test_transform(img).unsqueeze(0))
+                                    stored_tensors.append(feat)
+
+                                der_batch = torch.cat(der_images, dim=0).to(self.device)
+                                stored_batch = torch.stack(stored_tensors).to(self.device)
+
+                                # eval mode: 저장 시점과 동일한 BatchNorm (running stats)
+                                # gradient는 여전히 흐름
+                                self.model.eval()
+                                current_feats = self.model.getFeatureCode(
+                                    der_batch, use_projection=False
+                                )
+                                current_feats = F.normalize(current_feats, dim=-1)
+                                self.model.train()
+
+                                der_loss = F.mse_loss(current_feats, stored_batch.detach())
+                                effective_alpha = self.der_alpha * min(
+                                    1.0, num_users_der / max(1, self.der_warmup_users)
+                                )
+                                loss = loss + effective_alpha * der_loss
+
+                                # 로깅용 저장
+                                if iteration == 0 and epoch == 0:
+                                    self._last_der_info = {
+                                        'loss': der_loss.item(),
+                                        'alpha_eff': effective_alpha,
+                                        'n_valid': len(valid)
+                                    }
+
                     loss_avg.update(loss.item(), batch_size)
 
                     loss.backward()
@@ -771,8 +830,22 @@ class COCONUTTrainer:
             # 에포크 진행률과 평균 손실은 항상 표시해 학습 상황을 바로 확인 가능하게 함
             print(f"  [에포크 {epoch+1}/{self.config.training.epochs_per_experience}] 평균 손실: {avg_loss:.4f}")
 
-        # 메모리 버퍼 업데이트
-        self.memory_buffer.update_from_dataset(train_paths, train_labels)
+        # 메모리 버퍼 업데이트 (DER++: 6144D feature도 함께 저장)
+        if self.der_alpha > 0:
+            self.model.eval()
+            stored_features = []
+            with torch.no_grad():
+                for path in train_paths:
+                    img = _open_with_channels(path, self.config.dataset.channels)
+                    img_tensor = self.test_transform(img).unsqueeze(0).to(self.device)
+                    feat = self.model.getFeatureCode(img_tensor, use_projection=False)
+                    feat = F.normalize(feat, dim=-1)
+                    stored_features.append(feat.squeeze(0).cpu())
+            self.model.train()
+        else:
+            stored_features = None
+
+        self.memory_buffer.update_from_dataset(train_paths, train_labels, stored_features)
         if self.verbose:
             print(f"Memory buffer size after update: {len(self.memory_buffer)}")
 
@@ -783,7 +856,7 @@ class COCONUTTrainer:
         self._analyze_cosine_distribution_epoch()
 
         # 디버깅: NCM과 버퍼 동기화 확인
-        all_paths, all_labels = self.memory_buffer.get_all_data()
+        all_paths, all_labels, _ = self.memory_buffer.get_all_data()
         buffer_classes = set(int(label) for label in all_labels)
         ncm_classes = set(self.ncm.class_means_dict.keys())
         missing = buffer_classes - ncm_classes
@@ -835,6 +908,9 @@ class COCONUTTrainer:
                     loss_line = f"  Loss: {first_loss:.4f} -> {last_loss:.4f} ({epochs}ep) | w_proxy={w_proxy:.2f}, w_supcon={w_supcon:.2f}"
                     if self.use_idl_rtm and w_idl_rtm > 0:
                         loss_line += f", w_idl_rtm={w_idl_rtm:.2f}"
+                    der_info = getattr(self, '_last_der_info', {})
+                    if der_info:
+                        loss_line += f", DER={der_info['loss']:.4f}(α={der_info['alpha_eff']:.2f})"
                     print(loss_line)
 
                     # IDL+RTM 손실 상세 (활성화 시)
@@ -1145,7 +1221,7 @@ class COCONUTTrainer:
         self.model.eval()
 
         # 메모리 버퍼에서 모든 데이터 가져오기
-        all_paths, all_labels = self.memory_buffer.get_all_data()
+        all_paths, all_labels, _ = self.memory_buffer.get_all_data()
 
         # 가짜 클래스 필터링
         real_paths = all_paths
@@ -1218,7 +1294,7 @@ class COCONUTTrainer:
         self.model.eval()
 
         # 메모리 버퍼에서 모든 데이터 가져오기
-        all_paths, all_labels = self.memory_buffer.get_all_data()
+        all_paths, all_labels, _ = self.memory_buffer.get_all_data()
         real_paths = all_paths
         real_labels = [int(l) if not isinstance(l, int) else l for l in all_labels]
 
@@ -1423,10 +1499,11 @@ class COCONUTTrainer:
 
         # memory_buffer 전체 데이터 저장 (학습 재개 시 복원용)
         try:
-            buf_paths, buf_labels = self.memory_buffer.get_all_data()
+            buf_paths, buf_labels, buf_logits = self.memory_buffer.get_all_data()
             checkpoint_dict['memory_buffer_data'] = {
                 'paths': buf_paths,
-                'labels': [int(l) for l in buf_labels]
+                'labels': [int(l) for l in buf_labels],
+                'logits': [l.cpu() if l is not None else None for l in buf_logits]
             }
         except Exception as e:
             print(f"Warning: Could not save memory buffer data: {e}")
@@ -1511,8 +1588,9 @@ class COCONUTTrainer:
             buf_data = checkpoint['memory_buffer_data']
             buf_paths = buf_data['paths']
             buf_labels = buf_data['labels']
+            buf_logits = buf_data.get('logits', None)  # 이전 체크포인트 호환
             if buf_paths:
-                self.memory_buffer.update_from_dataset(buf_paths, buf_labels)
+                self.memory_buffer.update_from_dataset(buf_paths, buf_labels, buf_logits)
                 if self.verbose:
                     print(f"[OK] Memory buffer restored ({len(buf_paths)} samples)")
 

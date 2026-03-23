@@ -80,6 +80,11 @@ Training:
   idl_min_gallery_classes: 2  # 최소 gallery 클래스 수
   idl_gallery_fraction: 0.7   # gallery로 사용할 클래스 비율
 
+  # DER++ (Dark Experience Replay) — 6144D feature distillation
+  der_alpha: 0.1            # Feature distillation 가중치 (0.0 = 비활성화)
+  der_batch_size: 32        # DER loss 계산용 샘플 수/iteration
+  der_warmup_users: 3       # Warmup 기간 (사용자 수)
+
 # Open-set recognition settings
 Openset:
   enabled: true

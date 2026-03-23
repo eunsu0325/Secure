@@ -87,6 +87,11 @@ class Training:
     idl_min_gallery_classes: int = 2    # 최소 gallery 클래스 수
     idl_gallery_fraction: float = 0.7   # gallery로 사용할 클래스 비율
 
+    # DER++ (Dark Experience Replay) settings — feature distillation
+    der_alpha: float = 0.0       # 0.0 = 비활성화. 권장 범위: 0.1~0.3
+    der_batch_size: int = 32     # DER loss 계산용 버퍼 샘플 수
+    der_warmup_users: int = 3    # DER 활성화 전 warmup 기간
+
 @dataclasses.dataclass
 class Openset:
     enabled: bool = True

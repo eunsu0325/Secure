@@ -66,7 +66,7 @@ def plot_tsne_from_memory(trainer,
     model.eval()
     device = trainer.device
 
-    paths, labels = trainer.memory_buffer.get_all_data()
+    paths, labels, _ = trainer.memory_buffer.get_all_data()
     if len(paths) == 0:
         if verbose:
             print("[t-SNE] Memory buffer is empty.")
