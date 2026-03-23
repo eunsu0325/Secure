@@ -122,10 +122,10 @@ class COCONUTTrainer:
         self.verbose = getattr(config.training, 'verbose', False)
 
         # 시드 설정
-        seed = getattr(config.training, 'seed', 42) if hasattr(config, 'training') else 42
-        set_seed(seed)
+        self.seed = getattr(config.training, 'seed', 42) if hasattr(config, 'training') else 42
+        set_seed(self.seed)
         if self.verbose:
-            print(f" Random seed set to {seed}")
+            print(f" Random seed set to {self.seed}")
 
         # 모델/NCM 디바이스 이동
         self.device = device
