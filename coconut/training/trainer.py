@@ -27,6 +27,7 @@ from coconut.classifiers.threshold import ThresholdCalibrator
 try:
     from coconut.openset import (
         split_user_data,
+        extract_features,
         extract_scores_genuine,
         extract_scores_impostor_between,
         extract_scores_impostor_unknown,
@@ -46,6 +47,7 @@ try:
 except ImportError:
     from coconut.openset import (
         split_user_data,
+        extract_features,
         extract_scores_genuine,
         extract_scores_impostor_between,
         extract_scores_impostor_unknown,
@@ -918,16 +920,16 @@ class COCONUTTrainer:
                     if self.use_idl_rtm and not idl_info.get('skipped', True):
                         print(f"  IDL+RTM: L_IDL={idl_info['L_IDL']:.4f}, L_RTM={idl_info['L_RTM']:.4f} | S_det={idl_info['S_det_mean']:.4f}, S_id={idl_info['S_id_mean']:.4f} | G={idl_info['n_gallery']}, NM={idl_info['n_nonmated']}")
 
-                    # Line 3: Threshold + open-set metrics (한국어 설명)
+                    # Line 3: Su et al. FNIR@FPIR 지표
                     tau = self.ncm.tau_s
-                    achieved_fpir = metrics.get('FPIR_in', 0)
+                    fnir1 = metrics.get('FNIR@1%FPIR', 0)
+                    tar1 = metrics.get('TAR@1%FPIR', 0)
                     rank1 = metrics.get('Rank1', 0)
-                    fpir_in = metrics.get('FPIR_in', 0)
-                    trr = metrics.get('TRR_unknown', 0)
-                    print(f"  tau={tau:.4f} (FPIR={achieved_fpir*100:.1f}%) | "
-                          f"Rank-1={rank1:.3f} (최고유사도 사용자가 정답인 비율) | "
-                          f"FPIR_in={fpir_in:.3f} (미등록자를 등록자로 잘못 수락한 비율) | "
-                          f"TRR={trr:.3f} (미등록자를 정상 거부한 비율)")
+                    det_fail = metrics.get('det_fail@1%', 0)
+                    id_fail = metrics.get('id_fail@1%', 0)
+                    print(f"  tau={tau:.4f} | Rank-1={rank1:.3f} | "
+                          f"FNIR@1%FPIR={fnir1:.3f} (TAR={tar1:.3f}) | "
+                          f"Det실패={det_fail:.3f}, Id실패={id_fail:.3f}")
 
             else:
                 print(f"  [WARN] Warmup phase: {len(self.registered_users)}/{self.openset_config.warmup_users}")
@@ -1040,124 +1042,179 @@ class COCONUTTrainer:
 
     @torch.no_grad()
     def _evaluate_openset(self):
-        """오픈셋 평가 (TTA 지원)"""
+        """
+        Su et al. FNIR@FPIR 프로토콜에 따른 오픈셋 평가
 
-        #  재현성: 평가 시 시드 재설정
+        Gallery: NCM의 class_means_dict (등록된 사용자 프로토타입)
+        Mated Probe: eval_probe_file (test_left.txt)에서 등록된 사용자의 테스트 샘플
+        Non-mated Probe: unknown_test_file에서 미등록 사용자 샘플
+        """
         eval_seed = getattr(self.config.training, 'seed', 42)
         set_seed(eval_seed)
-
-        use_tta = self.use_tta and TTA_FUNCTIONS_AVAILABLE
-        img_size = self.config.dataset.height
         channels = self.config.dataset.channels
         use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
 
+        self.model.eval()
+
         if self.verbose:
-            if use_tta:
-                print(f"\n Open-set Evaluation with TTA (n={self.openset_config.tta_n_views}):")
-            else:
-                print("\n Open-set Evaluation (Single View):")
+            print("\n [Su et al.] Open-set Evaluation (FNIR@FPIR protocol):")
 
-        # 변수 초기화
-        TAR = FRR = 0.0
-        MisID_rate = FNIR = 0.0
-        TRR_u = FAR_u = 0.0
-        TRR_n = FAR_n = None
+        # ========================================
+        # Step 1: Mated Probe 로드 (eval_probe_file 사용)
+        # ========================================
+        eval_probe_file = getattr(self.config.dataset, 'eval_probe_file', None)
 
-        # 1. Known-Probe (TAR/FRR)
-        all_dev_paths = []
-        all_dev_labels = []
-        for uid, (paths, labels) in self.probe_data.items():
-            all_dev_paths.extend(paths)
-            all_dev_labels.extend([uid] * len(paths))
+        if eval_probe_file and str(eval_probe_file) != 'None':
+            all_test_paths, all_test_labels = load_paths_labels_from_txt(str(eval_probe_file))
 
-        if all_dev_paths:
-            if use_tta:
-                preds, details = predict_batch_tta(
-                    self.model, self.ncm,
-                    all_dev_paths, self.test_transform, self.device,
-                    n_views=self.openset_config.tta_n_views,
-                    include_original=self.openset_config.tta_include_original,
-                    agree_k=self.openset_config.tta_agree_k,
-                    aug_strength=self.openset_config.tta_augmentation_strength,
-                    return_details=True,
-                    img_size=img_size,
-                    channels=channels,
-                    seed=eval_seed + 5000,  #  재현성: seed 전달
-                    use_projection=use_projection
-                )
+            # 등록된 사용자에 해당하는 샘플만 필터링 = mated probe
+            mated_paths = []
+            mated_labels = []
+            for path, label in zip(all_test_paths, all_test_labels):
+                if label in self.registered_users:
+                    mated_paths.append(path)
+                    mated_labels.append(label)
+        else:
+            # fallback: 기존 probe_data 사용 (비권장)
+            print("  [WARN] eval_probe_file not set. Falling back to probe_data (1~2 samples/user)")
+            mated_paths = []
+            mated_labels = []
+            for uid, (paths, labels) in self.probe_data.items():
+                mated_paths.extend(paths)
+                mated_labels.extend([uid] * len(paths))
 
-                # TTA 통계 출력
-                if details:
-                    reject_reasons = [d.get('reject_reason') for d in details if d.get('reject_reason')]
-                    if reject_reasons and self.verbose:
-                        from collections import Counter
-                        reason_counts = Counter(reject_reasons)
-                        print(f"   TTA Reject reasons: gate={reason_counts.get('gate', 0)}, "
-                              f"class={reason_counts.get('class', 0)}, both={reason_counts.get('both', 0)}")
-            else:
-                preds = predict_batch(
-                    self.model, self.ncm,
-                    all_dev_paths, self.test_transform, self.device,
-                    channels=channels,
-                    use_projection=use_projection
-                )
-
-            n = max(1, len(preds))
-            correct  = sum(1 for p, l in zip(preds, all_dev_labels) if p == l)
-            rejected = sum(1 for p in preds if p == -1)
-            misid    = sum(1 for p, l in zip(preds, all_dev_labels) if p != l and p != -1)
-
-            TAR          = correct  / n
-            FRR          = rejected / n
-            MisID_rate   = misid    / n
-            FNIR         = 1.0 - TAR
-
-        # 2. Unknown FPIR_in — unknown_test_file 고정 파일 로드 (매 experience 동일한 pool)
+        # ========================================
+        # Step 2: Non-mated Probe 로드 (unknown_test_file 사용)
+        # ========================================
         unknown_test_file = getattr(self.config.dataset, 'unknown_test_file', None)
 
         if unknown_test_file and str(unknown_test_file) != 'None':
-            # unknown_test_file: enroll_file 미등록 ID 뒤 50% 권장
-            unknown_filtered_paths, _ = load_paths_labels_from_txt(str(unknown_test_file))
-            unknown_filtered = unknown_filtered_paths
-            if self.verbose:
-                print(f"   Unknown Test: {len(unknown_filtered)} samples from {unknown_test_file}")
+            nonmated_paths, _ = load_paths_labels_from_txt(str(unknown_test_file))
         else:
-            print("  [WARN] unknown_test_file not set. Using enroll_file fallback (non-fixed pool).")
-            unknown_paths, unknown_labels = load_paths_labels_from_txt(
-                str(self.config.dataset.enroll_file)
-            )
-            unknown_filtered = [p for p, l in zip(unknown_paths, unknown_labels)
-                                if l not in self.registered_users]
+            print("  [WARN] unknown_test_file not set. Using enroll_file fallback.")
+            enroll_paths, enroll_labels = load_paths_labels_from_txt(str(self.config.dataset.enroll_file))
+            nonmated_paths = [p for p, l in zip(enroll_paths, enroll_labels) if l not in self.registered_users]
 
-        if len(unknown_filtered) > 1000:
+        if len(nonmated_paths) > 1000:
             rng = np.random.RandomState(eval_seed + 1000)
-            unknown_filtered = rng.choice(unknown_filtered, 1000, replace=False).tolist()
+            nonmated_paths = rng.choice(nonmated_paths, 1000, replace=False).tolist()
 
-        if unknown_filtered:
-            if use_tta:
-                preds_unk = predict_batch_tta(
-                    self.model, self.ncm,
-                    unknown_filtered, self.test_transform, self.device,
-                    n_views=self.openset_config.tta_n_views,
-                    include_original=self.openset_config.tta_include_original,
-                    agree_k=self.openset_config.tta_agree_k,
-                    aug_strength=self.openset_config.tta_augmentation_strength,
-                    img_size=img_size,
-                    channels=channels,
-                    seed=eval_seed + 3000,  #  재현성: seed 전달
-                    use_projection=use_projection
-                )
+        # ========================================
+        # Step 3: Feature 추출
+        # ========================================
+        mated_feats = extract_features(
+            self.model, mated_paths, self.test_transform, self.device,
+            batch_size=64, channels=channels, use_projection=use_projection
+        )
+
+        nonmated_feats = extract_features(
+            self.model, nonmated_paths, self.test_transform, self.device,
+            batch_size=64, channels=channels, use_projection=use_projection
+        )
+
+        # ========================================
+        # Step 4: NCM 스코어 계산
+        # ========================================
+        # 등록된 클래스 인덱스 마스크 (미등록 인덱스의 0점 제외용)
+        registered_ids = sorted(self.ncm.class_means_dict.keys())
+
+        # 4a. Non-mated probe → max score per probe (FPIR 임계치 결정용)
+        nonmated_max_scores = np.array([])
+        if len(nonmated_feats) > 0:
+            nonmated_tensor = torch.from_numpy(nonmated_feats).to(self.device)
+            nonmated_ncm_scores = self.ncm.forward(nonmated_tensor)  # (N, C)
+            if nonmated_ncm_scores.numel() > 0:
+                # 등록된 클래스만 고려
+                registered_scores = nonmated_ncm_scores[:, registered_ids]
+                nonmated_max_scores = registered_scores.max(dim=1).values.cpu().numpy()
+
+        # 4b. Mated probe → genuine score & rank-1 prediction
+        mated_genuine_scores = []
+        mated_rank1_correct = []
+        mated_max_scores = []
+
+        if len(mated_feats) > 0:
+            mated_tensor = torch.from_numpy(mated_feats).to(self.device)
+            mated_ncm_scores = self.ncm.forward(mated_tensor)  # (N, C)
+
+            # 등록된 클래스만의 스코어
+            mated_registered_scores = mated_ncm_scores[:, registered_ids]
+            # registered_ids 내에서의 인덱스 → 실제 class_id 매핑
+            id_to_reg_idx = {cid: idx for idx, cid in enumerate(registered_ids)}
+
+            for i in range(len(mated_labels)):
+                true_id = mated_labels[i]
+                scores_reg = mated_registered_scores[i]  # (num_registered,)
+
+                # Genuine score: 정답 클래스와의 유사도
+                if true_id in id_to_reg_idx:
+                    genuine_score = scores_reg[id_to_reg_idx[true_id]].item()
+                else:
+                    genuine_score = -1.0
+
+                # Max score & Rank-1 (등록된 클래스 내에서)
+                max_score = scores_reg.max().item()
+                pred_reg_idx = scores_reg.argmax().item()
+                pred_id = registered_ids[pred_reg_idx]
+
+                mated_genuine_scores.append(genuine_score)
+                mated_max_scores.append(max_score)
+                mated_rank1_correct.append(pred_id == true_id)
+
+        mated_genuine_scores = np.array(mated_genuine_scores)
+        mated_max_scores_arr = np.array(mated_max_scores)
+        mated_rank1_correct = np.array(mated_rank1_correct)
+
+        # ========================================
+        # Step 5: FNIR@FPIR 계산 (Su et al. 정의)
+        # ========================================
+        target_fpirs = [0.01, 0.05, 0.10]
+        results = {}
+
+        for target_fpir in target_fpirs:
+            if len(nonmated_max_scores) > 0:
+                # τ = non-mated max score 분포의 (1 - target_fpir) quantile
+                tau = np.quantile(nonmated_max_scores, 1 - target_fpir)
+                achieved_fpir = np.mean(nonmated_max_scores >= tau)
             else:
-                preds_unk = predict_batch(
-                    self.model, self.ncm,
-                    unknown_filtered, self.test_transform, self.device,
-                    channels=channels,
-                    use_projection=use_projection
-                )
-            TRR_u = sum(1 for p in preds_unk if p == -1) / len(preds_unk)
-            FAR_u = 1 - TRR_u
+                tau = self.ncm.tau_s if self.ncm.tau_s else 0.5
+                achieved_fpir = 0.0
 
-        # 3. NegRef FPIR_xdom — xdomain_file (크로스도메인 평가 전용, 학습 사용 안 함)
+            if len(mated_genuine_scores) > 0:
+                # FN 조건 (논문 정의): Detection 실패 OR Identification 실패
+                detection_fail = mated_max_scores_arr < tau
+                identification_fail = ~mated_rank1_correct
+                is_fn = detection_fail | identification_fail
+
+                fnir = np.mean(is_fn)
+                tar = 1.0 - fnir
+
+                # Detection/Identification 실패 분해 (분석용)
+                det_only = np.mean(detection_fail & ~identification_fail)
+                id_only = np.mean(~detection_fail & identification_fail)
+                both = np.mean(detection_fail & identification_fail)
+            else:
+                fnir = 1.0
+                tar = 0.0
+                det_only = id_only = both = 0.0
+
+            fpir_key = f"{int(target_fpir*100):d}"
+            results[f'FNIR@{fpir_key}%FPIR'] = fnir
+            results[f'TAR@{fpir_key}%FPIR'] = tar
+            results[f'tau@{fpir_key}%FPIR'] = tau
+            results[f'achieved_FPIR@{fpir_key}%'] = achieved_fpir
+            results[f'det_fail@{fpir_key}%'] = det_only
+            results[f'id_fail@{fpir_key}%'] = id_only
+            results[f'both_fail@{fpir_key}%'] = both
+
+        # ========================================
+        # Step 6: Closed-set Rank-1 + xdomain FPIR
+        # ========================================
+        rank1 = np.mean(mated_rank1_correct) if len(mated_rank1_correct) > 0 else 0.0
+        results['Rank1'] = rank1
+
+        # FPIR_xdom (크로스도메인)
+        TRR_n = FAR_n = None
         _negref_source = str(self.config.dataset.xdomain_file)
         negref_paths, _ = load_paths_labels_from_txt(_negref_source)
 
@@ -1166,51 +1223,63 @@ class COCONUTTrainer:
             negref_paths = rng.choice(negref_paths, 1000, replace=False).tolist()
 
         if negref_paths:
-            if use_tta:
-                preds_neg = predict_batch_tta(
-                    self.model, self.ncm,
-                    negref_paths, self.test_transform, self.device,
-                    n_views=self.openset_config.tta_n_views,
-                    include_original=self.openset_config.tta_include_original,
-                    agree_k=self.openset_config.tta_agree_k,
-                    aug_strength=self.openset_config.tta_augmentation_strength,
-                    img_size=img_size,
-                    channels=channels,
-                    seed=eval_seed + 4000,  #  재현성: seed 전달
-                    use_projection=use_projection
-                )
-            else:
-                preds_neg = predict_batch(
-                    self.model, self.ncm,
-                    negref_paths, self.test_transform, self.device,
-                    channels=channels,
-                    use_projection=use_projection
-                )
+            preds_neg = predict_batch(
+                self.model, self.ncm, negref_paths, self.test_transform, self.device,
+                channels=channels, use_projection=use_projection
+            )
             TRR_n = sum(1 for p in preds_neg if p == -1) / len(preds_neg)
             FAR_n = 1 - TRR_n
 
-        # 결과 출력
-        if self.verbose:
-            print(f"   Known-Probe: Rank-1={TAR:.3f}, FNIR={FNIR:.3f} (FRR={FRR:.3f}, MisID={MisID_rate:.3f})")
-            print(f"   Unknown: TRR={TRR_u:.3f}, FPIR_in={FAR_u:.3f}")
-            if TRR_n is not None:
-                print(f"   NegRef: TRR={TRR_n:.3f}, FPIR_xdom={FAR_n:.3f}")
-            print(f"   Threshold: τ_s={self.ncm.tau_s:.4f}")
-            print(f"   Mode: FPIR Target ({self.openset_config.target_far*100:.1f}%)")
-            print(f"   Score: Max")
-            if use_tta:
-                print(f"   [TARGET] TTA: {self.openset_config.tta_n_views} views, agree_k={self.openset_config.tta_agree_k}")
+        results['TRR_negref'] = TRR_n
+        results['FPIR_xdom'] = FAR_n
 
-        return {
-            'Rank1': TAR, 'FNIR': FNIR,
-            'FRR': FRR, 'MisID': MisID_rate,
-            'TRR_unknown': TRR_u, 'FPIR_in': FAR_u,
-            'TRR_negref': TRR_n, 'FPIR_xdom': FAR_n,
-            'mode': self.openset_config.threshold_mode,
-            'score_type': 'max',
-            'tta_enabled': use_tta,
-            'tta_views': self.openset_config.tta_n_views if use_tta else 1
-        }
+        # ========================================
+        # Step 7: DET curve용 스코어 캐시
+        # ========================================
+        self._last_genuine_scores = mated_genuine_scores.copy() if len(mated_genuine_scores) > 0 else np.array([])
+        self._last_impostor_scores = nonmated_max_scores.copy() if len(nonmated_max_scores) > 0 else np.array([])
+
+        # τ_s 참고값 저장
+        results['tau_s_current'] = self.ncm.tau_s
+
+        # ========================================
+        # Step 8: 결과 출력
+        # ========================================
+        if self.verbose:
+            print(f"   Gallery: {self.ncm.get_num_classes()} users")
+            print(f"   Mated probes: {len(mated_paths)} samples")
+            print(f"   Non-mated probes: {len(nonmated_paths)} samples")
+            print(f"   Rank-1 (closed-set): {rank1:.4f}")
+            for fpir_pct in [1, 5, 10]:
+                fnir_v = results[f'FNIR@{fpir_pct}%FPIR']
+                tar_v = results[f'TAR@{fpir_pct}%FPIR']
+                tau_v = results[f'tau@{fpir_pct}%FPIR']
+                det_v = results[f'det_fail@{fpir_pct}%']
+                idf_v = results[f'id_fail@{fpir_pct}%']
+                both_v = results[f'both_fail@{fpir_pct}%']
+                print(f"   FNIR@{fpir_pct}%FPIR = {fnir_v:.4f} (TAR={tar_v:.4f}, τ={tau_v:.4f})")
+                print(f"     └ Det fail: {det_v:.4f}, Id fail: {idf_v:.4f}, Both: {both_v:.4f}")
+            if TRR_n is not None:
+                print(f"   FPIR_xdom: {FAR_n:.4f}")
+            print(f"   Threshold (calibrated): τ_s={self.ncm.tau_s:.4f}")
+
+        # Compact 출력
+        if not self.verbose:
+            fnir1 = results.get('FNIR@1%FPIR', 0)
+            tar1 = results.get('TAR@1%FPIR', 0)
+            print(f"  [Eval] Rank-1={rank1:.3f} | FNIR@1%FPIR={fnir1:.3f} (TAR={tar1:.3f}) | "
+                  f"mated={len(mated_paths)}, nonmated={len(nonmated_paths)}")
+
+        # 하위 호환: 기존 키도 포함
+        results['FNIR'] = results.get('FNIR@1%FPIR', 0)
+        results['FPIR_in'] = results.get('achieved_FPIR@1%', 0)
+        results['FRR'] = results.get('det_fail@1%', 0)
+        results['MisID'] = results.get('id_fail@1%', 0)
+        results['TRR_unknown'] = 1.0 - results.get('achieved_FPIR@1%', 0)
+        results['mode'] = 'fnir_at_fpir'
+        results['score_type'] = 'max'
+
+        return results
 
     @torch.no_grad()
     def _update_ncm(self):
@@ -1609,7 +1678,7 @@ class COCONUTTrainer:
     def save_eval_curve(self, path: str):
         """
         evaluation_history를 flat CSV로 저장 (논문 Figure용)
-        컬럼: experience, num_users, tau_s, Rank1, FNIR, FRR, MisID, FPIR_in, FPIR_xdom
+        Su et al. FNIR@FPIR 프로토콜 기준 지표 포함
         """
         if not self.evaluation_history:
             print("WARNING: evaluation_history is empty. Nothing to save.")
@@ -1620,8 +1689,11 @@ class COCONUTTrainer:
 
         fieldnames = [
             'experience', 'num_users', 'tau_s',
-            'Rank1', 'FNIR', 'FRR', 'MisID',
-            'FPIR_in', 'FPIR_xdom',
+            'Rank1',
+            'FNIR@1%FPIR', 'FNIR@5%FPIR', 'FNIR@10%FPIR',
+            'TAR@1%FPIR', 'TAR@5%FPIR', 'TAR@10%FPIR',
+            'det_fail@1%', 'id_fail@1%', 'both_fail@1%',
+            'FPIR_xdom',
             'BWT', 'mean_forgetting'
         ]
 
@@ -1637,11 +1709,16 @@ class COCONUTTrainer:
                     'num_users':       entry.get('num_users', ''),
                     'tau_s':           f"{entry.get('tau_s', 0):.6f}",
                     'Rank1':           f"{m.get('Rank1', 0):.6f}",
-                    'FNIR':            f"{m.get('FNIR', 0):.6f}",
-                    'FRR':             f"{m.get('FRR', 0):.6f}",
-                    'MisID':           f"{m.get('MisID', 0):.6f}",
-                    'FPIR_in':         f"{m.get('FPIR_in', 0):.6f}",
-                    'FPIR_xdom':       f"{m.get('FPIR_xdom', '') if m.get('FPIR_xdom') is not None else ''}",
+                    'FNIR@1%FPIR':     f"{m.get('FNIR@1%FPIR', 0):.6f}",
+                    'FNIR@5%FPIR':     f"{m.get('FNIR@5%FPIR', 0):.6f}",
+                    'FNIR@10%FPIR':    f"{m.get('FNIR@10%FPIR', 0):.6f}",
+                    'TAR@1%FPIR':      f"{m.get('TAR@1%FPIR', 0):.6f}",
+                    'TAR@5%FPIR':      f"{m.get('TAR@5%FPIR', 0):.6f}",
+                    'TAR@10%FPIR':     f"{m.get('TAR@10%FPIR', 0):.6f}",
+                    'det_fail@1%':     f"{m.get('det_fail@1%', 0):.6f}",
+                    'id_fail@1%':      f"{m.get('id_fail@1%', 0):.6f}",
+                    'both_fail@1%':    f"{m.get('both_fail@1%', 0):.6f}",
+                    'FPIR_xdom':       f"{m.get('FPIR_xdom', '')}" if m.get('FPIR_xdom') is not None else '',
                     'BWT':             f"{bwt_val:.6f}" if bwt_val is not None else '',
                     'mean_forgetting': f"{fgt_val:.6f}" if fgt_val is not None else '',
                 }
@@ -1652,8 +1729,8 @@ class COCONUTTrainer:
 
     def save_eval_curve_plot(self, path: str):
         """
-        eval_curve.csv 데이터를 바탕으로 Performance vs Users 그래프 PNG 생성.
-        서브플롯 3개: (1) TAR/FNIR vs Users  (2) FPIR vs Users  (3) τ vs Users
+        Su et al. FNIR@FPIR 프로토콜 기준 Performance vs Users 그래프 PNG 생성.
+        서브플롯: (1) Rank-1 & FNIR@1%FPIR  (2) FNIR 분해  (3) τ@1%FPIR  (4) BWT/Forgetting
         """
         if not self.evaluation_history:
             print("WARNING: evaluation_history is empty. Cannot plot.")
@@ -1671,51 +1748,59 @@ class COCONUTTrainer:
 
         num_users_list = [e['num_users'] for e in self.evaluation_history]
         tau_list       = [e.get('tau_s', 0) for e in self.evaluation_history]
-        tar_list   = [e['metrics'].get('Rank1', 0)   for e in self.evaluation_history]
-        fnir_list  = [e['metrics'].get('FNIR', 0)    for e in self.evaluation_history]
-        fpir_list  = [e['metrics'].get('FPIR_in', 0) for e in self.evaluation_history]
-        fpirx_list = [e['metrics'].get('FPIR_xdom')  for e in self.evaluation_history]
-        bwt_list   = [e.get('bwt') for e in self.evaluation_history]
-        fgt_list   = [e.get('mean_forgetting') for e in self.evaluation_history]
+
+        # Su et al. 지표
+        rank1_list = [e['metrics'].get('Rank1', 0) for e in self.evaluation_history]
+        fnir1_list = [e['metrics'].get('FNIR@1%FPIR', 0) for e in self.evaluation_history]
+        tar1_list  = [e['metrics'].get('TAR@1%FPIR', 0) for e in self.evaluation_history]
+        tau1_list  = [e['metrics'].get('tau@1%FPIR', 0) for e in self.evaluation_history]
+
+        # FNIR 분해
+        det_list  = [e['metrics'].get('det_fail@1%', 0) for e in self.evaluation_history]
+        id_list   = [e['metrics'].get('id_fail@1%', 0) for e in self.evaluation_history]
+        both_list = [e['metrics'].get('both_fail@1%', 0) for e in self.evaluation_history]
+
+        bwt_list = [e.get('bwt') for e in self.evaluation_history]
+        fgt_list = [e.get('mean_forgetting') for e in self.evaluation_history]
 
         has_bwt = any(v is not None for v in bwt_list)
         n_cols = 4 if has_bwt else 3
 
         fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 5))
-        fig.suptitle('Performance vs Registered Users', fontsize=14, fontweight='bold')
+        fig.suptitle('Su et al. FNIR@FPIR — Performance vs Registered Users', fontsize=13, fontweight='bold')
 
-        # 서브플롯 1: TAR & FNIR
+        # 서브플롯 1: Rank-1 & FNIR@1%FPIR
         ax = axes[0]
-        ax.plot(num_users_list, tar_list,  'b-o', markersize=4, label='TAR (Rank-1)')
-        ax.plot(num_users_list, fnir_list, 'r-s', markersize=4, label='FNIR')
+        ax.plot(num_users_list, rank1_list, 'b-o', markersize=4, label='Rank-1')
+        ax.plot(num_users_list, fnir1_list, 'r-s', markersize=4, label='FNIR@1%FPIR')
+        ax.plot(num_users_list, tar1_list,  'g--^', markersize=3, alpha=0.7, label='TAR@1%FPIR')
         ax.set_xlabel('Registered Users')
         ax.set_ylabel('Rate')
-        ax.set_title('TAR & FNIR vs Users')
+        ax.set_title('Rank-1 & FNIR@1%FPIR')
         ax.set_ylim(0, 1.05)
-        ax.legend()
+        ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
 
-        # 서브플롯 2: FPIR
+        # 서브플롯 2: FNIR 분해 (Det fail, Id fail, Both)
         ax = axes[1]
-        ax.plot(num_users_list, fpir_list, 'g-^', markersize=4, label='FPIR_in')
-        has_xdom = any(v is not None for v in fpirx_list)
-        if has_xdom:
-            xdom_vals = [v if v is not None else float('nan') for v in fpirx_list]
-            ax.plot(num_users_list, xdom_vals, 'm-v', markersize=4, label='FPIR_xdom')
+        ax.plot(num_users_list, det_list,  'c-o', markersize=4, label='Det fail only')
+        ax.plot(num_users_list, id_list,   'm-s', markersize=4, label='Id fail only')
+        ax.plot(num_users_list, both_list, 'k-^', markersize=4, label='Both fail')
         ax.set_xlabel('Registered Users')
-        ax.set_ylabel('FPIR')
-        ax.set_title('FPIR vs Users')
-        ax.set_ylim(0, 1.05)
-        ax.legend()
+        ax.set_ylabel('Rate')
+        ax.set_title('FNIR Decomposition @1%FPIR')
+        ax.set_ylim(0, max(0.5, max(max(det_list), max(id_list), max(both_list)) * 1.2) if det_list else 0.5)
+        ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
 
-        # 서브플롯 3: τ
+        # 서브플롯 3: τ@1%FPIR vs calibrated τ_s
         ax = axes[2]
-        ax.plot(num_users_list, tau_list, 'k-o', markersize=4, label='τ_s')
+        ax.plot(num_users_list, tau1_list, 'r-o', markersize=4, label='τ@1%FPIR')
+        ax.plot(num_users_list, tau_list,  'k--s', markersize=3, alpha=0.7, label='τ_s (calibrated)')
         ax.set_xlabel('Registered Users')
         ax.set_ylabel('Threshold τ')
         ax.set_title('Threshold τ vs Users')
-        ax.legend()
+        ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
 
         # 서브플롯 4: BWT & Forgetting (데이터 있을 때만)
@@ -1732,7 +1817,7 @@ class COCONUTTrainer:
             ax.set_xlabel('Registered Users')
             ax.set_ylabel('BWT / Forgetting')
             ax.set_title('BWT & Forgetting vs Users')
-            ax.legend()
+            ax.legend(fontsize=8)
             ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
