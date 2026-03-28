@@ -1236,7 +1236,8 @@ class COCONUTTrainer:
         # ========================================
         # Step 7: DET curve용 스코어 캐시
         # ========================================
-        self._last_genuine_scores = mated_genuine_scores.copy() if len(mated_genuine_scores) > 0 else np.array([])
+        # DET curve용: detection 실패 판단에 max score 사용 (genuine score 아님)
+        self._last_genuine_scores = mated_max_scores_arr.copy() if len(mated_max_scores_arr) > 0 else np.array([])
         self._last_impostor_scores = nonmated_max_scores.copy() if len(nonmated_max_scores) > 0 else np.array([])
 
         # τ_s 참고값 저장
