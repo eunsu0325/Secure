@@ -116,3 +116,7 @@ Openset:
   tta_n_repeats_between: 1      # Between impostor: 3 repeats (balanced)
   tta_repeat_aggregation: 'mean'  # Inter-repeat aggregation method
   tta_verbose: true  # TTA debugging output
+
+  # Score mode (Method 1: Shared Diagonal Mahalanobis)
+  score_mode: 'mahalanobis'    # 'cosine' (baseline) | 'mahalanobis' (shared diagonal)
+  var_reg_alpha: 0.0001        # variance regularization
