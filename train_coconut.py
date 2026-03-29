@@ -383,7 +383,13 @@ def main(args):
     model = model.to(device)
 
     # NCM Classifier
-    ncm_classifier = NCMClassifier(normalize=True).to(device)
+    ncm_score_mode = getattr(config_obj.openset, 'score_mode', 'cosine')
+    ncm_var_reg_alpha = getattr(config_obj.openset, 'var_reg_alpha', 1e-4)
+    ncm_classifier = NCMClassifier(
+        normalize=True,
+        score_mode=ncm_score_mode,
+        var_reg_alpha=ncm_var_reg_alpha,
+    ).to(device)
 
     # Memory Buffer (Herding or Random)
     if hasattr(config_obj.training, 'use_herding') and config_obj.training.use_herding:
