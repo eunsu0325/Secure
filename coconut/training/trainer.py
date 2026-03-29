@@ -1359,14 +1359,16 @@ class COCONUTTrainer:
         self.ncm.replace_class_means_dict(class_means)
 
         # Global diagonal variance 계산 (Mahalanobis 모드)
+        # forward()에서 probe를 L2 normalize하므로, variance도 L2 normalized feature 기준으로 계산
         ncm_score_mode = getattr(self.config.openset, 'score_mode', 'cosine')
         if ncm_score_mode == 'mahalanobis':
             all_features = []
             for features_list in class_features.values():
                 all_features.extend(features_list)
             if len(all_features) >= 2:
-                all_feat_tensor = torch.stack(all_features)          # (N_total, D)
-                global_var = all_feat_tensor.var(dim=0, unbiased=True)  # (D,)
+                all_feat_tensor = torch.stack(all_features)                          # (N_total, D)
+                all_feat_norm = F.normalize(all_feat_tensor, p=2, dim=1, eps=1e-12)  # L2 normalize
+                global_var = all_feat_norm.var(dim=0, unbiased=True)                 # (D,)
                 self.ncm.set_global_var(global_var)
 
         if self.verbose:
