@@ -291,13 +291,19 @@ class COCONUTTrainer:
                 print(f" Open-set mode: {mode_str}")
 
             # ThresholdCalibrator 초기화
+            score_mode = getattr(config.openset, 'score_mode', 'cosine')
+            if score_mode == 'mahalanobis':
+                cal_clip_range = None  # Mahalanobis score 범위는 사전에 알 수 없음
+            else:
+                cal_clip_range = (-1.0, 1.0)  # cosine 기본 범위
+
             self.threshold_calibrator = ThresholdCalibrator(
-                mode="cosine",
+                mode=score_mode,
                 threshold_mode=config.openset.threshold_mode,
                 target_far=config.openset.target_far,
                 alpha=config.openset.threshold_alpha,
                 max_delta=config.openset.threshold_max_delta,
-                clip_range=(-1.0, 1.0),
+                clip_range=cal_clip_range,
                 min_samples=10,
                 verbose=self.verbose and config.openset.verbose_calibration
             )
@@ -316,6 +322,10 @@ class COCONUTTrainer:
 
             # 초기 임계치 설정
             initial_tau = config.openset.initial_tau
+            score_mode_init = getattr(config.openset, 'score_mode', 'cosine')
+            if score_mode_init == 'mahalanobis':
+                initial_tau = -float('inf')  # warmup 중 모두 수락, calibration이 적절한 값 설정
+
             if hasattr(self.ncm, 'set_thresholds'):
                 self.ncm.set_thresholds(tau_s=initial_tau)
             else:
@@ -1177,7 +1187,7 @@ class COCONUTTrainer:
                 tau = np.quantile(nonmated_max_scores, 1 - target_fpir)
                 achieved_fpir = np.mean(nonmated_max_scores >= tau)
             else:
-                tau = self.ncm.tau_s if self.ncm.tau_s else 0.5
+                tau = self.ncm.tau_s if self.ncm.tau_s is not None else 0.5
                 achieved_fpir = 0.0
 
             if len(mated_genuine_scores) > 0:
@@ -1348,8 +1358,20 @@ class COCONUTTrainer:
         # NCM 업데이트
         self.ncm.replace_class_means_dict(class_means)
 
+        # Global diagonal variance 계산 (Mahalanobis 모드)
+        ncm_score_mode = getattr(self.config.openset, 'score_mode', 'cosine')
+        if ncm_score_mode == 'mahalanobis':
+            all_features = []
+            for features_list in class_features.values():
+                all_features.extend(features_list)
+            if len(all_features) >= 2:
+                all_feat_tensor = torch.stack(all_features)          # (N_total, D)
+                global_var = all_feat_tensor.var(dim=0, unbiased=True)  # (D,)
+                self.ncm.set_global_var(global_var)
+
         if self.verbose:
-            print(f" Updated NCM with {len(class_means)} classes")
+            print(f" Updated NCM with {len(class_means)} classes"
+                  + (f" (score_mode={ncm_score_mode})" if ncm_score_mode != 'cosine' else ""))
 
         self.model.train()
 
