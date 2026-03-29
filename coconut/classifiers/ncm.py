@@ -77,7 +77,11 @@ class NCMClassifier(nn.Module):
         M = self.class_means.to(device=x.device, dtype=x.dtype)
 
         if self.score_mode == 'mahalanobis' and self.global_var is not None:
-            # Shared Diagonal Mahalanobis: whitening 후 negative squared euclidean
+            # L2 normalize → whitening → negative squared euclidean
+            # L2 norm: magnitude 차이 제거 (cosine의 장점 유지)
+            # whitening: 차원별 중요도 가중 (Mahalanobis의 장점 추가)
+            x = F.normalize(x, p=2, dim=1, eps=1e-12)
+
             inv_std = 1.0 / torch.sqrt(
                 self.global_var.to(device=x.device, dtype=x.dtype) + self.var_reg_alpha
             )  # (D,)
