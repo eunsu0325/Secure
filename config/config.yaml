@@ -95,7 +95,7 @@ Openset:
   threshold_max_delta: 0.05  # Maximum change limit (1.0→0.05: τ 급변 방지)
 
   # Initial values and warmup
-  warmup_users: 5           # Warmup period
+  warmup_users: 10           # Warmup period
   initial_tau: 0.3           # Initial threshold
 
   # Data split
