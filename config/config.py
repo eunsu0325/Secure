@@ -124,7 +124,11 @@ class Openset:
     # 타입별 독립적인 TTA 반복 설정 추가
     tta_n_repeats_genuine: Optional[int] = None      # Genuine 점수용
     tta_n_repeats_between: Optional[int] = None      # Between impostor용
-    
+
+    # Score mode (Method 1: Shared Diagonal Mahalanobis)
+    score_mode: str = 'cosine'          # 'cosine' | 'mahalanobis'
+    var_reg_alpha: float = 1e-4         # Mahalanobis variance regularization
+
     def __post_init__(self):
         """타입별 반복 설정이 없으면 기본값 사용"""
         # Genuine: 기본값 사용
