@@ -115,9 +115,9 @@ class NCMClassifier(nn.Module):
 
         self.class_means_dict = {k: v.clone() for k, v in class_means_dict.items()}
 
-        # 방어적 정규화 (normalize=True이고 cosine 모드일 때)
-        # Mahalanobis는 원본 feature space에서 거리를 재야 하므로 정규화 스킵
-        if self.normalize and self.score_mode != 'mahalanobis':
+        # L2 정규화: cosine 모드는 항상, mahalanobis 모드도 동일하게 적용
+        # (forward()에서 probe를 L2 normalize하므로 mean도 맞춰야 함)
+        if self.normalize or self.score_mode == 'mahalanobis':
             for k in self.class_means_dict:
                 self.class_means_dict[k] = F.normalize(
                     self.class_means_dict[k], p=2, dim=0, eps=1e-12
