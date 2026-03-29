@@ -17,7 +17,7 @@ class NCMClassifier(nn.Module):
      normalize=True: 코사인 유사도 기반
     """
 
-    def __init__(self, normalize: bool = True):
+    def __init__(self, normalize: bool = True, score_mode: str = 'cosine', var_reg_alpha: float = 1e-4):
         super().__init__()
         self.register_buffer("class_means", None)
         self.class_means_dict = {}
@@ -27,6 +27,11 @@ class NCMClassifier(nn.Module):
         # 오픈셋 관련
         self.tau_s = None            # 전역 임계치
         self.unknown_id = -1         # Unknown 클래스 ID
+
+        # Mahalanobis 관련
+        self.score_mode = score_mode          # 'cosine' | 'mahalanobis'
+        self.var_reg_alpha = var_reg_alpha
+        self.global_var = None                # Tensor(D,) — shared diagonal variance
 
     def load_state_dict(self, state_dict, strict: bool = True):
         """체크포인트에서 상태를 로드합니다."""
@@ -60,6 +65,7 @@ class NCMClassifier(nn.Module):
         """
          최적화된 NCM 분류
 
+        score_mode='mahalanobis': whitened euclidean (shared diagonal Mahalanobis)
         normalize=True: 코사인 유사도 (정규화 후 내적)
         normalize=False: 유클리디안 거리 (제곱 거리 사용)
         """
@@ -69,6 +75,19 @@ class NCMClassifier(nn.Module):
 
         # dtype 일치 보장 (fp16/AMP 지원)
         M = self.class_means.to(device=x.device, dtype=x.dtype)
+
+        if self.score_mode == 'mahalanobis' and self.global_var is not None:
+            # Shared Diagonal Mahalanobis: whitening 후 negative squared euclidean
+            inv_std = 1.0 / torch.sqrt(
+                self.global_var.to(device=x.device, dtype=x.dtype) + self.var_reg_alpha
+            )  # (D,)
+            x_w = x * inv_std                                # (B, D)
+            M_w = M * inv_std                                # (C, D)
+            x2 = (x_w * x_w).sum(dim=1, keepdim=True)       # (B, 1)
+            m2 = (M_w * M_w).sum(dim=1, keepdim=False)      # (C,)
+            xm = x_w @ M_w.T                                # (B, C)
+            scores = -(x2 + m2.unsqueeze(0) - 2 * xm)      # (B, C)
+            return scores  # 높을수록 가까움 (negative Mahalanobis distance)
 
         if self.normalize:
             # 코사인 유사도 기반
@@ -92,8 +111,9 @@ class NCMClassifier(nn.Module):
 
         self.class_means_dict = {k: v.clone() for k, v in class_means_dict.items()}
 
-        # 방어적 정규화 (normalize=True일 때)
-        if self.normalize:
+        # 방어적 정규화 (normalize=True이고 cosine 모드일 때)
+        # Mahalanobis는 원본 feature space에서 거리를 재야 하므로 정규화 스킵
+        if self.normalize and self.score_mode != 'mahalanobis':
             for k in self.class_means_dict:
                 self.class_means_dict[k] = F.normalize(
                     self.class_means_dict[k], p=2, dim=0, eps=1e-12
@@ -121,6 +141,10 @@ class NCMClassifier(nn.Module):
     def set_thresholds(self, tau_s: float):
         """오픈셋 임계치 설정"""
         self.tau_s = float(tau_s)
+
+    def set_global_var(self, global_var: Tensor):
+        """Global shared diagonal variance 설정 (Mahalanobis용)"""
+        self.global_var = global_var.clone()
 
     @torch.no_grad()
     def predict_openset(self, x):
