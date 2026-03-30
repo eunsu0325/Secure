@@ -117,6 +117,11 @@ Openset:
   tta_repeat_aggregation: 'mean'  # Inter-repeat aggregation method
   tta_verbose: true  # TTA debugging output
 
-  # Score mode (Method 1: Shared Diagonal Mahalanobis)
-  score_mode: 'mahalanobis'    # 'cosine' (baseline) | 'mahalanobis' (shared diagonal)
-  var_reg_alpha: 0.0001        # variance regularization
+  # Score mode (Method 1: Shared Diagonal Mahalanobis — 실패, cosine 유지)
+  score_mode: 'cosine'
+  var_reg_alpha: 0.0001
+
+  # GHOST (Gaussian Hypothesis Open-Set Technique, AAAI 2025)
+  use_ghost: true              # GHOST z-score rejection 활성화
+  ghost_n_augment: 10          # 이미지당 augmentation 횟수 (5장 × 10 = 50 features/class)
+  ghost_shrinkage_min_n: 10    # shrinkage 기준 augmented feature 수

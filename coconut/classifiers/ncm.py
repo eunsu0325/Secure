@@ -33,6 +33,14 @@ class NCMClassifier(nn.Module):
         self.var_reg_alpha = var_reg_alpha
         self.global_var = None                # Tensor(D,) — shared diagonal variance
 
+        # GHOST 관련 (z-score 기반 rejection)
+        self.ghost_enabled = False
+        self.ghost_class_means_raw = {}       # {class_id: Tensor(D,)} raw feature mean
+        self.ghost_class_stds_raw = {}        # {class_id: Tensor(D,)} raw feature std
+        self.ghost_global_std_raw = None      # Tensor(D,) shrinkage target
+        self.ghost_class_counts = {}          # {class_id: int} augmented sample count
+        self.ghost_shrinkage_min_n = 10       # shrinkage 기준 샘플 수
+
     def load_state_dict(self, state_dict, strict: bool = True):
         """체크포인트에서 상태를 로드합니다."""
         self.class_means = state_dict["class_means"]
@@ -150,14 +158,77 @@ class NCMClassifier(nn.Module):
         """Global shared diagonal variance 설정 (Mahalanobis용)"""
         self.global_var = global_var.clone()
 
+    def set_ghost_stats(self, class_means_raw, class_stds_raw, global_std_raw, class_counts):
+        """GHOST용 per-class raw feature 통계 설정"""
+        self.ghost_class_means_raw = {k: v.clone() for k, v in class_means_raw.items()}
+        self.ghost_class_stds_raw = {k: v.clone() for k, v in class_stds_raw.items()}
+        self.ghost_global_std_raw = global_std_raw.clone() if global_std_raw is not None else None
+        self.ghost_class_counts = dict(class_counts)
+
+    def _compute_ghost_scores(self, x_raw, pred_ids, cosine_scores):
+        """
+        GHOST score 계산: γ = z_k̂ / s  (AAAI 2025, Eq. 3-4)
+
+        Args:
+            x_raw: (B, D) raw features (L2 norm 전)
+            pred_ids: (B,) predicted class indices
+            cosine_scores: (B,) z_k̂ (cosine max score)
+        Returns:
+            (B,) GHOST scores
+        """
+        ghost_scores = torch.zeros(x_raw.shape[0], device=x_raw.device, dtype=x_raw.dtype)
+
+        for i in range(x_raw.shape[0]):
+            k = pred_ids[i].item()
+
+            if k not in self.ghost_class_stds_raw:
+                ghost_scores[i] = cosine_scores[i]
+                continue
+
+            mu_k = self.ghost_class_means_raw[k].to(device=x_raw.device, dtype=x_raw.dtype)
+            std_k = self.ghost_class_stds_raw[k].to(device=x_raw.device, dtype=x_raw.dtype)
+
+            # Shrinkage: 샘플 적으면 global std와 혼합
+            n_k = self.ghost_class_counts.get(k, 1)
+            if self.ghost_global_std_raw is not None:
+                lam = min(n_k / self.ghost_shrinkage_min_n, 1.0)
+                global_std = self.ghost_global_std_raw.to(device=x_raw.device, dtype=x_raw.dtype)
+                std_k = lam * std_k + (1 - lam) * global_std
+
+            # Eq. 3: s = Σ_d |φ_d - μ_{k̂,d}| / σ_{k̂,d}
+            s = (torch.abs(x_raw[i] - mu_k) / (std_k + 1e-12)).sum()
+
+            # Eq. 4: γ = z_k̂ / s
+            ghost_scores[i] = cosine_scores[i] / (s + 1e-12)
+
+        return ghost_scores
+
+    @torch.no_grad()
+    def compute_ghost_max_scores(self, x_raw):
+        """
+        캘리브레이션/평가용: GHOST score 배열 반환.
+        x_raw: (B, D) raw features
+        """
+        if len(self.class_means_dict) == 0:
+            return torch.zeros(x_raw.shape[0], device=x_raw.device)
+
+        scores = self.forward(x_raw)  # cosine (내부 L2 norm)
+        top1 = scores.topk(1, dim=1)
+        max_score = top1.values[:, 0]
+        pred = top1.indices[:, 0]
+
+        if self.ghost_enabled and self.ghost_class_stds_raw:
+            return self._compute_ghost_scores(x_raw, pred, max_score)
+        return max_score
+
     @torch.no_grad()
     def predict_openset(self, x):
-        """오픈셋 예측 (최댓값 모드)"""
+        """오픈셋 예측 (최댓값 모드 / GHOST 모드)"""
         # NCM이 비어있으면 모두 -1 반환
         if len(self.class_means_dict) == 0:
             return torch.full((x.shape[0],), -1, dtype=torch.long, device=x.device)
 
-        # 기존 최댓값 모드
+        # cosine scores 계산
         scores = self.forward(x)  # (B, C)
 
         # Top-1 추출
@@ -165,11 +236,19 @@ class NCMClassifier(nn.Module):
         max_score = top1.values[:, 0]
         pred = top1.indices[:, 0]
 
-        # 임계치 적용
-        if self.tau_s is not None:
-            accept = max_score >= self.tau_s
+        # GHOST rejection
+        if self.ghost_enabled and self.ghost_class_stds_raw:
+            ghost_scores = self._compute_ghost_scores(x, pred, max_score)
+            if self.tau_s is not None:
+                accept = ghost_scores >= self.tau_s
+            else:
+                accept = torch.ones_like(ghost_scores, dtype=torch.bool)
         else:
-            accept = torch.ones_like(max_score, dtype=torch.bool)
+            # 기존 cosine 방식
+            if self.tau_s is not None:
+                accept = max_score >= self.tau_s
+            else:
+                accept = torch.ones_like(max_score, dtype=torch.bool)
 
         pred[~accept] = self.unknown_id
 

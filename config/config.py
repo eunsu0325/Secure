@@ -129,6 +129,11 @@ class Openset:
     score_mode: str = 'cosine'          # 'cosine' | 'mahalanobis'
     var_reg_alpha: float = 1e-4         # Mahalanobis variance regularization
 
+    # GHOST (Gaussian Hypothesis Open-Set Technique, AAAI 2025)
+    use_ghost: bool = False             # GHOST z-score rejection 활성화
+    ghost_n_augment: int = 10           # per-class σ 추정용 이미지당 augmentation 횟수
+    ghost_shrinkage_min_n: int = 10     # shrinkage 기준 (augmented feature 수)
+
     def __post_init__(self):
         """타입별 반복 설정이 없으면 기본값 사용"""
         # Genuine: 기본값 사용

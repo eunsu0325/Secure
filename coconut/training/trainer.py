@@ -290,10 +290,21 @@ class COCONUTTrainer:
                 mode_str = f"MAX + TTA({self.openset_config.tta_n_views})" if self.use_tta else "MAX"
                 print(f" Open-set mode: {mode_str}")
 
+            # GHOST 초기화
+            self.use_ghost = getattr(config.openset, 'use_ghost', False)
+            self.ghost_n_augment = getattr(config.openset, 'ghost_n_augment', 10)
+            if self.use_ghost:
+                self.ncm.ghost_enabled = True
+                self.ncm.ghost_shrinkage_min_n = getattr(config.openset, 'ghost_shrinkage_min_n', 10)
+                if self.verbose:
+                    print(f" GHOST rejection enabled (n_augment={self.ghost_n_augment}, shrinkage_min_n={self.ncm.ghost_shrinkage_min_n})")
+
             # ThresholdCalibrator 초기화
             score_mode = getattr(config.openset, 'score_mode', 'cosine')
             if score_mode == 'mahalanobis':
-                cal_clip_range = None  # Mahalanobis score 범위는 사전에 알 수 없음
+                cal_clip_range = None
+            elif self.use_ghost:
+                cal_clip_range = None  # GHOST score 범위 사전 불명
             else:
                 cal_clip_range = (-1.0, 1.0)  # cosine 기본 범위
 
@@ -338,6 +349,7 @@ class COCONUTTrainer:
         else:
             self.registered_users = set()
             self.use_tta = False
+            self.use_ghost = False
             if self.verbose:
                 print(" Open-set mode disabled")
 
@@ -990,17 +1002,35 @@ class COCONUTTrainer:
         use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
 
         if unknown_dev_file and str(unknown_dev_file) != 'None':
-            s_impostor = extract_scores_impostor_unknown(
-                self.model, self.ncm,
-                str(unknown_dev_file),
-                self.registered_users,
-                self.test_transform, self.device,
-                max_eval=3000,
-                channels=channels,
-                use_projection=use_projection
-            )
+            if getattr(self, 'use_ghost', False):
+                # GHOST: feature 추출 → ghost max score
+                from coconut.openset.utils import load_paths_labels_excluding
+                unk_paths, _ = load_paths_labels_excluding(str(unknown_dev_file), self.registered_users)
+                if len(unk_paths) > 3000:
+                    rng = np.random.RandomState(seed)
+                    idx = rng.choice(len(unk_paths), 3000, replace=False)
+                    unk_paths = [unk_paths[i] for i in idx]
+                if unk_paths:
+                    unk_feats = extract_features(
+                        self.model, unk_paths, self.test_transform, self.device,
+                        channels=channels, use_projection=use_projection
+                    )
+                    if len(unk_feats) > 0:
+                        unk_tensor = torch.from_numpy(unk_feats).to(self.device)
+                        s_impostor = self.ncm.compute_ghost_max_scores(unk_tensor).cpu().numpy()
+            else:
+                s_impostor = extract_scores_impostor_unknown(
+                    self.model, self.ncm,
+                    str(unknown_dev_file),
+                    self.registered_users,
+                    self.test_transform, self.device,
+                    max_eval=3000,
+                    channels=channels,
+                    use_projection=use_projection
+                )
             if self.verbose:
-                print(f"   Unknown Dev: {len(s_impostor)} scores from {unknown_dev_file}")
+                print(f"   Unknown Dev: {len(s_impostor)} scores from {unknown_dev_file}"
+                      + (" (GHOST)" if getattr(self, 'use_ghost', False) else ""))
         else:
             print("  [WARN] unknown_dev_file not set. τ calibration skipped.")
 
@@ -1011,13 +1041,28 @@ class COCONUTTrainer:
             all_probe_paths.extend(paths)
             all_probe_labels.extend([uid] * len(paths))
 
-        s_genuine = extract_scores_genuine(
-            self.model, self.ncm,
-            all_probe_paths, all_probe_labels,
-            self.test_transform, self.device,
-            channels=channels,
-            use_projection=use_projection
-        )
+        if getattr(self, 'use_ghost', False):
+            # GHOST: feature 추출 → ghost max score
+            if all_probe_paths:
+                gen_feats = extract_features(
+                    self.model, all_probe_paths, self.test_transform, self.device,
+                    channels=channels, use_projection=use_projection
+                )
+                if len(gen_feats) > 0:
+                    gen_tensor = torch.from_numpy(gen_feats).to(self.device)
+                    s_genuine = self.ncm.compute_ghost_max_scores(gen_tensor).cpu().numpy()
+                else:
+                    s_genuine = np.array([])
+            else:
+                s_genuine = np.array([])
+        else:
+            s_genuine = extract_scores_genuine(
+                self.model, self.ncm,
+                all_probe_paths, all_probe_labels,
+                self.test_transform, self.device,
+                channels=channels,
+                use_projection=use_projection
+            )
 
         if self.verbose:
             print(f"   Genuine (probe, 참고용): {len(s_genuine)} scores")
@@ -1132,11 +1177,14 @@ class COCONUTTrainer:
         nonmated_max_scores = np.array([])
         if len(nonmated_feats) > 0:
             nonmated_tensor = torch.from_numpy(nonmated_feats).to(self.device)
-            nonmated_ncm_scores = self.ncm.forward(nonmated_tensor)  # (N, C)
-            if nonmated_ncm_scores.numel() > 0:
-                # 등록된 클래스만 고려
-                registered_scores = nonmated_ncm_scores[:, registered_ids]
-                nonmated_max_scores = registered_scores.max(dim=1).values.cpu().numpy()
+            if getattr(self, 'use_ghost', False):
+                # GHOST score 사용
+                nonmated_max_scores = self.ncm.compute_ghost_max_scores(nonmated_tensor).cpu().numpy()
+            else:
+                nonmated_ncm_scores = self.ncm.forward(nonmated_tensor)  # (N, C)
+                if nonmated_ncm_scores.numel() > 0:
+                    registered_scores = nonmated_ncm_scores[:, registered_ids]
+                    nonmated_max_scores = registered_scores.max(dim=1).values.cpu().numpy()
 
         # 4b. Mated probe → genuine score & rank-1 prediction
         mated_genuine_scores = []
@@ -1152,20 +1200,29 @@ class COCONUTTrainer:
             # registered_ids 내에서의 인덱스 → 실제 class_id 매핑
             id_to_reg_idx = {cid: idx for idx, cid in enumerate(registered_ids)}
 
+            # GHOST: detection용 max score를 미리 계산
+            if getattr(self, 'use_ghost', False):
+                mated_ghost_scores = self.ncm.compute_ghost_max_scores(mated_tensor).cpu().numpy()
+
             for i in range(len(mated_labels)):
                 true_id = mated_labels[i]
                 scores_reg = mated_registered_scores[i]  # (num_registered,)
 
-                # Genuine score: 정답 클래스와의 유사도
+                # Genuine score: 정답 클래스와의 유사도 (cosine, 분석용)
                 if true_id in id_to_reg_idx:
                     genuine_score = scores_reg[id_to_reg_idx[true_id]].item()
                 else:
                     genuine_score = -1.0
 
-                # Max score & Rank-1 (등록된 클래스 내에서)
-                max_score = scores_reg.max().item()
+                # Rank-1 (cosine 기준, 변경 없음)
                 pred_reg_idx = scores_reg.argmax().item()
                 pred_id = registered_ids[pred_reg_idx]
+
+                # Max score: GHOST면 ghost score, 아니면 cosine max
+                if getattr(self, 'use_ghost', False):
+                    max_score = mated_ghost_scores[i]
+                else:
+                    max_score = scores_reg.max().item()
 
                 mated_genuine_scores.append(genuine_score)
                 mated_max_scores.append(max_score)
@@ -1359,21 +1416,73 @@ class COCONUTTrainer:
         self.ncm.replace_class_means_dict(class_means)
 
         # Global diagonal variance 계산 (Mahalanobis 모드)
-        # forward()에서 probe를 L2 normalize하므로, variance도 L2 normalized feature 기준으로 계산
         ncm_score_mode = getattr(self.config.openset, 'score_mode', 'cosine')
         if ncm_score_mode == 'mahalanobis':
             all_features = []
             for features_list in class_features.values():
                 all_features.extend(features_list)
             if len(all_features) >= 2:
-                all_feat_tensor = torch.stack(all_features)                          # (N_total, D)
-                all_feat_norm = F.normalize(all_feat_tensor, p=2, dim=1, eps=1e-12)  # L2 normalize
-                global_var = all_feat_norm.var(dim=0, unbiased=True)                 # (D,)
+                all_feat_tensor = torch.stack(all_features)
+                all_feat_norm = F.normalize(all_feat_tensor, p=2, dim=1, eps=1e-12)
+                global_var = all_feat_norm.var(dim=0, unbiased=True)
                 self.ncm.set_global_var(global_var)
+
+        # GHOST: augmented raw features로 per-class μ_raw, σ_raw 계산
+        if getattr(self, 'use_ghost', False):
+            use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
+            channels = self.config.dataset.channels
+
+            # class별 경로 그룹핑
+            from collections import defaultdict
+            class_paths_dict = defaultdict(list)
+            for path, label in zip(real_paths, real_labels):
+                lbl = int(label) if not isinstance(label, int) else label
+                class_paths_dict[lbl].append(path)
+
+            ghost_means_raw = {}
+            ghost_stds_raw = {}
+            ghost_counts = {}
+            all_raw_feats_for_global = []
+
+            for label, paths_for_class in class_paths_dict.items():
+                raw_feats = []
+                for path in paths_for_class:
+                    img = _open_with_channels(path, channels)
+                    for _ in range(self.ghost_n_augment):
+                        aug_tensor = self.train_transform(img).unsqueeze(0).to(self.device)
+                        feat = self.model.getFeatureCode(aug_tensor, use_projection=use_projection)
+                        # raw feature (L2 norm 안 함!)
+                        raw_feats.append(feat.squeeze(0).cpu())
+
+                ghost_counts[label] = len(raw_feats)
+
+                if len(raw_feats) >= 2:
+                    feat_tensor = torch.stack(raw_feats)
+                    ghost_means_raw[label] = feat_tensor.mean(dim=0)
+                    ghost_stds_raw[label] = feat_tensor.std(dim=0).clamp_min(1e-6)
+                else:
+                    ghost_means_raw[label] = raw_feats[0] if raw_feats else torch.zeros(1)
+                    ghost_stds_raw[label] = torch.ones_like(ghost_means_raw[label])
+
+                all_raw_feats_for_global.extend(raw_feats)
+
+            # Global std (shrinkage target)
+            ghost_global_std = None
+            if len(all_raw_feats_for_global) >= 2:
+                all_tensor = torch.stack(all_raw_feats_for_global)
+                ghost_global_std = all_tensor.std(dim=0).clamp_min(1e-6)
+
+            self.ncm.set_ghost_stats(ghost_means_raw, ghost_stds_raw, ghost_global_std, ghost_counts)
+
+            if self.verbose:
+                avg_n = np.mean(list(ghost_counts.values())) if ghost_counts else 0
+                print(f" GHOST stats updated: {len(ghost_stds_raw)} classes, "
+                      f"avg {avg_n:.0f} augmented features/class")
 
         if self.verbose:
             print(f" Updated NCM with {len(class_means)} classes"
-                  + (f" (score_mode={ncm_score_mode})" if ncm_score_mode != 'cosine' else ""))
+                  + (f" (score_mode={ncm_score_mode})" if ncm_score_mode != 'cosine' else "")
+                  + (f" + GHOST" if getattr(self, 'use_ghost', False) else ""))
 
         self.model.train()
 
