@@ -331,11 +331,16 @@ class COCONUTTrainer:
             self._last_genuine_scores = np.array([])
             self._last_impostor_scores = np.array([])
 
+            # 진단 로그 저장용
+            self._diag_history = []
+
             # 초기 임계치 설정
             initial_tau = config.openset.initial_tau
             score_mode_init = getattr(config.openset, 'score_mode', 'cosine')
             if score_mode_init == 'mahalanobis':
                 initial_tau = -float('inf')  # warmup 중 모두 수락, calibration이 적절한 값 설정
+            elif self.use_ghost:
+                initial_tau = 0.0  # GHOST score는 매우 작은 양수 → warmup 중 모두 수락
 
             if hasattr(self.ncm, 'set_thresholds'):
                 self.ncm.set_thresholds(tau_s=initial_tau)
@@ -1299,6 +1304,327 @@ class COCONUTTrainer:
 
         results['TRR_negref'] = TRR_n
         results['FPIR_xdom'] = FAR_n
+
+        # ========================================
+        # Step 6.5: 종합 진단 로그
+        # ========================================
+        if len(mated_max_scores_arr) >= 10:
+            _ms = mated_max_scores_arr
+            _gs = mated_genuine_scores
+            _rc = mated_rank1_correct
+            _labels = np.array(mated_labels)
+
+            # --- 1. Genuine score 분포 상세 ---
+            print(f"\n{'='*70}")
+            print(f"[DIAG] Genuine Score Distribution (n={len(_ms)})")
+            print(f"  max_score:    \u03bc={_ms.mean():.4f} \u03c3={_ms.std():.4f} "
+                  f"min={_ms.min():.4f} p5={np.percentile(_ms,5):.4f} "
+                  f"p25={np.percentile(_ms,25):.4f} median={np.median(_ms):.4f}")
+            print(f"  genuine_score: \u03bc={_gs.mean():.4f} \u03c3={_gs.std():.4f} "
+                  f"min={_gs.min():.4f} p5={np.percentile(_gs,5):.4f}")
+
+            # --- 2. Top1-Top2 Margin 분석 ---
+            _margin = None
+            _nm_top1 = None
+            _nm_margin = None
+            _fn_cos = None
+            _fn_margin = None
+            _tau_cos = None
+            _tau_margin = None
+
+            if len(mated_feats) > 0:
+                _mt = torch.from_numpy(mated_feats).to(self.device)
+                _all_scores = self.ncm.forward(_mt)
+                _reg_scores = _all_scores[:, registered_ids]
+
+                if _reg_scores.shape[1] >= 2:
+                    _topk = _reg_scores.topk(2, dim=1)
+                    _top1 = _topk.values[:, 0].cpu().numpy()
+                    _top2 = _topk.values[:, 1].cpu().numpy()
+                    _margin = _top1 - _top2
+
+                    print(f"\n[DIAG] Top1-Top2 Margin (genuine)")
+                    print(f"  margin: \u03bc={_margin.mean():.4f} \u03c3={_margin.std():.4f} "
+                          f"min={_margin.min():.4f} p5={np.percentile(_margin,5):.4f} "
+                          f"median={np.median(_margin):.4f}")
+
+                    # tail vs normal
+                    _tail_mask = _ms < np.percentile(_ms, 20)
+                    _normal_mask = _ms >= np.percentile(_ms, 50)
+
+                    if _tail_mask.sum() > 0 and _normal_mask.sum() > 0:
+                        print(f"\n[DIAG] Tail(\ud558\uc704 20%) vs Normal(\uc0c1\uc704 50%)")
+                        print(f"  Tail   (n={_tail_mask.sum()}): "
+                              f"cos={_ms[_tail_mask].mean():.4f} "
+                              f"margin={_margin[_tail_mask].mean():.4f} "
+                              f"rank1_acc={_rc[_tail_mask].mean():.3f}")
+                        print(f"  Normal (n={_normal_mask.sum()}): "
+                              f"cos={_ms[_normal_mask].mean():.4f} "
+                              f"margin={_margin[_normal_mask].mean():.4f} "
+                              f"rank1_acc={_rc[_normal_mask].mean():.3f}")
+
+            # --- 3. Per-class Worst/Best ---
+            print(f"\n[DIAG] Per-class Worst/Best 5")
+            _class_scores = {}
+            for i, lbl in enumerate(_labels):
+                if lbl not in _class_scores:
+                    _class_scores[lbl] = []
+                _class_scores[lbl].append(_ms[i])
+
+            _class_means = {k: np.mean(v) for k, v in _class_scores.items()}
+            _worst5 = sorted(_class_means.items(), key=lambda x: x[1])[:5]
+            _best5 = sorted(_class_means.items(), key=lambda x: x[1], reverse=True)[:5]
+
+            for uid, score in _worst5:
+                print(f"  Worst: User {uid} -> mean_score={score:.4f} (n={len(_class_scores[uid])})")
+            for uid, score in _best5:
+                print(f"  Best:  User {uid} -> mean_score={score:.4f} (n={len(_class_scores[uid])})")
+
+            # --- 4. GHOST 진단 ---
+            _corr = None
+            _s_values = None
+            _gammas = None
+            if getattr(self, 'use_ghost', False) and hasattr(self.ncm, 'ghost_class_stds_raw') and self.ncm.ghost_class_stds_raw:
+                _cosines_g = []
+                _s_values_list = []
+                _gammas_list = []
+                _is_correct = []
+
+                _mt2 = torch.from_numpy(mated_feats).to(self.device)
+                _scores2 = self.ncm.forward(_mt2)
+                _top1_vals = _scores2.max(dim=1).values.cpu().numpy()
+                _top1_ids = _scores2.argmax(dim=1).cpu().numpy()
+
+                for i in range(len(_labels)):
+                    k = int(_top1_ids[i])
+                    if k not in self.ncm.ghost_class_stds_raw:
+                        continue
+
+                    mu_k = self.ncm.ghost_class_means_raw[k].to(self.device)
+                    std_k = self.ncm.ghost_class_stds_raw[k].to(self.device)
+
+                    n_k = self.ncm.ghost_class_counts.get(k, 1)
+                    if self.ncm.ghost_global_std_raw is not None:
+                        lam = min(n_k / self.ncm.ghost_shrinkage_min_n, 1.0)
+                        g_std = self.ncm.ghost_global_std_raw.to(self.device)
+                        std_k = lam * std_k + (1 - lam) * g_std
+
+                    s = (torch.abs(_mt2[i] - mu_k) / (std_k + 1e-12)).sum().item()
+                    gamma = float(_top1_vals[i]) / (s + 1e-12)
+
+                    _cosines_g.append(float(_top1_vals[i]))
+                    _s_values_list.append(s)
+                    _gammas_list.append(gamma)
+                    _is_correct.append(int(_top1_ids[i]) == _labels[i])
+
+                if len(_cosines_g) >= 5:
+                    _cosines_g = np.array(_cosines_g)
+                    _s_values = np.array(_s_values_list)
+                    _gammas = np.array(_gammas_list)
+
+                    _corr = np.corrcoef(_cosines_g, _s_values)[0, 1]
+
+                    print(f"\n[DIAG] GHOST Analysis (n={len(_cosines_g)})")
+                    print(f"  s values: \u03bc={_s_values.mean():.0f} \u03c3={_s_values.std():.0f} "
+                          f"min={_s_values.min():.0f} max={_s_values.max():.0f}")
+                    print(f"  \u03b3 values: \u03bc={_gammas.mean():.6f} \u03c3={_gammas.std():.6f} "
+                          f"min={_gammas.min():.6f} max={_gammas.max():.6f}")
+                    print(f"  corr(cosine, s) = {_corr:.3f}  "
+                          f"{'<- High: GHOST limited' if abs(_corr) > 0.5 else '<- Low: GHOST promising'}")
+
+                    _tail_idx = np.argsort(_cosines_g)[:5]
+                    print(f"\n  [Genuine Tail Top-5]")
+                    for idx in _tail_idx:
+                        correct = "O" if _is_correct[idx] else "X"
+                        print(f"    [{correct}] cos={_cosines_g[idx]:.3f} s={_s_values[idx]:.0f} "
+                              f"\u03b3={_gammas[idx]:.6f}")
+
+            # --- 5. Impostor vs Genuine margin 비교 ---
+            if len(nonmated_feats) > 0 and _margin is not None:
+                _nmt = torch.from_numpy(nonmated_feats).to(self.device)
+                _nm_scores = self.ncm.forward(_nmt)
+                _nm_reg = _nm_scores[:, registered_ids]
+
+                if _nm_reg.shape[1] >= 2:
+                    _nm_topk = _nm_reg.topk(2, dim=1)
+                    _nm_top1 = _nm_topk.values[:, 0].cpu().numpy()
+                    _nm_top2 = _nm_topk.values[:, 1].cpu().numpy()
+                    _nm_margin = _nm_top1 - _nm_top2
+
+                    print(f"\n[DIAG] Impostor vs Genuine")
+                    print(f"  Genuine  max_cos: \u03bc={_ms.mean():.4f}  margin: \u03bc={_margin.mean():.4f}")
+                    print(f"  Impostor max_cos: \u03bc={_nm_top1.mean():.4f}  margin: \u03bc={_nm_margin.mean():.4f}")
+                    print(f"  separation(cosine):  {_ms.mean() - _nm_top1.mean():.4f}")
+                    print(f"  separation(margin):  {_margin.mean() - _nm_margin.mean():.4f}")
+
+                    _tau_cos = np.percentile(_nm_top1, 99)
+                    _tau_margin = np.percentile(_nm_margin, 99)
+                    _fn_cos = np.mean(_ms < _tau_cos)
+                    _fn_margin = np.mean(_margin < _tau_margin)
+
+                    print(f"\n  @1%FPIR simulation:")
+                    print(f"    cosine  tau={_tau_cos:.4f} -> genuine reject={_fn_cos*100:.1f}%")
+                    print(f"    margin  tau={_tau_margin:.4f} -> genuine reject={_fn_margin*100:.1f}%")
+                    print(f"    {'-> margin BETTER!' if _fn_margin < _fn_cos else '-> cosine better'}")
+
+            # --- 6. 진단 데이터 저장 ---
+            _diag_entry = {
+                'exp': len(self.registered_users) - 1,
+                'n_classes': self.ncm.get_num_classes(),
+                'n_mated': len(_ms),
+                'rank1': float(_rc.mean()),
+                'genuine_max_mean': float(_ms.mean()),
+                'genuine_max_std': float(_ms.std()),
+                'genuine_max_min': float(_ms.min()),
+                'genuine_max_p5': float(np.percentile(_ms, 5)),
+                'genuine_max_p25': float(np.percentile(_ms, 25)),
+                'genuine_max_median': float(np.median(_ms)),
+                'genuine_score_mean': float(_gs.mean()),
+                'genuine_score_std': float(_gs.std()),
+            }
+
+            if _margin is not None:
+                _diag_entry.update({
+                    'margin_mean': float(_margin.mean()),
+                    'margin_std': float(_margin.std()),
+                    'margin_min': float(_margin.min()),
+                    'margin_p5': float(np.percentile(_margin, 5)),
+                    'margin_median': float(np.median(_margin)),
+                })
+                if _tail_mask.sum() > 0 and _normal_mask.sum() > 0:
+                    _diag_entry.update({
+                        'tail_n': int(_tail_mask.sum()),
+                        'tail_cos_mean': float(_ms[_tail_mask].mean()),
+                        'tail_margin_mean': float(_margin[_tail_mask].mean()),
+                        'tail_rank1': float(_rc[_tail_mask].mean()),
+                        'normal_n': int(_normal_mask.sum()),
+                        'normal_cos_mean': float(_ms[_normal_mask].mean()),
+                        'normal_margin_mean': float(_margin[_normal_mask].mean()),
+                        'normal_rank1': float(_rc[_normal_mask].mean()),
+                    })
+
+            if _nm_top1 is not None:
+                _diag_entry.update({
+                    'impostor_max_mean': float(_nm_top1.mean()),
+                    'impostor_margin_mean': float(_nm_margin.mean()),
+                    'separation_cosine': float(_ms.mean() - _nm_top1.mean()),
+                    'separation_margin': float(_margin.mean() - _nm_margin.mean()),
+                })
+                if _fn_cos is not None:
+                    _diag_entry.update({
+                        'sim_tau_cosine': float(_tau_cos),
+                        'sim_fnir_cosine': float(_fn_cos),
+                        'sim_tau_margin': float(_tau_margin),
+                        'sim_fnir_margin': float(_fn_margin),
+                    })
+
+            if _corr is not None:
+                _diag_entry.update({
+                    'ghost_s_mean': float(_s_values.mean()),
+                    'ghost_s_std': float(_s_values.std()),
+                    'ghost_gamma_mean': float(_gammas.mean()),
+                    'ghost_gamma_std': float(_gammas.std()),
+                    'ghost_corr_cos_s': float(_corr),
+                })
+
+            if '_worst5' in dir():
+                _diag_entry['worst_users'] = [(int(uid), float(sc)) for uid, sc in _worst5]
+                _diag_entry['best_users'] = [(int(uid), float(sc)) for uid, sc in _best5]
+
+            self._diag_history.append(_diag_entry)
+
+            # === 10 경험마다 리포트 파일 저장 ===
+            _exp_num = _diag_entry['exp']
+            if (_exp_num + 1) % 10 == 0 or _exp_num == 0:
+                import json, os
+                _save_dir = str(self.config.training.results_path)
+                os.makedirs(_save_dir, exist_ok=True)
+
+                _json_path = os.path.join(_save_dir, 'diag_history.json')
+                with open(_json_path, 'w') as f:
+                    json.dump(self._diag_history, f, indent=2, ensure_ascii=False)
+
+                _txt_path = os.path.join(_save_dir, f'diag_report_exp{_exp_num:03d}.txt')
+                with open(_txt_path, 'w') as f:
+                    f.write(f"{'='*80}\n")
+                    f.write(f"COCONUT Diagnostic Report - Experience {_exp_num}\n")
+                    f.write(f"{'='*80}\n\n")
+
+                    f.write(f"{'Exp':>4} {'Cls':>4} {'R1':>5} "
+                            f"{'cos_u':>6} {'cos_s':>6} {'cos_mn':>6} {'cos_p5':>6} "
+                            f"{'mrg_u':>6} {'mrg_p5':>6} "
+                            f"{'imp_c':>6} {'imp_m':>6} "
+                            f"{'sp_c':>6} {'sp_m':>6} "
+                            f"{'fn_c':>6} {'fn_m':>6}\n")
+                    f.write(f"{'-'*110}\n")
+
+                    for d in self._diag_history:
+                        f.write(f"{d['exp']:4d} {d['n_classes']:4d} {d['rank1']:5.3f} "
+                                f"{d['genuine_max_mean']:6.3f} {d['genuine_max_std']:6.3f} "
+                                f"{d['genuine_max_min']:6.3f} {d['genuine_max_p5']:6.3f} ")
+                        if 'margin_mean' in d:
+                            f.write(f"{d['margin_mean']:6.3f} {d['margin_p5']:6.3f} ")
+                        else:
+                            f.write(f"{'N/A':>6} {'N/A':>6} ")
+                        if 'impostor_max_mean' in d:
+                            f.write(f"{d['impostor_max_mean']:6.3f} {d.get('impostor_margin_mean',0):6.3f} "
+                                    f"{d.get('separation_cosine',0):6.3f} {d.get('separation_margin',0):6.3f} ")
+                        else:
+                            f.write(f"{'N/A':>6} {'N/A':>6} {'N/A':>6} {'N/A':>6} ")
+                        if 'sim_fnir_cosine' in d:
+                            f.write(f"{d['sim_fnir_cosine']:6.3f} {d['sim_fnir_margin']:6.3f}")
+                        else:
+                            f.write(f"{'N/A':>6} {'N/A':>6}")
+                        f.write("\n")
+
+                    # GHOST 추이
+                    if any('ghost_corr_cos_s' in d for d in self._diag_history):
+                        f.write(f"\n\nGHOST corr(cosine, s) trend\n{'='*60}\n")
+                        for d in self._diag_history:
+                            if 'ghost_corr_cos_s' in d:
+                                f.write(f"  Exp {d['exp']:3d}: corr={d['ghost_corr_cos_s']:.3f}  "
+                                        f"s_u={d['ghost_s_mean']:.0f}  "
+                                        f"g_u={d['ghost_gamma_mean']:.6f}\n")
+
+                    # Tail vs Normal 추이
+                    if any('tail_cos_mean' in d for d in self._diag_history):
+                        f.write(f"\n\nTail(bot20%) vs Normal(top50%) trend\n{'='*60}\n")
+                        for d in self._diag_history:
+                            if 'tail_cos_mean' in d:
+                                f.write(f"  Exp {d['exp']:3d}: "
+                                        f"tail cos={d['tail_cos_mean']:.3f} mrg={d['tail_margin_mean']:.3f} r1={d['tail_rank1']:.3f} | "
+                                        f"norm cos={d['normal_cos_mean']:.3f} mrg={d['normal_margin_mean']:.3f} r1={d['normal_rank1']:.3f}\n")
+
+                    # Per-class worst 추이
+                    f.write(f"\n\nPer-class Worst Users trend\n{'='*60}\n")
+                    for d in self._diag_history:
+                        if 'worst_users' in d:
+                            worst_str = ', '.join([f"U{uid}({sc:.3f})" for uid, sc in d['worst_users']])
+                            f.write(f"  Exp {d['exp']:3d}: {worst_str}\n")
+
+                    # 핵심 결론
+                    f.write(f"\n\nKey Summary\n{'='*60}\n")
+                    latest = self._diag_history[-1]
+                    if 'sim_fnir_cosine' in latest and 'sim_fnir_margin' in latest:
+                        f.write(f"  @1%FPIR genuine reject rate:\n")
+                        f.write(f"    cosine: {latest['sim_fnir_cosine']*100:.1f}%\n")
+                        f.write(f"    margin: {latest['sim_fnir_margin']*100:.1f}%\n")
+                        if latest['sim_fnir_margin'] < latest['sim_fnir_cosine']:
+                            diff = (latest['sim_fnir_cosine'] - latest['sim_fnir_margin']) * 100
+                            f.write(f"    -> margin is {diff:.1f}%p better\n")
+                        else:
+                            f.write(f"    -> cosine is better\n")
+                    if 'ghost_corr_cos_s' in latest:
+                        f.write(f"  GHOST corr(cos,s) = {latest['ghost_corr_cos_s']:.3f}\n")
+                        if abs(latest['ghost_corr_cos_s']) > 0.5:
+                            f.write(f"    -> High correlation: GHOST effect limited\n")
+                        else:
+                            f.write(f"    -> Low correlation: GHOST promising\n")
+
+                print(f"  [DIAG] Report saved: {_txt_path}")
+                print(f"  [DIAG] JSON saved: {_json_path}")
+
+            print(f"{'='*70}\n")
 
         # ========================================
         # Step 7: DET curve용 스코어 캐시
