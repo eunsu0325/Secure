@@ -1054,7 +1054,8 @@ class COCONUTTrainer:
         Args:
             class_scores: {user_id: mean_genuine_cosine}
         """
-        self._qar_class_scores.update(class_scores)
+        # numpy.int64 등 non-serializable key/value를 Python 기본형으로 변환
+        self._qar_class_scores.update({int(k): float(v) for k, v in class_scores.items()})
 
     def _qar_identify_tail_users(self) -> List[int]:
         """
@@ -1115,7 +1116,7 @@ class COCONUTTrainer:
             'tau_cos': float(tau_cos),
             'threshold': float(tau_cos + self.rehab_margin),
             'n_tail': len(tail_users),
-            'tail_ids': tail_users,
+            'tail_ids': [int(uid) for uid in tail_users],
             'n_rehab_samples': len(rehab_paths),
         })
 
@@ -1925,7 +1926,13 @@ class COCONUTTrainer:
 
                 _json_path = os.path.join(_save_dir, 'diag_history.json')
                 with open(_json_path, 'w') as f:
-                    json.dump(self._diag_history, f, indent=2, ensure_ascii=False)
+                    import numpy as _np
+                    def _json_default(o):
+                        if isinstance(o, _np.integer): return int(o)
+                        if isinstance(o, _np.floating): return float(o)
+                        if isinstance(o, _np.ndarray): return o.tolist()
+                        return str(o)
+                    json.dump(self._diag_history, f, indent=2, ensure_ascii=False, default=_json_default)
 
                 _txt_path = os.path.join(_save_dir, f'diag_report_exp{_exp_num:03d}.txt')
                 with open(_txt_path, 'w') as f:
