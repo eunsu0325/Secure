@@ -1097,34 +1097,55 @@ class COCONUTTrainer:
             self._last_genuine_scores = s_genuine_cos.copy() if len(s_genuine_cos) > 0 else np.array([])
             self._last_impostor_scores = s_impostor_cos.copy() if len(s_impostor_cos) > 0 else np.array([])
 
-            # 독립 캘리브레이션
+            # Joint 캘리브레이션: margin τ 먼저, cosine τ는 conditional
             if len(s_impostor_cos) >= 10:
                 old_tau_cos = None if not self._first_calibration_done else self.ncm.tau_cos
                 old_tau_margin = None if not self._first_calibration_done else self.ncm.tau_margin
+                target_far = self.openset_config.target_far
 
-                result_cos = self.threshold_calibrator_cos.calibrate(
-                    genuine_scores=s_genuine_cos,
-                    impostor_scores=s_impostor_cos,
-                    old_tau=old_tau_cos
-                )
+                # Step 1: margin τ — 독립 캘리브레이션
                 result_margin = self.threshold_calibrator_margin.calibrate(
                     genuine_scores=s_genuine_margin,
                     impostor_scores=s_impostor_margin,
                     old_tau=old_tau_margin
                 )
+                tau_margin_new = result_margin['tau_smoothed']
+
+                # Step 2: cosine τ — margin gate 통과한 impostor 기준 conditional
+                margin_pass = s_impostor_cos[s_impostor_margin >= tau_margin_new]
+                if len(margin_pass) >= 10:
+                    p_margin_pass = np.mean(s_impostor_margin >= tau_margin_new)
+                    conditional_rate = min(target_far / max(p_margin_pass, 1e-6), 1.0)
+                    tau_cos_raw = np.quantile(margin_pass, 1 - conditional_rate)
+                else:
+                    # margin이 대부분 걸러서 충분한 샘플 없음 → cosine만으로
+                    tau_cos_raw = np.quantile(s_impostor_cos, 1 - target_far)
+
+                # cosine τ에 EMA smoothing 적용
+                tau_cos_new = self.threshold_calibrator_cos.smooth_tau(old_tau_cos, tau_cos_raw)
+                self.threshold_calibrator_cos.tau_s_current = tau_cos_new
+
                 self._first_calibration_done = True
 
                 self.ncm.set_thresholds(
-                    tau_cos=result_cos['tau_smoothed'],
-                    tau_margin=result_margin['tau_smoothed']
+                    tau_cos=tau_cos_new,
+                    tau_margin=tau_margin_new
                 )
-                self.ncm.tau_s = result_cos['tau_smoothed']  # 레거시 호환
+                self.ncm.tau_s = tau_cos_new  # 레거시 호환
+
+                # Joint FPIR 검증
+                joint_pass = (s_impostor_cos >= tau_cos_new) & (s_impostor_margin >= tau_margin_new)
+                joint_fpir = np.mean(joint_pass)
+                joint_frr = 0.0
+                if len(s_genuine_cos) > 0:
+                    gen_pass = (s_genuine_cos >= tau_cos_new) & (s_genuine_margin >= tau_margin_new)
+                    joint_frr = np.mean(~gen_pass)
 
                 if self.verbose:
-                    print(f"Dual Gate Calibration Results:")
-                    print(f"   Target FPIR: {self.openset_config.target_far*100:.1f}%")
-                    print(f"   τ_cos: {result_cos['tau_smoothed']:.4f} (FPIR={result_cos.get('current_far', 0)*100:.1f}%)")
-                    print(f"   τ_margin: {result_margin['tau_smoothed']:.4f} (FPIR={result_margin.get('current_far', 0)*100:.1f}%)")
+                    print(f"Dual Gate Calibration (Joint):")
+                    print(f"   Target FPIR: {target_far*100:.1f}%")
+                    print(f"   τ_cos: {tau_cos_new:.4f}, τ_margin: {tau_margin_new:.4f}")
+                    print(f"   Joint FPIR: {joint_fpir*100:.2f}%, Joint FRR: {joint_frr*100:.2f}%")
             else:
                 print("  [WARN] Not enough unknown_dev samples for calibration")
 
@@ -1397,16 +1418,29 @@ class COCONUTTrainer:
 
         for target_fpir in target_fpirs:
             if self.rejection_gate == 'cosine_margin' and len(nonmated_margins) > 0:
-                # 이중 게이트: 각각의 τ 계산 후 AND 적용
-                tau_cos = np.quantile(nonmated_max_scores, 1 - target_fpir)
-                tau_margin = np.quantile(nonmated_margins, 1 - target_fpir)
+                # 이중 게이트: joint threshold로 정확한 FPIR 달성
+                # margin τ를 고정 후 cosine τ를 sweep하여 joint FPIR = target
+                tau_margin_fixed = np.quantile(nonmated_margins, 1 - target_fpir)
 
-                # FPIR = P(impostor passes BOTH gates)
-                impostor_pass = (nonmated_max_scores >= tau_cos) & (nonmated_margins >= tau_margin)
+                # margin gate를 통과한 impostor만 대상으로 cosine τ 결정
+                margin_pass_mask = nonmated_margins >= tau_margin_fixed
+                if margin_pass_mask.sum() > 0:
+                    cos_after_margin = nonmated_max_scores[margin_pass_mask]
+                    # 이 중에서 target_fpir 비율만 최종 통과하도록 cosine τ 설정
+                    # joint FPIR = P(margin pass) * P(cosine pass | margin pass) = target_fpir
+                    # P(cosine pass | margin pass) = target_fpir / P(margin pass)
+                    p_margin_pass = margin_pass_mask.mean()
+                    conditional_rate = min(target_fpir / p_margin_pass, 1.0)
+                    tau_cos = np.quantile(cos_after_margin, 1 - conditional_rate)
+                else:
+                    tau_cos = np.quantile(nonmated_max_scores, 1 - target_fpir)
+
+                # 실제 달성 FPIR 검증
+                impostor_pass = (nonmated_max_scores >= tau_cos) & (nonmated_margins >= tau_margin_fixed)
                 achieved_fpir = np.mean(impostor_pass)
 
                 if len(mated_genuine_scores) > 0:
-                    genuine_pass = (mated_cosine_max >= tau_cos) & (mated_margins_arr >= tau_margin)
+                    genuine_pass = (mated_cosine_max >= tau_cos) & (mated_margins_arr >= tau_margin_fixed)
                     detection_fail = ~genuine_pass
                     identification_fail = ~mated_rank1_correct
                     is_fn = detection_fail | identification_fail
