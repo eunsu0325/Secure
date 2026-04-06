@@ -232,6 +232,17 @@ class COCONUTTrainer:
             print(f"[COCONUT] DER++ enabled: α={self.der_alpha}, "
                   f"batch_size={self.der_batch_size}, warmup={self.der_warmup_users}")
 
+        # QAR (Quality-Aware Replay) — tail user 선별 재학습
+        self.use_qar = getattr(config.training, 'use_qar', False)
+        self.rehab_margin = getattr(config.training, 'rehab_margin', 0.05)
+        self.rehab_samples_per_user = getattr(config.training, 'rehab_samples_per_user', 4)
+        self.qar_warmup_users = getattr(config.training, 'qar_warmup_users', 10)
+        self._qar_class_scores = {}  # {user_id: mean_genuine_cosine} — 평가 시 갱신
+        self._qar_rehab_log = []     # 진단용: [(exp, tail_ids, n_rehab_samples)]
+        if self.use_qar and self.verbose:
+            print(f"[COCONUT] QAR enabled: margin={self.rehab_margin}, "
+                  f"samples/user={self.rehab_samples_per_user}, warmup={self.qar_warmup_users}")
+
         # [CORE] 핵심 수정: 옵티마이저 관리 개선
         self.base_lr = config.training.learning_rate
         self.proxy_lr_ratio = getattr(config.training, 'proxy_lr_ratio', 10) if self.use_proxy_anchor else 1
@@ -677,6 +688,23 @@ class COCONUTTrainer:
         # 학습 통계
         loss_avg = AverageMeter('Loss')
 
+        # QAR: tail user rehab 샘플링 (experience당 1회)
+        rehab_dataset = None
+        if self.use_qar:
+            rehab_paths, rehab_labels = self._qar_sample_rehab_batch()
+            if rehab_paths:
+                rehab_dataset = MemoryDataset(
+                    paths=rehab_paths,
+                    labels=rehab_labels,
+                    transform=self.train_transform,
+                    train=True,
+                    channels=self.config.dataset.channels
+                )
+                if self.verbose:
+                    n_tail = self._qar_rehab_log[-1]['n_tail'] if self._qar_rehab_log else 0
+                    print(f"[QAR] Rehab: {n_tail} tail users, "
+                          f"{len(rehab_paths)} samples injected")
+
         # SCR 논문 방식: epoch당 여러 iteration
         self.model.train()
 
@@ -716,7 +744,10 @@ class COCONUTTrainer:
                             channels=self.config.dataset.channels
                         )
 
-                        combined_dataset = ConcatDataset([current_subset, memory_dataset])
+                        datasets = [current_subset, memory_dataset]
+                        if rehab_dataset is not None:
+                            datasets.append(rehab_dataset)
+                        combined_dataset = ConcatDataset(datasets)
                     else:
                         combined_dataset = current_subset
                 else:
@@ -995,7 +1026,7 @@ class COCONUTTrainer:
                         tau_str = f"tau={self.ncm.tau_s:.4f}"
                     print(f"  {tau_str} | Rank-1={rank1:.3f} | "
                           f"FNIR@1%FPIR={fnir1:.3f} (TAR={tar1:.3f}) | "
-                          f"Det실패={det_fail:.3f}, Id실패={id_fail:.3f}")
+                          f"FRR={det_fail:.3f}, RankMiss={id_fail:.3f}")
 
             else:
                 print(f"  [WARN] Warmup phase: {len(self.registered_users)}/{self.openset_config.warmup_users}")
@@ -1010,6 +1041,85 @@ class COCONUTTrainer:
             'memory_size': len(self.memory_buffer),
             'num_registered': len(self.registered_users)
         }
+
+    # ================================================================
+    # QAR (Quality-Aware Replay) — tail user 식별 및 rehab 샘플링
+    # ================================================================
+
+    def _qar_update_scores(self, class_scores: Dict[int, float]):
+        """
+        평가 시 계산된 per-class genuine score를 QAR에 저장.
+        _evaluate_openset()에서 호출됨.
+
+        Args:
+            class_scores: {user_id: mean_genuine_cosine}
+        """
+        self._qar_class_scores.update(class_scores)
+
+    def _qar_identify_tail_users(self) -> List[int]:
+        """
+        현재 tau_cos + rehab_margin 이하인 tail user를 식별.
+
+        Returns:
+            tail user ID 리스트
+        """
+        if not self._qar_class_scores:
+            return []
+
+        tau_cos = self.ncm.tau_cos
+        if tau_cos is None:
+            return []
+
+        threshold = tau_cos + self.rehab_margin
+        tail_users = [
+            uid for uid, score in self._qar_class_scores.items()
+            if score < threshold and uid in self.memory_buffer.buffer_groups
+        ]
+        return tail_users
+
+    def _qar_sample_rehab_batch(self) -> Tuple[List[str], List[int]]:
+        """
+        Tail user들의 메모리에서 rehab 샘플을 추출.
+
+        Returns:
+            (rehab_paths, rehab_labels) — 빈 리스트면 rehab 없음
+        """
+        # Warmup 체크
+        if self.experience_count < self.qar_warmup_users:
+            return [], []
+
+        tail_users = self._qar_identify_tail_users()
+        if not tail_users:
+            return [], []
+
+        rehab_paths = []
+        rehab_labels = []
+
+        for uid in tail_users:
+            if uid not in self.memory_buffer.buffer_groups:
+                continue
+            user_buffer = self.memory_buffer.buffer_groups[uid]
+            n_available = len(user_buffer.buffer)
+            n_sample = min(self.rehab_samples_per_user, n_available)
+            if n_sample == 0:
+                continue
+
+            paths, labels, _ = user_buffer.sample(n_sample)
+            rehab_paths.extend(paths)
+            rehab_labels.extend(labels)
+
+        # 진단 로그
+        tau_cos = self.ncm.tau_cos if self.ncm.tau_cos is not None else 0.0
+        self._qar_rehab_log.append({
+            'exp': self.experience_count,
+            'tau_cos': float(tau_cos),
+            'threshold': float(tau_cos + self.rehab_margin),
+            'n_tail': len(tail_users),
+            'tail_ids': tail_users,
+            'n_rehab_samples': len(rehab_paths),
+        })
+
+        return rehab_paths, rehab_labels
 
     @torch.no_grad()
     def _calibrate_threshold(self):
@@ -1142,7 +1252,8 @@ class COCONUTTrainer:
                     joint_frr = np.mean(~gen_pass)
 
                 if self.verbose:
-                    print(f"Dual Gate Calibration (Joint):")
+                    print(f"Dual Gate Calibration (Joint)  "
+                          f"[unknown_dev_file 기반, FPIR=비등록자 수락율, FRR=등록자 거부율]")
                     print(f"   Target FPIR: {target_far*100:.1f}%")
                     print(f"   τ_cos: {tau_cos_new:.4f}, τ_margin: {tau_margin_new:.4f}")
                     print(f"   Joint FPIR: {joint_fpir*100:.2f}%, Joint FRR: {joint_frr*100:.2f}%")
@@ -1541,7 +1652,8 @@ class COCONUTTrainer:
 
             # --- 1. Genuine score 분포 상세 ---
             print(f"\n{'='*70}")
-            print(f"[DIAG] Genuine Score Distribution (n={len(_ms)})")
+            print(f"[DIAG] Genuine Score Distribution (n={len(_ms)})  "
+                  f"[max_score=probe의 최대 NCM cosine, genuine_score=정답 클래스와의 cosine]")
             print(f"  max_score:    \u03bc={_ms.mean():.4f} \u03c3={_ms.std():.4f} "
                   f"min={_ms.min():.4f} p5={np.percentile(_ms,5):.4f} "
                   f"p25={np.percentile(_ms,25):.4f} median={np.median(_ms):.4f}")
@@ -1568,7 +1680,8 @@ class COCONUTTrainer:
                     _top2 = _topk.values[:, 1].cpu().numpy()
                     _margin = _top1 - _top2
 
-                    print(f"\n[DIAG] Top1-Top2 Margin (genuine)")
+                    print(f"\n[DIAG] Top1-Top2 Margin (genuine)  "
+                          f"[margin=1위 cosine - 2위 cosine, 클수록 확신도 높음]")
                     print(f"  margin: \u03bc={_margin.mean():.4f} \u03c3={_margin.std():.4f} "
                           f"min={_margin.min():.4f} p5={np.percentile(_margin,5):.4f} "
                           f"median={np.median(_margin):.4f}")
@@ -1578,7 +1691,8 @@ class COCONUTTrainer:
                     _normal_mask = _ms >= np.percentile(_ms, 50)
 
                     if _tail_mask.sum() > 0 and _normal_mask.sum() > 0:
-                        print(f"\n[DIAG] Tail(\ud558\uc704 20%) vs Normal(\uc0c1\uc704 50%)")
+                        print(f"\n[DIAG] Tail(\ud558\uc704 20%) vs Normal(\uc0c1\uc704 50%)  "
+                              f"[max_score 기준 분할, rank1=closed-set 정답률]")
                         print(f"  Tail   (n={_tail_mask.sum()}): "
                               f"cos={_ms[_tail_mask].mean():.4f} "
                               f"margin={_margin[_tail_mask].mean():.4f} "
@@ -1589,7 +1703,7 @@ class COCONUTTrainer:
                               f"rank1_acc={_rc[_normal_mask].mean():.3f}")
 
             # --- 3. Per-class Worst/Best ---
-            print(f"\n[DIAG] Per-class Worst/Best 5")
+            print(f"\n[DIAG] Per-class Worst/Best 5  [mean_score=해당 사용자 probe의 max cosine 평균]")
             _class_scores = {}
             for i, lbl in enumerate(_labels):
                 if lbl not in _class_scores:
@@ -1597,6 +1711,11 @@ class COCONUTTrainer:
                 _class_scores[lbl].append(_ms[i])
 
             _class_means = {k: np.mean(v) for k, v in _class_scores.items()}
+
+            # QAR: per-class genuine score 갱신
+            if self.use_qar:
+                self._qar_update_scores(_class_means)
+
             _worst5 = sorted(_class_means.items(), key=lambda x: x[1])[:5]
             _best5 = sorted(_class_means.items(), key=lambda x: x[1], reverse=True)[:5]
 
@@ -1686,7 +1805,8 @@ class COCONUTTrainer:
                         _nm_margin = None
 
                 if _nm_top1 is not None:
-                    print(f"\n[DIAG] Impostor vs Genuine")
+                    print(f"\n[DIAG] Impostor vs Genuine  "
+                          f"[Genuine=등록 사용자 probe, Impostor=unknown_test 비등록 probe]")
                     print(f"  Genuine  max_cos: \u03bc={_ms.mean():.4f}  margin: \u03bc={_margin.mean():.4f}")
                     print(f"  Impostor max_cos: \u03bc={_nm_top1.mean():.4f}  margin: \u03bc={_nm_margin.mean():.4f}")
                     print(f"  separation(cosine):  {_ms.mean() - _nm_top1.mean():.4f}")
@@ -1697,14 +1817,14 @@ class COCONUTTrainer:
                     _fn_cos = np.mean(_ms < _tau_cos_diag)
                     _fn_margin = np.mean(_margin < _tau_margin_diag)
 
-                    print(f"\n  @1%FPIR simulation:")
-                    print(f"    cosine  tau={_tau_cos_diag:.4f} -> genuine reject={_fn_cos*100:.1f}%")
-                    print(f"    margin  tau={_tau_margin_diag:.4f} -> genuine reject={_fn_margin*100:.1f}%")
+                    print(f"\n  @1%FPIR simulation  "
+                          f"[FRR only: detection 실패율만, rank-1 miss 미포함. FNIR은 Step5 참조]")
+                    print(f"    cosine  tau={_tau_cos_diag:.4f} -> genuine FRR={_fn_cos*100:.1f}%")
+                    print(f"    margin  tau={_tau_margin_diag:.4f} -> genuine FRR={_fn_margin*100:.1f}%")
 
                     if self.rejection_gate == 'cosine_margin':
-                        # 이중 게이트 시뮬레이션
                         _fn_dual = np.mean((_ms < _tau_cos_diag) | (_margin < _tau_margin_diag))
-                        print(f"    dual    -> genuine reject={_fn_dual*100:.1f}%")
+                        print(f"    dual    -> genuine FRR={_fn_dual*100:.1f}%")
                     else:
                         print(f"    {'-> margin BETTER!' if _fn_margin < _fn_cos else '-> cosine better'}")
 
@@ -1755,9 +1875,9 @@ class COCONUTTrainer:
                 if _fn_cos is not None:
                     _diag_entry.update({
                         'sim_tau_cosine': float(_tau_cos_diag),
-                        'sim_fnir_cosine': float(_fn_cos),
+                        'sim_frr_cosine': float(_fn_cos),
                         'sim_tau_margin': float(_tau_margin_diag),
-                        'sim_fnir_margin': float(_fn_margin),
+                        'sim_frr_margin': float(_fn_margin),
                     })
 
             # 이중 게이트 메트릭 추가
@@ -1784,6 +1904,16 @@ class COCONUTTrainer:
                 _diag_entry['worst_users'] = [(int(uid), float(sc)) for uid, sc in _worst5]
                 _diag_entry['best_users'] = [(int(uid), float(sc)) for uid, sc in _best5]
 
+            # QAR 진단 정보 추가
+            if self.use_qar and self._qar_rehab_log:
+                _qar_last = self._qar_rehab_log[-1]
+                _diag_entry['qar'] = {
+                    'n_tail': _qar_last['n_tail'],
+                    'n_rehab_samples': _qar_last['n_rehab_samples'],
+                    'threshold': _qar_last['threshold'],
+                    'tail_ids': _qar_last['tail_ids'],
+                }
+
             self._diag_history.append(_diag_entry)
 
             # === 10 경험마다 리포트 파일 저장 ===
@@ -1803,12 +1933,23 @@ class COCONUTTrainer:
                     f.write(f"COCONUT Diagnostic Report - Experience {_exp_num}\n")
                     f.write(f"{'='*80}\n\n")
 
+                    f.write(f"Column Legend:\n")
+                    f.write(f"  R1      = Closed-set Rank-1 accuracy\n")
+                    f.write(f"  cos_u/s = Genuine max cosine mean/std\n")
+                    f.write(f"  cos_mn  = Genuine max cosine min\n")
+                    f.write(f"  cos_p5  = Genuine max cosine 5th percentile\n")
+                    f.write(f"  mrg_u   = Genuine top1-top2 margin mean\n")
+                    f.write(f"  mrg_p5  = Genuine top1-top2 margin 5th percentile\n")
+                    f.write(f"  imp_c/m = Impostor(unknown) max cosine/margin mean\n")
+                    f.write(f"  sp_c/m  = Separation (genuine - impostor) cosine/margin\n")
+                    f.write(f"  frr_c/m = @1%FPIR FRR simulation (detection 실패만, rank-1 miss 미포함)\n\n")
+
                     f.write(f"{'Exp':>4} {'Cls':>4} {'R1':>5} "
                             f"{'cos_u':>6} {'cos_s':>6} {'cos_mn':>6} {'cos_p5':>6} "
                             f"{'mrg_u':>6} {'mrg_p5':>6} "
                             f"{'imp_c':>6} {'imp_m':>6} "
                             f"{'sp_c':>6} {'sp_m':>6} "
-                            f"{'fn_c':>6} {'fn_m':>6}\n")
+                            f"{'frr_c':>6} {'frr_m':>6}\n")
                     f.write(f"{'-'*110}\n")
 
                     for d in self._diag_history:
@@ -1824,8 +1965,8 @@ class COCONUTTrainer:
                                     f"{d.get('separation_cosine',0):6.3f} {d.get('separation_margin',0):6.3f} ")
                         else:
                             f.write(f"{'N/A':>6} {'N/A':>6} {'N/A':>6} {'N/A':>6} ")
-                        if 'sim_fnir_cosine' in d:
-                            f.write(f"{d['sim_fnir_cosine']:6.3f} {d['sim_fnir_margin']:6.3f}")
+                        if 'sim_frr_cosine' in d:
+                            f.write(f"{d['sim_frr_cosine']:6.3f} {d['sim_frr_margin']:6.3f}")
                         else:
                             f.write(f"{'N/A':>6} {'N/A':>6}")
                         f.write("\n")
@@ -1855,15 +1996,27 @@ class COCONUTTrainer:
                             worst_str = ', '.join([f"U{uid}({sc:.3f})" for uid, sc in d['worst_users']])
                             f.write(f"  Exp {d['exp']:3d}: {worst_str}\n")
 
+                    # QAR 추이
+                    if any('qar' in d for d in self._diag_history):
+                        f.write(f"\n\nQAR (Quality-Aware Replay) trend\n{'='*60}\n")
+                        f.write(f"  [tail = per-user mean cosine < tau_cos + rehab_margin]\n")
+                        for d in self._diag_history:
+                            if 'qar' in d:
+                                q = d['qar']
+                                f.write(f"  Exp {d['exp']:3d}: "
+                                        f"tail={q['n_tail']:2d} users, "
+                                        f"rehab={q['n_rehab_samples']:3d} samples, "
+                                        f"threshold={q['threshold']:.4f}\n")
+
                     # 핵심 결론
                     f.write(f"\n\nKey Summary\n{'='*60}\n")
                     latest = self._diag_history[-1]
-                    if 'sim_fnir_cosine' in latest and 'sim_fnir_margin' in latest:
-                        f.write(f"  @1%FPIR genuine reject rate:\n")
-                        f.write(f"    cosine: {latest['sim_fnir_cosine']*100:.1f}%\n")
-                        f.write(f"    margin: {latest['sim_fnir_margin']*100:.1f}%\n")
-                        if latest['sim_fnir_margin'] < latest['sim_fnir_cosine']:
-                            diff = (latest['sim_fnir_cosine'] - latest['sim_fnir_margin']) * 100
+                    if 'sim_frr_cosine' in latest and 'sim_frr_margin' in latest:
+                        f.write(f"  @1%FPIR genuine FRR (detection 실패율만, rank-1 miss 미포함):\n")
+                        f.write(f"    cosine: {latest['sim_frr_cosine']*100:.1f}%\n")
+                        f.write(f"    margin: {latest['sim_frr_margin']*100:.1f}%\n")
+                        if latest['sim_frr_margin'] < latest['sim_frr_cosine']:
+                            diff = (latest['sim_frr_cosine'] - latest['sim_frr_margin']) * 100
                             f.write(f"    -> margin is {diff:.1f}%p better\n")
                         else:
                             f.write(f"    -> cosine is better\n")
@@ -1896,10 +2049,13 @@ class COCONUTTrainer:
         # Step 8: 결과 출력
         # ========================================
         if self.verbose:
+            print(f"\n   [Open-Set Identification — FNIR@FPIR (Su et al.)]")
+            print(f"   FNIR = P(reject | genuine) ∪ P(wrong rank-1 | genuine)")
+            print(f"   FPIR = P(accept | non-mated unknown)")
             print(f"   Gallery: {self.ncm.get_num_classes()} users")
-            print(f"   Mated probes: {len(mated_paths)} samples")
-            print(f"   Non-mated probes: {len(nonmated_paths)} samples")
-            print(f"   Rank-1 (closed-set): {rank1:.4f}")
+            print(f"   Mated probes: {len(mated_paths)} (eval_probe_file, 등록 사용자)")
+            print(f"   Non-mated probes: {len(nonmated_paths)} (unknown_test_file, 비등록 사용자)")
+            print(f"   Rank-1 (closed-set, threshold 무관): {rank1:.4f}")
             for fpir_pct in [1, 5, 10]:
                 fnir_v = results[f'FNIR@{fpir_pct}%FPIR']
                 tar_v = results[f'TAR@{fpir_pct}%FPIR']
@@ -1908,9 +2064,9 @@ class COCONUTTrainer:
                 idf_v = results[f'id_fail@{fpir_pct}%']
                 both_v = results[f'both_fail@{fpir_pct}%']
                 print(f"   FNIR@{fpir_pct}%FPIR = {fnir_v:.4f} (TAR={tar_v:.4f}, τ={tau_v:.4f})")
-                print(f"     └ Det fail: {det_v:.4f}, Id fail: {idf_v:.4f}, Both: {both_v:.4f}")
+                print(f"     └ Det fail(FRR): {det_v:.4f}, Id fail(rank miss): {idf_v:.4f}, Both: {both_v:.4f}")
             if TRR_n is not None:
-                print(f"   FPIR_xdom: {FAR_n:.4f}")
+                print(f"   FPIR_xdom (cross-domain rejection): {FAR_n:.4f}")
             if self.rejection_gate == 'cosine_margin':
                 print(f"   Threshold (calibrated): τ_cos={self.ncm.tau_cos:.4f}, τ_margin={self.ncm.tau_margin:.4f}")
             else:
@@ -1920,8 +2076,18 @@ class COCONUTTrainer:
         if not self.verbose:
             fnir1 = results.get('FNIR@1%FPIR', 0)
             tar1 = results.get('TAR@1%FPIR', 0)
-            print(f"  [Eval] Rank-1={rank1:.3f} | FNIR@1%FPIR={fnir1:.3f} (TAR={tar1:.3f}) | "
+            det1 = results.get('det_fail@1%', 0)
+            id1 = results.get('id_fail@1%', 0)
+            print(f"  [Eval-Identification] Rank-1={rank1:.3f} | FNIR@1%={fnir1:.3f} (TAR={tar1:.3f}) | "
+                  f"FRR={det1:.3f} RankMiss={id1:.3f} | "
                   f"mated={len(mated_paths)}, nonmated={len(nonmated_paths)}")
+
+            # QAR compact 출력
+            if self.use_qar and self._qar_rehab_log:
+                last = self._qar_rehab_log[-1]
+                print(f"  [QAR] tail={last['n_tail']} users | "
+                      f"rehab={last['n_rehab_samples']} samples | "
+                      f"threshold={last['threshold']:.4f} (τ_cos+{self.rehab_margin})")
 
         # 하위 호환: 기존 키도 포함
         results['FNIR'] = results.get('FNIR@1%FPIR', 0)

@@ -257,7 +257,10 @@ class ContinualLearningEvaluator:
         self.test_step += 1
         if self.verbose:
             print(f"\n{'='*60}")
-            print(f" Evaluating All {len(self.registered_users)} Users (Step {self.test_step})")
+            print(f" Per-User Verification Evaluation (Step {self.test_step})")
+            print(f" [1:1 verification: genuine=정답 클래스 cosine, impostor=unknown max cosine]")
+            print(f" [forgetting 측정용 — open-set identification 지표는 trainer 참조]")
+            print(f" Evaluating {len(self.registered_users)} Users")
             print(f"{'='*60}")
 
         unknown_impostor_scores = self._compute_unknown_impostor_scores(trainer)
@@ -299,9 +302,10 @@ class ContinualLearningEvaluator:
 
             if self.verbose:
                 print(f"1-EER: {metrics.get('1-eer', 0):.3f}, "
-                      f"TAR@1%: {metrics.get('tar_001', 0):.3f}, "
-                      f"TAR@5%: {metrics.get('tar_005', 0):.3f}, "
-                      f"TAR@10%: {metrics.get('tar_010', 0):.3f}")
+                      f"TAR@1%FAR: {metrics.get('tar_001', 0):.3f}, "
+                      f"TAR@5%FAR: {metrics.get('tar_005', 0):.3f}, "
+                      f"TAR@10%FAR: {metrics.get('tar_010', 0):.3f}"
+                      f"  (verification, rank 무관)")
 
         # Generate report
         report = self.forgetting_tracker.get_report(self.test_step, experience_id)

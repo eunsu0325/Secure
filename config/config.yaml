@@ -32,7 +32,7 @@ Model:
 
 Training:
   experience_batch_size: 16
-  memory_batch_size: 200  # 112→200 (clipping 적용으로 초반 과적합 방지됨)
+  memory_batch_size: 160  # 200→160 (QAR rehab 추가분 감안, 총 배치 ~200-240 유지)
   num_experiences: 100
   memory_size: 1000
   min_samples_per_class: 9
@@ -48,8 +48,8 @@ Training:
   num_workers: 8
   learning_rate: 0.0001
   projection_learning_rate: 0.0005  # 5x backbone LR
-  scheduler_step_size: 50
-  scheduler_gamma: 0.8
+  scheduler_step_size: 40           # 50→40 (LR decay를 조금 더 일찍, 2회 decay 가능)
+  scheduler_gamma: 0.5              # 0.8→0.5 (더 확실한 LR 감소: 0.0001→0.00005→0.000025)
   temperature: 0.07  # SupConLoss temperature
   test_interval: 1  # Evaluation and calibration frequency
   checkpoint_path: /content/drive/MyDrive/coconut_update_4
@@ -64,10 +64,10 @@ Training:
 
   # ProxyAnchorLoss settings
   use_proxy_anchor: true
-  proxy_margin: 0.15        # Proxy Anchor margin delta
-  proxy_alpha: 16          # Proxy Anchor scaling alpha
-  proxy_lr_ratio: 100        # Proxy learning rate multiplier (10x backbone)
-  proxy_lambda: 0.7        # Fixed weight (0.3 = 30% ProxyAnchor, 70% SupCon)
+  proxy_margin: 0.1          # 0.15→0.1 (논문 default, alpha=32와 균형)
+  proxy_alpha: 32            # 16→32 (논문 default, class separation 강화)
+  proxy_lr_ratio: 50         # 100→50 (proxy 진동 방지, 논문 권장 10~100 범위 내)
+  proxy_lambda: 0.5          # 0.7→0.5 (SupCon과 균형, 최종 weight: 0.5×0.5=0.25)
 
   # IDL+RTM Loss (Su et al., "Open-Set Biometrics" — Eq. 7-13)
   use_idl_rtm: true
@@ -75,15 +75,23 @@ Training:
   idl_beta_id: 0.35            # β: Identification sigmoid steepness (Eq. 9, Table 2)
   idl_gamma_rank: 3.0         # γ: Rank sigmoid steepness (Eq. 10, Table 2)
   idl_rtm_weight: 4.0         # λ: L^RTM weight in L = L^IDL + λ·L^RTM (Eq. 13, Table 2)
-  idl_rtm_lambda: 0.6         # COCONUT 전체 손실 내 IDL+RTM 외부 가중치
+  idl_rtm_lambda: 0.4         # 0.6→0.4 (QAR 추가로 tail 학습 보강, IDL 과도한 지배 완화)
   idl_rtm_warmup_users: 5     # warmup 기간 (사용자 수)
   idl_min_gallery_classes: 2  # 최소 gallery 클래스 수
   idl_gallery_fraction: 0.7   # gallery로 사용할 클래스 비율
 
   # DER++ (Dark Experience Replay) — 6144D feature distillation
-  der_alpha: 0.1            # Feature distillation 가중치 (0.0 = 비활성화)
-  der_batch_size: 32        # DER loss 계산용 샘플 수/iteration
-  der_warmup_users: 3       # Warmup 기간 (사용자 수)
+  der_alpha: 0.15             # 0.1→0.15 (QAR이 active rehab → DER 보존력 약간 강화)
+  der_batch_size: 32          # DER loss 계산용 샘플 수/iteration
+  der_warmup_users: 3         # Warmup 기간 (사용자 수)
+
+  # QAR (Quality-Aware Replay) — tail user 선별 재학습
+  # 배치 ���성: current(16) + memory(160, balanced) + rehab(tail only, 추가)
+  # DER++(feature 보���)과 상호보완: QAR=active rehab, DER++=passive preservation
+  use_qar: true
+  rehab_margin: 0.05        # tau_cos + margin 이하를 tail로 판정 (0.0=임���치 정확히, 0.05=여유)
+  rehab_samples_per_user: 4 # tail user당 추가 replay 샘플 수 (memory_size/100��10, 40% 활용)
+  qar_warmup_users: 10      # QAR 활성화 최소 등록 사용자 수 (= openset.warmup_users와 정합)
 
 # Open-set recognition settings
 Openset:

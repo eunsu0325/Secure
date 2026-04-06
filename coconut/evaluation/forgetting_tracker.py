@@ -298,6 +298,8 @@ class ForgettingTracker:
 
         print("\n" + "="*60)
         print(f" Forgetting Analysis Report (Step {test_step})")
+        print(f" [metric={self.primary_metric}, verification 기반 per-user 측정]")
+        print(f" [Forgetting = max_perf - current_perf, 양수=망각 발생]")
         print("="*60)
 
         print(f"\n📊 Overall Statistics:")
@@ -317,7 +319,7 @@ class ForgettingTracker:
                                 key=lambda x: x[1]['forgetting'],
                                 reverse=True)
 
-            print(f"\n⚠️ Top {min(top_k, len(sorted_users))} Users with Highest Forgetting:")
+            print(f"\n⚠️ Top {min(top_k, len(sorted_users))} Users with Highest Forgetting ({self.primary_metric}):")
             print("  User | Max Perf | Curr Perf | Forgetting")
             print("  " + "-"*45)
 
