@@ -120,6 +120,8 @@ class ConfigParser:
                 openset_dict['target_far'] = 0.01
             if 'verbose_calibration' not in openset_dict:
                 openset_dict['verbose_calibration'] = True
+            if 'rejection_gate' not in openset_dict:
+                openset_dict['rejection_gate'] = 'cosine_only'
             
             #  TTA 기본값 추가
             if 'tta_n_views' not in openset_dict:

@@ -128,6 +128,7 @@ class Openset:
     # Score mode (Method 1: Shared Diagonal Mahalanobis)
     score_mode: str = 'cosine'          # 'cosine' | 'mahalanobis'
     var_reg_alpha: float = 1e-4         # Mahalanobis variance regularization
+    rejection_gate: str = 'cosine_only'  # 'cosine_only' | 'cosine_margin'
 
     # GHOST (Gaussian Hypothesis Open-Set Technique, AAAI 2025)
     use_ghost: bool = False             # GHOST z-score rejection 활성화
@@ -150,4 +151,3 @@ class Openset:
         # Between: 기본값 사용
         if self.tta_n_repeats_between is None:
             self.tta_n_repeats_between = self.tta_n_repeats
-
