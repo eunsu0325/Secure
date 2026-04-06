@@ -92,6 +92,12 @@ class Training:
     der_batch_size: int = 32     # DER loss 계산용 버퍼 샘플 수
     der_warmup_users: int = 3    # DER 활성화 전 warmup 기간
 
+    # QAR (Quality-Aware Replay) — tail user 선별 재학습
+    use_qar: bool = False
+    rehab_margin: float = 0.05        # tau_cos + margin 이하를 tail로 판정
+    rehab_samples_per_user: int = 4   # tail user당 추가 replay 샘플 수
+    qar_warmup_users: int = 10        # QAR 활성화 최소 등록 사용자 수
+
 @dataclasses.dataclass
 class Openset:
     enabled: bool = True
