@@ -290,7 +290,7 @@ class COCONUTTrainer:
                 mode_str = f"MAX + TTA({self.openset_config.tta_n_views})" if self.use_tta else "MAX"
                 print(f" Open-set mode: {mode_str}")
 
-            # GHOST 초기화
+            # GHOST 초기화 (레거시)
             self.use_ghost = getattr(config.openset, 'use_ghost', False)
             self.ghost_n_augment = getattr(config.openset, 'ghost_n_augment', 10)
             if self.use_ghost:
@@ -299,25 +299,59 @@ class COCONUTTrainer:
                 if self.verbose:
                     print(f" GHOST rejection enabled (n_augment={self.ghost_n_augment}, shrinkage_min_n={self.ncm.ghost_shrinkage_min_n})")
 
+            # Rejection gate 모드 설정
+            self.rejection_gate = getattr(config.openset, 'rejection_gate', 'cosine_only')
+            self.ncm.rejection_gate = self.rejection_gate
+            if self.verbose:
+                print(f" Rejection gate: {self.rejection_gate}")
+
             # ThresholdCalibrator 초기화
             score_mode = getattr(config.openset, 'score_mode', 'cosine')
-            if score_mode == 'mahalanobis':
-                cal_clip_range = None
-            elif self.use_ghost:
-                cal_clip_range = None  # GHOST score 범위 사전 불명
-            else:
-                cal_clip_range = (-1.0, 1.0)  # cosine 기본 범위
+            _cal_verbose = self.verbose and config.openset.verbose_calibration
 
-            self.threshold_calibrator = ThresholdCalibrator(
-                mode=score_mode,
-                threshold_mode=config.openset.threshold_mode,
-                target_far=config.openset.target_far,
-                alpha=config.openset.threshold_alpha,
-                max_delta=config.openset.threshold_max_delta,
-                clip_range=cal_clip_range,
-                min_samples=10,
-                verbose=self.verbose and config.openset.verbose_calibration
-            )
+            if self.rejection_gate == 'cosine_margin':
+                # 이중 게이트: cosine용 + margin용 calibrator 각각 생성
+                self.threshold_calibrator_cos = ThresholdCalibrator(
+                    mode='cosine',
+                    threshold_mode=config.openset.threshold_mode,
+                    target_far=config.openset.target_far,
+                    alpha=config.openset.threshold_alpha,
+                    max_delta=config.openset.threshold_max_delta,
+                    clip_range=(-1.0, 1.0),
+                    min_samples=10,
+                    verbose=_cal_verbose
+                )
+                self.threshold_calibrator_margin = ThresholdCalibrator(
+                    mode='cosine',
+                    threshold_mode=config.openset.threshold_mode,
+                    target_far=config.openset.target_far,
+                    alpha=config.openset.threshold_alpha,
+                    max_delta=config.openset.threshold_max_delta,
+                    clip_range=(0.0, 2.0),
+                    min_samples=10,
+                    verbose=_cal_verbose
+                )
+                # 레거시 호환: 단일 calibrator도 cosine용으로 alias
+                self.threshold_calibrator = self.threshold_calibrator_cos
+            else:
+                # 기존 단일 calibrator (cosine_only 또는 GHOST)
+                if score_mode == 'mahalanobis':
+                    cal_clip_range = None
+                elif self.use_ghost:
+                    cal_clip_range = None
+                else:
+                    cal_clip_range = (-1.0, 1.0)
+
+                self.threshold_calibrator = ThresholdCalibrator(
+                    mode=score_mode,
+                    threshold_mode=config.openset.threshold_mode,
+                    target_far=config.openset.target_far,
+                    alpha=config.openset.threshold_alpha,
+                    max_delta=config.openset.threshold_max_delta,
+                    clip_range=cal_clip_range,
+                    min_samples=10,
+                    verbose=_cal_verbose
+                )
 
             # Dev/Train 데이터 관리
             self.probe_data = {}
@@ -336,16 +370,14 @@ class COCONUTTrainer:
 
             # 초기 임계치 설정
             initial_tau = config.openset.initial_tau
-            score_mode_init = getattr(config.openset, 'score_mode', 'cosine')
-            if score_mode_init == 'mahalanobis':
-                initial_tau = -float('inf')  # warmup 중 모두 수락, calibration이 적절한 값 설정
+            if self.rejection_gate == 'cosine_margin':
+                self.ncm.set_thresholds(tau_cos=initial_tau, tau_margin=0.0)
+                self.ncm.tau_s = initial_tau  # 레거시 호환
             elif self.use_ghost:
-                initial_tau = 0.0  # GHOST score는 매우 작은 양수 → warmup 중 모두 수락
-
-            if hasattr(self.ncm, 'set_thresholds'):
-                self.ncm.set_thresholds(tau_s=initial_tau)
+                self.ncm.set_thresholds(tau_s=0.0)
             else:
-                self.ncm.tau_s = initial_tau
+                # cosine_only
+                self.ncm.set_thresholds(tau_s=initial_tau, tau_cos=initial_tau)
 
             if self.verbose:
                 print(f"[TARGET] FAR Target mode enabled")
@@ -907,12 +939,16 @@ class COCONUTTrainer:
                 self._calibrate_threshold()
                 metrics = self._evaluate_openset()
 
-                self.evaluation_history.append({
+                _eval_entry = {
                     'experience': self.experience_count,
                     'num_users': len(self.registered_users),
                     'tau_s': self.ncm.tau_s,
                     'metrics': metrics
-                })
+                }
+                if self.rejection_gate == 'cosine_margin':
+                    _eval_entry['tau_cos'] = self.ncm.tau_cos
+                    _eval_entry['tau_margin'] = self.ncm.tau_margin
+                self.evaluation_history.append(_eval_entry)
 
                 if self.verbose:
                     print("="*60 + "\n")
@@ -948,13 +984,16 @@ class COCONUTTrainer:
                         print(f"  IDL+RTM: L_IDL={idl_info['L_IDL']:.4f}, L_RTM={idl_info['L_RTM']:.4f} | S_det={idl_info['S_det_mean']:.4f}, S_id={idl_info['S_id_mean']:.4f} | G={idl_info['n_gallery']}, NM={idl_info['n_nonmated']}")
 
                     # Line 3: Su et al. FNIR@FPIR 지표
-                    tau = self.ncm.tau_s
                     fnir1 = metrics.get('FNIR@1%FPIR', 0)
                     tar1 = metrics.get('TAR@1%FPIR', 0)
                     rank1 = metrics.get('Rank1', 0)
                     det_fail = metrics.get('det_fail@1%', 0)
                     id_fail = metrics.get('id_fail@1%', 0)
-                    print(f"  tau={tau:.4f} | Rank-1={rank1:.3f} | "
+                    if self.rejection_gate == 'cosine_margin':
+                        tau_str = f"τ_cos={self.ncm.tau_cos:.4f},τ_m={self.ncm.tau_margin:.4f}"
+                    else:
+                        tau_str = f"tau={self.ncm.tau_s:.4f}"
+                    print(f"  {tau_str} | Rank-1={rank1:.3f} | "
                           f"FNIR@1%FPIR={fnir1:.3f} (TAR={tar1:.3f}) | "
                           f"Det실패={det_fail:.3f}, Id실패={id_fail:.3f}")
 
@@ -992,7 +1031,7 @@ class COCONUTTrainer:
 
         if self.verbose:
             mode_str = f"MAX + TTA(views={self.openset_config.tta_n_views})" if use_tta else "MAX"
-            print(f" Using {mode_str} scores for calibration")
+            print(f" Using {mode_str} scores for calibration ({self.rejection_gate})")
 
             if use_tta:
                 print(f" TTA with type-specific repeats:")
@@ -1003,8 +1042,96 @@ class COCONUTTrainer:
             print(f"\nExtracting Unknown Dev scores for FPIR calibration...")
 
         unknown_dev_file = getattr(self.config.dataset, 'unknown_dev_file', None)
-        s_impostor = np.array([])
         use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
+
+        # === cosine_margin 이중 게이트 캘리브레이션 ===
+        if self.rejection_gate == 'cosine_margin':
+            s_impostor_cos = np.array([])
+            s_impostor_margin = np.array([])
+            s_genuine_cos = np.array([])
+            s_genuine_margin = np.array([])
+
+            # Unknown dev → dual gate scores
+            if unknown_dev_file and str(unknown_dev_file) != 'None':
+                from coconut.openset.utils import load_paths_labels_excluding
+                unk_paths, _ = load_paths_labels_excluding(str(unknown_dev_file), self.registered_users)
+                if len(unk_paths) > 3000:
+                    rng = np.random.RandomState(seed)
+                    idx = rng.choice(len(unk_paths), 3000, replace=False)
+                    unk_paths = [unk_paths[i] for i in idx]
+                if unk_paths:
+                    unk_feats = extract_features(
+                        self.model, unk_paths, self.test_transform, self.device,
+                        channels=channels, use_projection=use_projection
+                    )
+                    if len(unk_feats) > 0:
+                        unk_tensor = torch.from_numpy(unk_feats).to(self.device)
+                        unk_dual = self.ncm.compute_dual_gate_scores(unk_tensor)
+                        s_impostor_cos = unk_dual['cosine_max'].cpu().numpy()
+                        s_impostor_margin = unk_dual['margin'].cpu().numpy()
+                if self.verbose:
+                    print(f"   Unknown Dev: {len(s_impostor_cos)} scores (cosine_margin)")
+            else:
+                print("  [WARN] unknown_dev_file not set. τ calibration skipped.")
+
+            # Genuine → dual gate scores
+            all_probe_paths = []
+            for uid, (paths, labels) in self.probe_data.items():
+                all_probe_paths.extend(paths)
+            if all_probe_paths:
+                gen_feats = extract_features(
+                    self.model, all_probe_paths, self.test_transform, self.device,
+                    channels=channels, use_projection=use_projection
+                )
+                if len(gen_feats) > 0:
+                    gen_tensor = torch.from_numpy(gen_feats).to(self.device)
+                    gen_dual = self.ncm.compute_dual_gate_scores(gen_tensor)
+                    s_genuine_cos = gen_dual['cosine_max'].cpu().numpy()
+                    s_genuine_margin = gen_dual['margin'].cpu().numpy()
+
+            if self.verbose:
+                print(f"   Genuine (probe): {len(s_genuine_cos)} scores")
+                print(f"   Impostor (unknown_dev): {len(s_impostor_cos)} scores")
+
+            # DET curve용 스코어 캐시 (cosine 기준)
+            self._last_genuine_scores = s_genuine_cos.copy() if len(s_genuine_cos) > 0 else np.array([])
+            self._last_impostor_scores = s_impostor_cos.copy() if len(s_impostor_cos) > 0 else np.array([])
+
+            # 독립 캘리브레이션
+            if len(s_impostor_cos) >= 10:
+                old_tau_cos = None if not self._first_calibration_done else self.ncm.tau_cos
+                old_tau_margin = None if not self._first_calibration_done else self.ncm.tau_margin
+
+                result_cos = self.threshold_calibrator_cos.calibrate(
+                    genuine_scores=s_genuine_cos,
+                    impostor_scores=s_impostor_cos,
+                    old_tau=old_tau_cos
+                )
+                result_margin = self.threshold_calibrator_margin.calibrate(
+                    genuine_scores=s_genuine_margin,
+                    impostor_scores=s_impostor_margin,
+                    old_tau=old_tau_margin
+                )
+                self._first_calibration_done = True
+
+                self.ncm.set_thresholds(
+                    tau_cos=result_cos['tau_smoothed'],
+                    tau_margin=result_margin['tau_smoothed']
+                )
+                self.ncm.tau_s = result_cos['tau_smoothed']  # 레거시 호환
+
+                if self.verbose:
+                    print(f"Dual Gate Calibration Results:")
+                    print(f"   Target FPIR: {self.openset_config.target_far*100:.1f}%")
+                    print(f"   τ_cos: {result_cos['tau_smoothed']:.4f} (FPIR={result_cos.get('current_far', 0)*100:.1f}%)")
+                    print(f"   τ_margin: {result_margin['tau_smoothed']:.4f} (FPIR={result_margin.get('current_far', 0)*100:.1f}%)")
+            else:
+                print("  [WARN] Not enough unknown_dev samples for calibration")
+
+            return  # 이중 게이트 캘리브레이션 완료
+
+        # === 기존 단일 threshold 캘리브레이션 (GHOST / cosine_only) ===
+        s_impostor = np.array([])
 
         if unknown_dev_file and str(unknown_dev_file) != 'None':
             if getattr(self, 'use_ghost', False):
@@ -1087,10 +1214,7 @@ class COCONUTTrainer:
 
             # NCM에 적용
             new_tau = result['tau_smoothed']
-            if hasattr(self.ncm, 'set_thresholds'):
-                self.ncm.set_thresholds(tau_s=new_tau)
-            else:
-                self.ncm.tau_s = new_tau
+            self.ncm.set_thresholds(tau_s=new_tau, tau_cos=new_tau)
 
             if self.verbose:
                 print(f"FPIR Target Results:")
@@ -1175,18 +1299,25 @@ class COCONUTTrainer:
         # ========================================
         # Step 4: NCM 스코어 계산
         # ========================================
-        # 등록된 클래스 인덱스 마스크 (미등록 인덱스의 0점 제외용)
         registered_ids = sorted(self.ncm.class_means_dict.keys())
+
+        # 이중 게이트용 margin 저장소
+        nonmated_margins = np.array([])
+        mated_margins_arr = np.array([])
+        mated_cosine_max = np.array([])
 
         # 4a. Non-mated probe → max score per probe (FPIR 임계치 결정용)
         nonmated_max_scores = np.array([])
         if len(nonmated_feats) > 0:
             nonmated_tensor = torch.from_numpy(nonmated_feats).to(self.device)
-            if getattr(self, 'use_ghost', False):
-                # GHOST score 사용
+            if self.rejection_gate == 'cosine_margin':
+                nm_dual = self.ncm.compute_dual_gate_scores(nonmated_tensor)
+                nonmated_max_scores = nm_dual['cosine_max'].cpu().numpy()
+                nonmated_margins = nm_dual['margin'].cpu().numpy()
+            elif getattr(self, 'use_ghost', False):
                 nonmated_max_scores = self.ncm.compute_ghost_max_scores(nonmated_tensor).cpu().numpy()
             else:
-                nonmated_ncm_scores = self.ncm.forward(nonmated_tensor)  # (N, C)
+                nonmated_ncm_scores = self.ncm.forward(nonmated_tensor)
                 if nonmated_ncm_scores.numel() > 0:
                     registered_scores = nonmated_ncm_scores[:, registered_ids]
                     nonmated_max_scores = registered_scores.max(dim=1).values.cpu().numpy()
@@ -1198,40 +1329,61 @@ class COCONUTTrainer:
 
         if len(mated_feats) > 0:
             mated_tensor = torch.from_numpy(mated_feats).to(self.device)
-            mated_ncm_scores = self.ncm.forward(mated_tensor)  # (N, C)
 
-            # 등록된 클래스만의 스코어
-            mated_registered_scores = mated_ncm_scores[:, registered_ids]
-            # registered_ids 내에서의 인덱스 → 실제 class_id 매핑
-            id_to_reg_idx = {cid: idx for idx, cid in enumerate(registered_ids)}
+            if self.rejection_gate == 'cosine_margin':
+                # 이중 게이트: dual scores + genuine score 계산
+                m_dual = self.ncm.compute_dual_gate_scores(mated_tensor)
+                mated_cosine_max = m_dual['cosine_max'].cpu().numpy()
+                mated_margins_arr = m_dual['margin'].cpu().numpy()
+                mated_pred_ids = m_dual['pred_ids'].cpu().numpy()
 
-            # GHOST: detection용 max score를 미리 계산
-            if getattr(self, 'use_ghost', False):
-                mated_ghost_scores = self.ncm.compute_ghost_max_scores(mated_tensor).cpu().numpy()
+                # genuine score 계산 (정답 클래스와의 cosine)
+                mated_ncm_scores = self.ncm.forward(mated_tensor)
+                mated_registered_scores = mated_ncm_scores[:, registered_ids]
+                id_to_reg_idx = {cid: idx for idx, cid in enumerate(registered_ids)}
 
-            for i in range(len(mated_labels)):
-                true_id = mated_labels[i]
-                scores_reg = mated_registered_scores[i]  # (num_registered,)
+                for i in range(len(mated_labels)):
+                    true_id = mated_labels[i]
+                    if true_id in id_to_reg_idx:
+                        genuine_score = mated_registered_scores[i][id_to_reg_idx[true_id]].item()
+                    else:
+                        genuine_score = -1.0
 
-                # Genuine score: 정답 클래스와의 유사도 (cosine, 분석용)
-                if true_id in id_to_reg_idx:
-                    genuine_score = scores_reg[id_to_reg_idx[true_id]].item()
-                else:
-                    genuine_score = -1.0
+                    pred_id = int(mated_pred_ids[i])
+                    max_score = mated_cosine_max[i]
 
-                # Rank-1 (cosine 기준, 변경 없음)
-                pred_reg_idx = scores_reg.argmax().item()
-                pred_id = registered_ids[pred_reg_idx]
+                    mated_genuine_scores.append(genuine_score)
+                    mated_max_scores.append(max_score)
+                    mated_rank1_correct.append(pred_id == true_id)
+            else:
+                # 기존 로직 (GHOST / cosine_only)
+                mated_ncm_scores = self.ncm.forward(mated_tensor)
+                mated_registered_scores = mated_ncm_scores[:, registered_ids]
+                id_to_reg_idx = {cid: idx for idx, cid in enumerate(registered_ids)}
 
-                # Max score: GHOST면 ghost score, 아니면 cosine max
                 if getattr(self, 'use_ghost', False):
-                    max_score = mated_ghost_scores[i]
-                else:
-                    max_score = scores_reg.max().item()
+                    mated_ghost_scores = self.ncm.compute_ghost_max_scores(mated_tensor).cpu().numpy()
 
-                mated_genuine_scores.append(genuine_score)
-                mated_max_scores.append(max_score)
-                mated_rank1_correct.append(pred_id == true_id)
+                for i in range(len(mated_labels)):
+                    true_id = mated_labels[i]
+                    scores_reg = mated_registered_scores[i]
+
+                    if true_id in id_to_reg_idx:
+                        genuine_score = scores_reg[id_to_reg_idx[true_id]].item()
+                    else:
+                        genuine_score = -1.0
+
+                    pred_reg_idx = scores_reg.argmax().item()
+                    pred_id = registered_ids[pred_reg_idx]
+
+                    if getattr(self, 'use_ghost', False):
+                        max_score = mated_ghost_scores[i]
+                    else:
+                        max_score = scores_reg.max().item()
+
+                    mated_genuine_scores.append(genuine_score)
+                    mated_max_scores.append(max_score)
+                    mated_rank1_correct.append(pred_id == true_id)
 
         mated_genuine_scores = np.array(mated_genuine_scores)
         mated_max_scores_arr = np.array(mated_max_scores)
@@ -1244,28 +1396,55 @@ class COCONUTTrainer:
         results = {}
 
         for target_fpir in target_fpirs:
-            if len(nonmated_max_scores) > 0:
-                # τ = non-mated max score 분포의 (1 - target_fpir) quantile
+            if self.rejection_gate == 'cosine_margin' and len(nonmated_margins) > 0:
+                # 이중 게이트: 각각의 τ 계산 후 AND 적용
+                tau_cos = np.quantile(nonmated_max_scores, 1 - target_fpir)
+                tau_margin = np.quantile(nonmated_margins, 1 - target_fpir)
+
+                # FPIR = P(impostor passes BOTH gates)
+                impostor_pass = (nonmated_max_scores >= tau_cos) & (nonmated_margins >= tau_margin)
+                achieved_fpir = np.mean(impostor_pass)
+
+                if len(mated_genuine_scores) > 0:
+                    genuine_pass = (mated_cosine_max >= tau_cos) & (mated_margins_arr >= tau_margin)
+                    detection_fail = ~genuine_pass
+                    identification_fail = ~mated_rank1_correct
+                    is_fn = detection_fail | identification_fail
+
+                    fnir = np.mean(is_fn)
+                    tar = 1.0 - fnir
+                    det_only = np.mean(detection_fail & ~identification_fail)
+                    id_only = np.mean(~detection_fail & identification_fail)
+                    both = np.mean(detection_fail & identification_fail)
+                else:
+                    fnir = 1.0
+                    tar = 0.0
+                    det_only = id_only = both = 0.0
+
+                tau = tau_cos  # 대표값으로 cosine τ 저장
+
+            elif len(nonmated_max_scores) > 0:
+                # 기존 단일 threshold
                 tau = np.quantile(nonmated_max_scores, 1 - target_fpir)
                 achieved_fpir = np.mean(nonmated_max_scores >= tau)
+
+                if len(mated_genuine_scores) > 0:
+                    detection_fail = mated_max_scores_arr < tau
+                    identification_fail = ~mated_rank1_correct
+                    is_fn = detection_fail | identification_fail
+
+                    fnir = np.mean(is_fn)
+                    tar = 1.0 - fnir
+                    det_only = np.mean(detection_fail & ~identification_fail)
+                    id_only = np.mean(~detection_fail & identification_fail)
+                    both = np.mean(detection_fail & identification_fail)
+                else:
+                    fnir = 1.0
+                    tar = 0.0
+                    det_only = id_only = both = 0.0
             else:
                 tau = self.ncm.tau_s if self.ncm.tau_s is not None else 0.5
                 achieved_fpir = 0.0
-
-            if len(mated_genuine_scores) > 0:
-                # FN 조건 (논문 정의): Detection 실패 OR Identification 실패
-                detection_fail = mated_max_scores_arr < tau
-                identification_fail = ~mated_rank1_correct
-                is_fn = detection_fail | identification_fail
-
-                fnir = np.mean(is_fn)
-                tar = 1.0 - fnir
-
-                # Detection/Identification 실패 분해 (분석용)
-                det_only = np.mean(detection_fail & ~identification_fail)
-                id_only = np.mean(~detection_fail & identification_fail)
-                both = np.mean(detection_fail & identification_fail)
-            else:
                 fnir = 1.0
                 tar = 0.0
                 det_only = id_only = both = 0.0
@@ -1309,7 +1488,19 @@ class COCONUTTrainer:
         # Step 6.5: 종합 진단 로그
         # ========================================
         if len(mated_max_scores_arr) >= 10:
-            _ms = mated_max_scores_arr
+            # _ms는 항상 cosine max score (진단 기준선)
+            if self.rejection_gate == 'cosine_margin':
+                _ms = mated_cosine_max  # 이미 cosine
+                _margins_diag = mated_margins_arr
+            elif getattr(self, 'use_ghost', False):
+                # GHOST 모드: mated_max_scores_arr가 gamma이므로 cosine을 별도 계산
+                _mt_cos = self.ncm.forward(torch.from_numpy(mated_feats).to(self.device))
+                _ms = _mt_cos[:, registered_ids].max(dim=1).values.cpu().numpy()
+                _margins_diag = None
+            else:
+                _ms = mated_max_scores_arr  # 이미 cosine
+                _margins_diag = None
+
             _gs = mated_genuine_scores
             _rc = mated_rank1_correct
             _labels = np.array(mated_labels)
@@ -1409,7 +1600,7 @@ class COCONUTTrainer:
                         g_std = self.ncm.ghost_global_std_raw.to(self.device)
                         std_k = lam * std_k + (1 - lam) * g_std
 
-                    s = (torch.abs(_mt2[i] - mu_k) / (std_k + 1e-12)).sum().item()
+                    s = (torch.abs(_mt2[i] - mu_k) / (std_k + 1e-12)).mean().item()
                     gamma = float(_top1_vals[i]) / (s + 1e-12)
 
                     _cosines_g.append(float(_top1_vals[i]))
@@ -1442,30 +1633,46 @@ class COCONUTTrainer:
             # --- 5. Impostor vs Genuine margin 비교 ---
             if len(nonmated_feats) > 0 and _margin is not None:
                 _nmt = torch.from_numpy(nonmated_feats).to(self.device)
-                _nm_scores = self.ncm.forward(_nmt)
-                _nm_reg = _nm_scores[:, registered_ids]
 
-                if _nm_reg.shape[1] >= 2:
-                    _nm_topk = _nm_reg.topk(2, dim=1)
-                    _nm_top1 = _nm_topk.values[:, 0].cpu().numpy()
-                    _nm_top2 = _nm_topk.values[:, 1].cpu().numpy()
-                    _nm_margin = _nm_top1 - _nm_top2
+                if self.rejection_gate == 'cosine_margin':
+                    # 이중 게이트: compute_dual_gate_scores로 통일
+                    _nm_dual = self.ncm.compute_dual_gate_scores(_nmt)
+                    _nm_top1 = _nm_dual['cosine_max'].cpu().numpy()
+                    _nm_margin = _nm_dual['margin'].cpu().numpy()
+                else:
+                    _nm_scores = self.ncm.forward(_nmt)
+                    _nm_reg = _nm_scores[:, registered_ids]
+                    if _nm_reg.shape[1] >= 2:
+                        _nm_topk = _nm_reg.topk(2, dim=1)
+                        _nm_top1 = _nm_topk.values[:, 0].cpu().numpy()
+                        _nm_top2 = _nm_topk.values[:, 1].cpu().numpy()
+                        _nm_margin = _nm_top1 - _nm_top2
+                    else:
+                        _nm_top1 = None
+                        _nm_margin = None
 
+                if _nm_top1 is not None:
                     print(f"\n[DIAG] Impostor vs Genuine")
                     print(f"  Genuine  max_cos: \u03bc={_ms.mean():.4f}  margin: \u03bc={_margin.mean():.4f}")
                     print(f"  Impostor max_cos: \u03bc={_nm_top1.mean():.4f}  margin: \u03bc={_nm_margin.mean():.4f}")
                     print(f"  separation(cosine):  {_ms.mean() - _nm_top1.mean():.4f}")
                     print(f"  separation(margin):  {_margin.mean() - _nm_margin.mean():.4f}")
 
-                    _tau_cos = np.percentile(_nm_top1, 99)
-                    _tau_margin = np.percentile(_nm_margin, 99)
-                    _fn_cos = np.mean(_ms < _tau_cos)
-                    _fn_margin = np.mean(_margin < _tau_margin)
+                    _tau_cos_diag = np.percentile(_nm_top1, 99)
+                    _tau_margin_diag = np.percentile(_nm_margin, 99)
+                    _fn_cos = np.mean(_ms < _tau_cos_diag)
+                    _fn_margin = np.mean(_margin < _tau_margin_diag)
 
                     print(f"\n  @1%FPIR simulation:")
-                    print(f"    cosine  tau={_tau_cos:.4f} -> genuine reject={_fn_cos*100:.1f}%")
-                    print(f"    margin  tau={_tau_margin:.4f} -> genuine reject={_fn_margin*100:.1f}%")
-                    print(f"    {'-> margin BETTER!' if _fn_margin < _fn_cos else '-> cosine better'}")
+                    print(f"    cosine  tau={_tau_cos_diag:.4f} -> genuine reject={_fn_cos*100:.1f}%")
+                    print(f"    margin  tau={_tau_margin_diag:.4f} -> genuine reject={_fn_margin*100:.1f}%")
+
+                    if self.rejection_gate == 'cosine_margin':
+                        # 이중 게이트 시뮬레이션
+                        _fn_dual = np.mean((_ms < _tau_cos_diag) | (_margin < _tau_margin_diag))
+                        print(f"    dual    -> genuine reject={_fn_dual*100:.1f}%")
+                    else:
+                        print(f"    {'-> margin BETTER!' if _fn_margin < _fn_cos else '-> cosine better'}")
 
             # --- 6. 진단 데이터 저장 ---
             _diag_entry = {
@@ -1473,6 +1680,7 @@ class COCONUTTrainer:
                 'n_classes': self.ncm.get_num_classes(),
                 'n_mated': len(_ms),
                 'rank1': float(_rc.mean()),
+                'gate_mode': self.rejection_gate,
                 'genuine_max_mean': float(_ms.mean()),
                 'genuine_max_std': float(_ms.std()),
                 'genuine_max_min': float(_ms.min()),
@@ -1512,11 +1720,22 @@ class COCONUTTrainer:
                 })
                 if _fn_cos is not None:
                     _diag_entry.update({
-                        'sim_tau_cosine': float(_tau_cos),
+                        'sim_tau_cosine': float(_tau_cos_diag),
                         'sim_fnir_cosine': float(_fn_cos),
-                        'sim_tau_margin': float(_tau_margin),
+                        'sim_tau_margin': float(_tau_margin_diag),
                         'sim_fnir_margin': float(_fn_margin),
                     })
+
+            # 이중 게이트 메트릭 추가
+            if self.rejection_gate == 'cosine_margin' and _margins_diag is not None:
+                _diag_entry.update({
+                    'genuine_margin_mean': float(_margins_diag.mean()),
+                    'genuine_margin_std': float(_margins_diag.std()),
+                    'genuine_margin_min': float(_margins_diag.min()),
+                    'genuine_margin_p5': float(np.percentile(_margins_diag, 5)),
+                    'tau_cos': float(self.ncm.tau_cos) if self.ncm.tau_cos is not None else None,
+                    'tau_margin': float(self.ncm.tau_margin) if self.ncm.tau_margin is not None else None,
+                })
 
             if _corr is not None:
                 _diag_entry.update({
@@ -1633,8 +1852,11 @@ class COCONUTTrainer:
         self._last_genuine_scores = mated_max_scores_arr.copy() if len(mated_max_scores_arr) > 0 else np.array([])
         self._last_impostor_scores = nonmated_max_scores.copy() if len(nonmated_max_scores) > 0 else np.array([])
 
-        # τ_s 참고값 저장
+        # τ 참고값 저장
         results['tau_s_current'] = self.ncm.tau_s
+        if self.rejection_gate == 'cosine_margin':
+            results['tau_cos_current'] = self.ncm.tau_cos
+            results['tau_margin_current'] = self.ncm.tau_margin
 
         # ========================================
         # Step 8: 결과 출력
@@ -1655,7 +1877,10 @@ class COCONUTTrainer:
                 print(f"     └ Det fail: {det_v:.4f}, Id fail: {idf_v:.4f}, Both: {both_v:.4f}")
             if TRR_n is not None:
                 print(f"   FPIR_xdom: {FAR_n:.4f}")
-            print(f"   Threshold (calibrated): τ_s={self.ncm.tau_s:.4f}")
+            if self.rejection_gate == 'cosine_margin':
+                print(f"   Threshold (calibrated): τ_cos={self.ncm.tau_cos:.4f}, τ_margin={self.ncm.tau_margin:.4f}")
+            else:
+                print(f"   Threshold (calibrated): τ_s={self.ncm.tau_s:.4f}")
 
         # Compact 출력
         if not self.verbose:
@@ -2020,6 +2245,9 @@ class COCONUTTrainer:
             try:
                 checkpoint_dict['openset_data'] = {
                     'tau_s': self.ncm.tau_s,
+                    'tau_cos': getattr(self.ncm, 'tau_cos', None),
+                    'tau_margin': getattr(self.ncm, 'tau_margin', None),
+                    'rejection_gate': getattr(self, 'rejection_gate', 'cosine_only'),
                     'registered_users': list(self.registered_users),
                     'evaluation_history': self.evaluation_history
                 }
@@ -2105,12 +2333,19 @@ class COCONUTTrainer:
             self.evaluation_history = od.get('evaluation_history', [])
             tau_s = od.get('tau_s')
             if tau_s is not None:
-                if hasattr(self.ncm, 'set_thresholds'):
-                    self.ncm.set_thresholds(tau_s=tau_s)
-                else:
-                    self.ncm.tau_s = tau_s
+                self.ncm.set_thresholds(tau_s=tau_s)
+            tau_cos = od.get('tau_cos')
+            tau_margin = od.get('tau_margin')
+            if tau_cos is not None:
+                self.ncm.tau_cos = tau_cos
+            if tau_margin is not None:
+                self.ncm.tau_margin = tau_margin
             if self.verbose:
-                print(f"[OK] Openset data restored ({len(self.registered_users)} registered users, τ={tau_s})")
+                if self.rejection_gate == 'cosine_margin':
+                    print(f"[OK] Openset data restored ({len(self.registered_users)} registered users, "
+                          f"τ_cos={tau_cos}, τ_margin={tau_margin})")
+                else:
+                    print(f"[OK] Openset data restored ({len(self.registered_users)} registered users, τ={tau_s})")
 
         # memory_buffer 데이터 복원
         if 'memory_buffer_data' in checkpoint:

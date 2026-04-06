@@ -25,15 +25,20 @@ class NCMClassifier(nn.Module):
         self.max_class = -1
 
         # 오픈셋 관련
-        self.tau_s = None            # 전역 임계치
+        self.tau_s = None            # 전역 임계치 (레거시 호환)
         self.unknown_id = -1         # Unknown 클래스 ID
+
+        # 이중 게이트 (cosine + margin)
+        self.tau_cos = None          # cosine threshold
+        self.tau_margin = None       # margin threshold (top1 - top2)
+        self.rejection_gate = 'cosine_only'  # 'cosine_only' | 'cosine_margin'
 
         # Mahalanobis 관련
         self.score_mode = score_mode          # 'cosine' | 'mahalanobis'
         self.var_reg_alpha = var_reg_alpha
         self.global_var = None                # Tensor(D,) — shared diagonal variance
 
-        # GHOST 관련 (z-score 기반 rejection)
+        # GHOST 관련 (z-score 기반 rejection, 레거시)
         self.ghost_enabled = False
         self.ghost_class_means_raw = {}       # {class_id: Tensor(D,)} raw feature mean
         self.ghost_class_stds_raw = {}        # {class_id: Tensor(D,)} raw feature std
@@ -150,9 +155,14 @@ class NCMClassifier(nn.Module):
         """현재 저장된 클래스 평균들을 반환합니다."""
         return self.class_means_dict.copy()
 
-    def set_thresholds(self, tau_s: float):
+    def set_thresholds(self, tau_s: float = None, tau_cos: float = None, tau_margin: float = None):
         """오픈셋 임계치 설정"""
-        self.tau_s = float(tau_s)
+        if tau_s is not None:
+            self.tau_s = float(tau_s)
+        if tau_cos is not None:
+            self.tau_cos = float(tau_cos)
+        if tau_margin is not None:
+            self.tau_margin = float(tau_margin)
 
     def set_global_var(self, global_var: Tensor):
         """Global shared diagonal variance 설정 (Mahalanobis용)"""
@@ -164,6 +174,38 @@ class NCMClassifier(nn.Module):
         self.ghost_class_stds_raw = {k: v.clone() for k, v in class_stds_raw.items()}
         self.ghost_global_std_raw = global_std_raw.clone() if global_std_raw is not None else None
         self.ghost_class_counts = dict(class_counts)
+
+    @torch.no_grad()
+    def compute_dual_gate_scores(self, x):
+        """
+        이중 게이트용 스코어 계산.
+        Returns: dict with 'cosine_max', 'margin', 'pred_ids'
+        """
+        if len(self.class_means_dict) == 0:
+            B = x.shape[0]
+            return {
+                'cosine_max': torch.zeros(B, device=x.device),
+                'margin': torch.zeros(B, device=x.device),
+                'pred_ids': torch.full((B,), -1, dtype=torch.long, device=x.device),
+            }
+
+        scores = self.forward(x)  # (B, C) cosine scores
+        if scores.shape[1] >= 2:
+            topk = scores.topk(2, dim=1)
+            cosine_max = topk.values[:, 0]
+            cosine_2nd = topk.values[:, 1]
+            margin = cosine_max - cosine_2nd
+            pred_ids = topk.indices[:, 0]
+        else:
+            cosine_max = scores[:, 0]
+            margin = cosine_max
+            pred_ids = torch.zeros(scores.shape[0], dtype=torch.long, device=x.device)
+
+        return {
+            'cosine_max': cosine_max,
+            'margin': margin,
+            'pred_ids': pred_ids,
+        }
 
     def _compute_ghost_scores(self, x_raw, pred_ids, cosine_scores):
         """
@@ -195,8 +237,8 @@ class NCMClassifier(nn.Module):
                 global_std = self.ghost_global_std_raw.to(device=x_raw.device, dtype=x_raw.dtype)
                 std_k = lam * std_k + (1 - lam) * global_std
 
-            # Eq. 3: s = Σ_d |φ_d - μ_{k̂,d}| / σ_{k̂,d}
-            s = (torch.abs(x_raw[i] - mu_k) / (std_k + 1e-12)).sum()
+            # Eq. 3: s = mean_d |φ_d - μ_{k̂,d}| / σ_{k̂,d}  (차원 정규화)
+            s = (torch.abs(x_raw[i] - mu_k) / (std_k + 1e-12)).mean()
 
             # Eq. 4: γ = z_k̂ / s
             ghost_scores[i] = cosine_scores[i] / (s + 1e-12)
@@ -223,35 +265,47 @@ class NCMClassifier(nn.Module):
 
     @torch.no_grad()
     def predict_openset(self, x):
-        """오픈셋 예측 (최댓값 모드 / GHOST 모드)"""
-        # NCM이 비어있으면 모두 -1 반환
+        """오픈셋 예측 (모드별 분기: cosine_margin / GHOST 레거시 / cosine_only)"""
         if len(self.class_means_dict) == 0:
             return torch.full((x.shape[0],), -1, dtype=torch.long, device=x.device)
 
-        # cosine scores 계산
-        scores = self.forward(x)  # (B, C)
+        # --- cosine_margin 이중 게이트 ---
+        if self.rejection_gate == 'cosine_margin':
+            result = self.compute_dual_gate_scores(x)
+            pred = result['pred_ids']
+            accept = torch.ones(x.shape[0], dtype=torch.bool, device=x.device)
 
-        # Top-1 추출
-        top1 = scores.topk(1, dim=1)
-        max_score = top1.values[:, 0]
-        pred = top1.indices[:, 0]
+            if self.tau_cos is not None:
+                accept &= result['cosine_max'] >= self.tau_cos
+            if self.tau_margin is not None:
+                accept &= result['margin'] >= self.tau_margin
 
-        # GHOST rejection
+            pred[~accept] = self.unknown_id
+            return pred
+
+        # --- 기존 GHOST 모드 (레거시) ---
         if self.ghost_enabled and self.ghost_class_stds_raw:
+            scores = self.forward(x)
+            top1 = scores.topk(1, dim=1)
+            max_score = top1.values[:, 0]
+            pred = top1.indices[:, 0]
             ghost_scores = self._compute_ghost_scores(x, pred, max_score)
             if self.tau_s is not None:
                 accept = ghost_scores >= self.tau_s
             else:
                 accept = torch.ones_like(ghost_scores, dtype=torch.bool)
-        else:
-            # 기존 cosine 방식
-            if self.tau_s is not None:
-                accept = max_score >= self.tau_s
-            else:
-                accept = torch.ones_like(max_score, dtype=torch.bool)
+            pred[~accept] = self.unknown_id
+            return pred
 
-        pred[~accept] = self.unknown_id
-
+        # --- cosine_only 모드 ---
+        scores = self.forward(x)
+        top1 = scores.topk(1, dim=1)
+        max_score = top1.values[:, 0]
+        pred = top1.indices[:, 0]
+        tau = self.tau_cos if self.tau_cos is not None else self.tau_s
+        if tau is not None:
+            accept = max_score >= tau
+            pred[~accept] = self.unknown_id
         return pred
 
     @torch.no_grad()
