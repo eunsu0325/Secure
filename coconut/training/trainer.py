@@ -179,7 +179,7 @@ class COCONUTTrainer:
             if config.model.use_projection:
                 embedding_dim = config.model.projection_dim  # 프로젝션 헤드 사용 시
             else:
-                embedding_dim = 6144  # projection 미사용 시 forward()가 반환하는 6144D 특징
+                embedding_dim = 2048  # 🍑 옵션 A: fc1 출력만 사용 (fc는 redundant라 임베딩에서 제외)
 
             self.proxy_anchor_loss = ProxyAnchorLoss(
                 embedding_size=embedding_dim,

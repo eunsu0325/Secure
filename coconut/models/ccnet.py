@@ -329,8 +329,8 @@ class ccnet(torch.nn.Module):
             # print(f"   Structure: 2 layers with LayerNorm (논문 기본)")
 
             # 🍑 새로운 FullProjectionHead 사용 (6144D -> 512D)
-            self.full_projection_head = FullProjectionHead(input_dim=6144, projection_dim=projection_dim)
-            print(f"🍑 Full Projection Head enabled: 6144D -> 2048D -> 1024D -> {projection_dim}D")
+            self.full_projection_head = FullProjectionHead(input_dim=2048, projection_dim=projection_dim)
+            print(f"🍑 Full Projection Head enabled: 2048D -> 2048D -> 1024D -> {projection_dim}D")
             print(f"   Structure: 3 layers with LayerNorm (점진적 축소)")
 
 
@@ -342,10 +342,12 @@ class ccnet(torch.nn.Module):
         x = torch.cat((x1, x2, x3), dim=1)
 
         x1 = self.fc(x)  # 4096D
-        x2 = self.fc1(x1)  # 2048D  # 🍑 변수명 x -> x2로 변경
+        x2 = self.fc1(x1)  # 2048D
 
-        # 🍑 6144D features 생성 (주석 해제 및 수정)
-        fe = torch.cat((x1, x2), dim=1)  # 4096D + 2048D = 6144D Feature Embedding
+        # 🍑 옵션 A: fc 출력은 임베딩에서 제외 (fc는 fc1의 선형 pre-stage라 redundant)
+        # PCA 진단: fc 4096D는 L2norm 후 0.3% magnitude만 차지 → 사실상 잉여.
+        # fc 파라미터는 fc1의 입력 경로로 여전히 학습됨.
+        fe = x2  # 2048D Feature Embedding
 
         #x = self.drop(x)
         # x = self.arclayer_(x, y)
@@ -390,7 +392,8 @@ class ccnet(torch.nn.Module):
         x2 = self.fc1(x1)  # 2048D
         # x = x / torch.norm(x, p=2, dim=1, keepdim=True)
 
-        fe = torch.cat((x1, x2), dim=1)  # 6144D
+        # 🍑 옵션 A: fc1 출력만 임베딩으로 사용 (forward()와 일치)
+        fe = x2  # 2048D
 
         if use_projection and self.use_projection:
             # use_projection_for_ncm=True 일 때: 512D projection 공간에서 NCM 운영
