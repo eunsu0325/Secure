@@ -46,6 +46,14 @@ class NCMClassifier(nn.Module):
         self.ghost_class_counts = {}          # {class_id: int} augmented sample count
         self.ghost_shrinkage_min_n = 10       # shrinkage 기준 샘플 수
 
+        # S-norm (per-class Z-score on raw cosine)
+        # cohort = unknown_dev features. cohort_mu/sigma는 _vectorize_means_dict와
+        # 같은 (max_class+1,) 1D 텐서로 저장되어 forward에서 broadcast됨.
+        self.snorm_enabled = False
+        self.cohort_mu = None       # Tensor(C,)
+        self.cohort_sigma = None    # Tensor(C,)
+        self.snorm_min_sigma = 1e-2
+
     def load_state_dict(self, state_dict, strict: bool = True):
         """체크포인트에서 상태를 로드합니다."""
         self.class_means = state_dict["class_means"]
@@ -74,13 +82,16 @@ class NCMClassifier(nn.Module):
             self.class_means[k] = self.class_means_dict[k].clone()
 
     @torch.no_grad()
-    def forward(self, x):
+    def forward(self, x, apply_snorm: bool = True):
         """
          최적화된 NCM 분류
 
         score_mode='mahalanobis': whitened euclidean (shared diagonal Mahalanobis)
         normalize=True: 코사인 유사도 (정규화 후 내적)
         normalize=False: 유클리디안 거리 (제곱 거리 사용)
+
+        apply_snorm: True면 S-norm 적용 (snorm_enabled일 때).
+                     진단/시각화용은 False로 raw cosine 유지.
         """
         # NCM이 비어있으면 빈 점수 반환
         if self.class_means_dict == {}:
@@ -109,8 +120,13 @@ class NCMClassifier(nn.Module):
         if self.normalize:
             # 코사인 유사도 기반
             x = F.normalize(x, p=2, dim=1, eps=1e-12)
-            scores = x @ M.T  # (B, C)
-            return scores  # 높을수록 가까움
+            scores = x @ M.T  # (B, C) raw cosine
+            # S-norm: per-class Z-score 정규화
+            if apply_snorm and self.snorm_enabled and self.cohort_mu is not None:
+                mu = self.cohort_mu.to(device=scores.device, dtype=scores.dtype)
+                sigma = self.cohort_sigma.to(device=scores.device, dtype=scores.dtype)
+                scores = (scores - mu.unsqueeze(0)) / sigma.unsqueeze(0)
+            return scores
         else:
             # 유클리디안 거리 기반
             x2 = (x * x).sum(dim=1, keepdim=True)      # (B, 1)
@@ -168,6 +184,26 @@ class NCMClassifier(nn.Module):
         """Global shared diagonal variance 설정 (Mahalanobis용)"""
         self.global_var = global_var.clone()
 
+    def set_cohort_stats(self, cohort_mu_dict: Dict[int, float], cohort_sigma_dict: Dict[int, float]):
+        """S-norm용 per-class cohort 평균/표준편차 설정.
+        class_means와 같은 (max_class+1,) 텐서로 vectorize."""
+        if self.class_means is None:
+            return
+        device = self.class_means.device
+        dtype = self.class_means.dtype
+        C = self.class_means.shape[0]
+        mu = torch.zeros(C, device=device, dtype=dtype)
+        sigma = torch.ones(C, device=device, dtype=dtype)
+        for k, v in cohort_mu_dict.items():
+            if 0 <= k < C:
+                mu[k] = float(v)
+        for k, v in cohort_sigma_dict.items():
+            if 0 <= k < C:
+                sigma[k] = max(float(v), self.snorm_min_sigma)
+        self.cohort_mu = mu
+        self.cohort_sigma = sigma
+        self.snorm_enabled = True
+
     def set_ghost_stats(self, class_means_raw, class_stds_raw, global_std_raw, class_counts):
         """GHOST용 per-class raw feature 통계 설정"""
         self.ghost_class_means_raw = {k: v.clone() for k, v in class_means_raw.items()}
@@ -189,7 +225,7 @@ class NCMClassifier(nn.Module):
                 'pred_ids': torch.full((B,), -1, dtype=torch.long, device=x.device),
             }
 
-        scores = self.forward(x)  # (B, C) cosine scores
+        scores = self.forward(x, apply_snorm=False)  # (B, C) raw cosine — margin은 raw 기준
         if scores.shape[1] >= 2:
             topk = scores.topk(2, dim=1)
             cosine_max = topk.values[:, 0]
@@ -254,7 +290,7 @@ class NCMClassifier(nn.Module):
         if len(self.class_means_dict) == 0:
             return torch.zeros(x_raw.shape[0], device=x_raw.device)
 
-        scores = self.forward(x_raw)  # cosine (내부 L2 norm)
+        scores = self.forward(x_raw, apply_snorm=False)  # raw cosine — GHOST는 자체 정규화
         top1 = scores.topk(1, dim=1)
         max_score = top1.values[:, 0]
         pred = top1.indices[:, 0]
@@ -285,7 +321,7 @@ class NCMClassifier(nn.Module):
 
         # --- 기존 GHOST 모드 (레거시) ---
         if self.ghost_enabled and self.ghost_class_stds_raw:
-            scores = self.forward(x)
+            scores = self.forward(x, apply_snorm=False)  # GHOST는 자체 정규화
             top1 = scores.topk(1, dim=1)
             max_score = top1.values[:, 0]
             pred = top1.indices[:, 0]
