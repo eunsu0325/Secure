@@ -378,6 +378,7 @@ class COCONUTTrainer:
 
             # 진단 로그 저장용
             self._diag_history = []
+            self._last_pca = None  # 🍑 _diagnose_pca() 결과 캐시 (diag_history.json에 포함)
 
             # 초기 임계치 설정
             initial_tau = config.openset.initial_tau
@@ -1915,6 +1916,10 @@ class COCONUTTrainer:
                 _diag_entry['worst_users'] = [(int(uid), float(sc)) for uid, sc in _worst5]
                 _diag_entry['best_users'] = [(int(uid), float(sc)) for uid, sc in _best5]
 
+            # 🍑 PCA 진단 결과 추가 (10 experience마다 갱신됨)
+            if hasattr(self, '_last_pca') and self._last_pca is not None:
+                _diag_entry['pca'] = dict(self._last_pca)
+
             # QAR 진단 정보 추가
             if self.use_qar and self._qar_rehab_log:
                 _qar_last = self._qar_rehab_log[-1]
@@ -2332,64 +2337,42 @@ class COCONUTTrainer:
         top50 = cumulative[49] * 100 if len(cumulative) >= 50 else cumulative[-1] * 100
 
         print(f"\n{'='*60}")
-        print(f"[PCA 진단] 6144D 임베딩 실효 차원 분석 (N={N} samples)")
+        print(f"[PCA 진단] {D}D 임베딩 실효 차원 분석 (N={N} samples)")
         print(f"{'='*60}")
         print(f"  Participation Ratio (PR): {pr:.1f}D")
-        print(f"  90% 분산 설명 차원: {dim_90}D / 6144D")
-        print(f"  95% 분산 설명 차원: {dim_95}D / 6144D")
-        print(f"  99% 분산 설명 차원: {dim_99}D / 6144D")
+        print(f"  90% 분산 설명 차원: {dim_90}D / {D}D")
+        print(f"  95% 분산 설명 차원: {dim_95}D / {D}D")
+        print(f"  99% 분산 설명 차원: {dim_99}D / {D}D")
         print(f"")
         print(f"  Top-1  PC 기여도: {top1:.1f}%")
         print(f"  Top-5  PC 누적:   {top5:.1f}%")
         print(f"  Top-10 PC 누적:   {top10:.1f}%")
         print(f"  Top-50 PC 누적:   {top50:.1f}%")
 
-        # 4. fc(4096D) vs fc1(2048D) 상관 분석
-        feats_raw = feats  # unnormalized
-        fc_part = feats_raw[:, :4096]   # fc 출력
-        fc1_part = feats_raw[:, 4096:]  # fc1 출력
-
-        # 각 부분의 독립적 분산 기여도
-        fc_var = np.var(fc_part, axis=0).sum()
-        fc1_var = np.var(fc1_part, axis=0).sum()
-        total_raw_var = np.var(feats_raw, axis=0).sum()
-
-        # CKA 대신 간단한 RV coefficient (공분산 상관)
-        fc_centered = fc_part - fc_part.mean(axis=0)
-        fc1_centered = fc1_part - fc1_part.mean(axis=0)
-
-        # cross-covariance norm (Frobenius)
-        cross_cov = fc_centered.T @ fc1_centered / (N - 1)  # (4096, 2048)
-        cross_norm = np.linalg.norm(cross_cov, 'fro')
-
-        fc_cov_norm = np.linalg.norm(fc_centered.T @ fc_centered / (N - 1), 'fro')
-        fc1_cov_norm = np.linalg.norm(fc1_centered.T @ fc1_centered / (N - 1), 'fro')
-
-        rv_coeff = cross_norm ** 2 / (fc_cov_norm * fc1_cov_norm + 1e-12)
-
-        print(f"")
-        print(f"  [fc vs fc1 상관 분석]")
-        print(f"  fc(4096D) 분산 비중:  {fc_var/total_raw_var*100:.1f}%")
-        print(f"  fc1(2048D) 분산 비중: {fc1_var/total_raw_var*100:.1f}%")
-        print(f"  RV coefficient (상관): {rv_coeff:.4f}  (1.0=완전상관, 0.0=독립)")
+        # 🍑 diag_history.json에 자동 포함되도록 결과 저장
+        self._last_pca = {
+            'embedding_dim': int(D),
+            'n_samples': int(N),
+            'pr': float(pr),
+            'dim_90': int(dim_90),
+            'dim_95': int(dim_95),
+            'dim_99': int(dim_99),
+            'top1_pct': float(top1),
+            'top5_pct': float(top5),
+            'top10_pct': float(top10),
+            'top50_pct': float(top50),
+        }
 
         # 5. 오픈셋 관점 해석
         print(f"")
         if pr < 100:
-            print(f"  ⚠ PR={pr:.0f}D: 6144D 중 실효 {pr:.0f}D만 사용 → 오픈셋에 불리")
+            print(f"  ⚠ PR={pr:.0f}D: {D}D 중 실효 {pr:.0f}D만 사용 → 오픈셋에 불리")
             print(f"    → Impostor max cosine이 높아지는 원인 (저차원 부분공간 집중)")
-            print(f"    → Projection Head(512D) 또는 Uniformity Loss 권장")
+            print(f"    → Projection Head 또는 Uniformity Loss 권장")
         elif pr < 500:
             print(f"  △ PR={pr:.0f}D: 중간 수준. 개선 여지 있음")
         else:
             print(f"  ✓ PR={pr:.0f}D: 충분한 실효 차원")
-
-        if rv_coeff > 0.5:
-            print(f"  ⚠ RV={rv_coeff:.3f}: fc↔fc1 강한 상관 → concat 효율 낮음")
-        elif rv_coeff > 0.2:
-            print(f"  △ RV={rv_coeff:.3f}: fc↔fc1 중간 상관")
-        else:
-            print(f"  ✓ RV={rv_coeff:.3f}: fc↔fc1 독립적 → concat 효율적")
 
         print(f"{'='*60}\n")
 
