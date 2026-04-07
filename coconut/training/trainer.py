@@ -313,6 +313,7 @@ class COCONUTTrainer:
             # Rejection gate 모드 설정
             self.rejection_gate = getattr(config.openset, 'rejection_gate', 'cosine_only')
             self.ncm.rejection_gate = self.rejection_gate
+            self.use_snorm = getattr(config.openset, 'use_snorm', False)
             if self.verbose:
                 print(f" Rejection gate: {self.rejection_gate}")
 
@@ -350,6 +351,8 @@ class COCONUTTrainer:
                     cal_clip_range = None
                 elif self.use_ghost:
                     cal_clip_range = None
+                elif self.use_snorm:
+                    cal_clip_range = None  # z-score는 [-1,1] 범위 초과 가능
                 else:
                     cal_clip_range = (-1.0, 1.0)
 
@@ -1294,6 +1297,45 @@ class COCONUTTrainer:
                     if len(unk_feats) > 0:
                         unk_tensor = torch.from_numpy(unk_feats).to(self.device)
                         s_impostor = self.ncm.compute_ghost_max_scores(unk_tensor).cpu().numpy()
+            elif self.use_snorm:
+                # S-norm: feature 직접 추출하여 per-class cohort 통계 계산
+                from coconut.openset.utils import load_paths_labels_excluding
+                unk_paths, _ = load_paths_labels_excluding(str(unknown_dev_file), self.registered_users)
+                if len(unk_paths) > 3000:
+                    rng = np.random.RandomState(seed)
+                    idx = rng.choice(len(unk_paths), 3000, replace=False)
+                    unk_paths = [unk_paths[i] for i in idx]
+                if unk_paths:
+                    unk_feats = extract_features(
+                        self.model, unk_paths, self.test_transform, self.device,
+                        channels=channels, use_projection=use_projection
+                    )
+                    if len(unk_feats) > 0:
+                        unk_tensor = torch.from_numpy(unk_feats).to(self.device)
+                        # Pass A: raw cosine으로 per-class cohort μ, σ 계산
+                        self.ncm.snorm_enabled = False
+                        raw_unk = self.ncm.forward(unk_tensor, apply_snorm=False)  # (N, C)
+                        cohort_mu_dict = {}
+                        cohort_sigma_dict = {}
+                        for c in self.ncm.class_means_dict.keys():
+                            col = raw_unk[:, c]
+                            cohort_mu_dict[c] = float(col.mean().item())
+                            cohort_sigma_dict[c] = float(col.std().item())
+                        self.ncm.set_cohort_stats(cohort_mu_dict, cohort_sigma_dict)
+                        if self.verbose:
+                            _mu_arr = np.array(list(cohort_mu_dict.values()))
+                            _sg_arr = np.array(list(cohort_sigma_dict.values()))
+                            print(f"   S-norm cohort ({len(cohort_mu_dict)} classes): "
+                                  f"cohort_mu={_mu_arr.mean():.4f}+/-{_mu_arr.std():.4f}, "
+                                  f"cohort_sigma={_sg_arr.mean():.4f}+/-{_sg_arr.std():.4f}")
+                        # Pass B: S-norm 적용된 z-score max
+                        snorm_scores = self.ncm.forward(unk_tensor)  # snorm_enabled=True
+                        registered_ids_local = sorted(self.ncm.class_means_dict.keys())
+                        s_impostor = snorm_scores[:, registered_ids_local].max(dim=1).values.cpu().numpy()
+                    else:
+                        s_impostor = np.array([])
+                else:
+                    s_impostor = np.array([])
             else:
                 s_impostor = extract_scores_impostor_unknown(
                     self.model, self.ncm,
@@ -1305,8 +1347,10 @@ class COCONUTTrainer:
                     use_projection=use_projection
                 )
             if self.verbose:
+                snorm_tag = " (S-norm)" if self.use_snorm else ""
+                ghost_tag = " (GHOST)" if getattr(self, 'use_ghost', False) else ""
                 print(f"   Unknown Dev: {len(s_impostor)} scores from {unknown_dev_file}"
-                      + (" (GHOST)" if getattr(self, 'use_ghost', False) else ""))
+                      + ghost_tag + snorm_tag)
         else:
             print("  [WARN] unknown_dev_file not set. τ calibration skipped.")
 
@@ -1651,7 +1695,12 @@ class COCONUTTrainer:
                 _margins_diag = mated_margins_arr
             elif getattr(self, 'use_ghost', False):
                 # GHOST 모드: mated_max_scores_arr가 gamma이므로 cosine을 별도 계산
-                _mt_cos = self.ncm.forward(torch.from_numpy(mated_feats).to(self.device))
+                _mt_cos = self.ncm.forward(torch.from_numpy(mated_feats).to(self.device), apply_snorm=False)
+                _ms = _mt_cos[:, registered_ids].max(dim=1).values.cpu().numpy()
+                _margins_diag = None
+            elif self.use_snorm:
+                # S-norm 모드: 진단은 raw cosine으로 (시계열 비교용)
+                _mt_cos = self.ncm.forward(torch.from_numpy(mated_feats).to(self.device), apply_snorm=False)
                 _ms = _mt_cos[:, registered_ids].max(dim=1).values.cpu().numpy()
                 _margins_diag = None
             else:
@@ -1683,7 +1732,7 @@ class COCONUTTrainer:
 
             if len(mated_feats) > 0:
                 _mt = torch.from_numpy(mated_feats).to(self.device)
-                _all_scores = self.ncm.forward(_mt)
+                _all_scores = self.ncm.forward(_mt, apply_snorm=False)  # 진단: raw cosine
                 _reg_scores = _all_scores[:, registered_ids]
 
                 if _reg_scores.shape[1] >= 2:
@@ -1747,7 +1796,7 @@ class COCONUTTrainer:
                 _is_correct = []
 
                 _mt2 = torch.from_numpy(mated_feats).to(self.device)
-                _scores2 = self.ncm.forward(_mt2)
+                _scores2 = self.ncm.forward(_mt2, apply_snorm=False)  # GHOST 진단: raw cosine
                 _top1_vals = _scores2.max(dim=1).values.cpu().numpy()
                 _top1_ids = _scores2.argmax(dim=1).cpu().numpy()
 
@@ -1805,7 +1854,7 @@ class COCONUTTrainer:
                     _nm_top1 = _nm_dual['cosine_max'].cpu().numpy()
                     _nm_margin = _nm_dual['margin'].cpu().numpy()
                 else:
-                    _nm_scores = self.ncm.forward(_nmt)
+                    _nm_scores = self.ncm.forward(_nmt, apply_snorm=False)  # 진단: raw cosine
                     _nm_reg = _nm_scores[:, registered_ids]
                     if _nm_reg.shape[1] >= 2:
                         _nm_topk = _nm_reg.topk(2, dim=1)
