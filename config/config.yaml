@@ -130,7 +130,8 @@ Openset:
   var_reg_alpha: 0.0001
 
   # Rejection gate mode: 'cosine_only' | 'cosine_margin'
-  rejection_gate: 'cosine_margin'  # cosine + margin(top1-top2) 이중 게이트
+  rejection_gate: 'cosine_only'   # cosine_only + S-norm (이중 게이트 → 단일 게이트 전환)
+  use_snorm: true                 # per-class Z-score normalization (crowding 보정)
 
   # GHOST (레거시, use_ghost: true + rejection_gate 미설정 시 사용)
   use_ghost: false              # GHOST z-score rejection (비권장)
