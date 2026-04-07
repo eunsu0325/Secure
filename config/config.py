@@ -135,6 +135,7 @@ class Openset:
     score_mode: str = 'cosine'          # 'cosine' | 'mahalanobis'
     var_reg_alpha: float = 1e-4         # Mahalanobis variance regularization
     rejection_gate: str = 'cosine_only'  # 'cosine_only' | 'cosine_margin'
+    use_snorm: bool = False              # per-class Z-score normalization (S-norm)
 
     # GHOST (Gaussian Hypothesis Open-Set Technique, AAAI 2025)
     use_ghost: bool = False             # GHOST z-score rejection 활성화
