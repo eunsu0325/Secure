@@ -125,6 +125,13 @@ class NCMClassifier(nn.Module):
             if apply_snorm and self.snorm_enabled and self.cohort_mu is not None:
                 mu = self.cohort_mu.to(device=scores.device, dtype=scores.dtype)
                 sigma = self.cohort_sigma.to(device=scores.device, dtype=scores.dtype)
+                C_scores = scores.shape[1]
+                C_cohort = mu.shape[0]
+                if C_cohort < C_scores:
+                    # 새 클래스 추가됨 — cohort 미계산 클래스는 identity (mu=0, σ=1)
+                    pad = C_scores - C_cohort
+                    mu = torch.cat([mu, torch.zeros(pad, device=mu.device, dtype=mu.dtype)])
+                    sigma = torch.cat([sigma, torch.ones(pad, device=sigma.device, dtype=sigma.dtype)])
                 scores = (scores - mu.unsqueeze(0)) / sigma.unsqueeze(0)
             return scores
         else:
