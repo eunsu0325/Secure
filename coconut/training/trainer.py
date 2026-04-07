@@ -971,11 +971,14 @@ class COCONUTTrainer:
                 metrics = self._evaluate_openset()
 
                 # PCA 진단: 10 experience마다 실행 (무거운 연산이므로 매번 X)
+                print(f"[PCA] check: experience_count={self.experience_count}, mod10={self.experience_count % 10}", flush=True)
                 if self.experience_count % 10 == 0:
                     try:
                         self._diagnose_pca()
                     except Exception as e:
-                        print(f"[PCA] 진단 실패: {e}")
+                        import traceback
+                        print(f"[PCA] 진단 실패: {e}", flush=True)
+                        traceback.print_exc()
 
                 _eval_entry = {
                     'experience': self.experience_count,
@@ -2266,12 +2269,9 @@ class COCONUTTrainer:
         self.model.eval()
 
         # 1. 메모리 버퍼에서 feature 추출
-        all_paths = []
-        all_labels = []
-        for cid, group in self.memory_buffer.buffer_groups.items():
-            for item in group:
-                all_paths.append(item.path)
-                all_labels.append(cid)
+        # ClassBalancedBuffer.get_all_data() → (data, labels, logits)
+        # data는 이미지 경로(str) 리스트
+        all_paths, all_labels, _ = self.memory_buffer.get_all_data()
 
         # 최대 2000개 샘플로 제한 (메모리/속도)
         if len(all_paths) > 2000:
