@@ -2262,7 +2262,8 @@ class COCONUTTrainer:
         메모리 버퍼 + 등록 사용자 데이터에서 feature를 추출하고
         explained variance ratio의 누적합으로 실효 차원을 측정.
         """
-        if len(self.memory_buffer) < 50:
+        if len(self.memory_buffer) < 20:
+            print(f"[PCA] 버퍼 부족 (n={len(self.memory_buffer)}), 스킵", flush=True)
             return
 
         was_training = self.model.training
@@ -2288,7 +2289,8 @@ class COCONUTTrainer:
             batch_size=64, channels=channels, use_projection=False
         )
 
-        if len(feats) < 50:
+        if len(feats) < 20:
+            print(f"[PCA] feature 추출 부족 (n={len(feats)}), 스킵", flush=True)
             if was_training:
                 self.model.train()
             return
