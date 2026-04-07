@@ -970,6 +970,13 @@ class COCONUTTrainer:
                 self._calibrate_threshold()
                 metrics = self._evaluate_openset()
 
+                # PCA 진단: 10 experience마다 실행 (무거운 연산이므로 매번 X)
+                if self.experience_count % 10 == 0:
+                    try:
+                        self._diagnose_pca()
+                    except Exception as e:
+                        print(f"[PCA] 진단 실패: {e}")
+
                 _eval_entry = {
                     'experience': self.experience_count,
                     'num_users': len(self.registered_users),
@@ -2245,6 +2252,148 @@ class COCONUTTrainer:
         self.model.train()
 
     @torch.no_grad()
+    @torch.no_grad()
+    def _diagnose_pca(self):
+        """
+        6144D 임베딩의 실효 차원을 PCA로 진단.
+        메모리 버퍼 + 등록 사용자 데이터에서 feature를 추출하고
+        explained variance ratio의 누적합으로 실효 차원을 측정.
+        """
+        if len(self.memory_buffer) < 50:
+            return
+
+        was_training = self.model.training
+        self.model.eval()
+
+        # 1. 메모리 버퍼에서 feature 추출
+        all_paths = []
+        all_labels = []
+        for cid, group in self.memory_buffer.buffer_groups.items():
+            for item in group:
+                all_paths.append(item.path)
+                all_labels.append(cid)
+
+        # 최대 2000개 샘플로 제한 (메모리/속도)
+        if len(all_paths) > 2000:
+            rng = np.random.RandomState(42)
+            idx = rng.choice(len(all_paths), 2000, replace=False)
+            all_paths = [all_paths[i] for i in idx]
+            all_labels = [all_labels[i] for i in idx]
+
+        channels = self.config.dataset.channels
+
+        # raw 6144D feature 추출 (projection 미사용)
+        feats = extract_features(
+            self.model, all_paths, self.test_transform, self.device,
+            batch_size=64, channels=channels, use_projection=False
+        )
+
+        if len(feats) < 50:
+            if was_training:
+                self.model.train()
+            return
+
+        # L2 normalize (NCM과 동일한 조건)
+        feats_norm = feats / (np.linalg.norm(feats, axis=1, keepdims=True) + 1e-12)
+
+        # 2. PCA 수행 (SVD 기반)
+        N, D = feats_norm.shape
+        mean = feats_norm.mean(axis=0)
+        centered = feats_norm - mean
+
+        # 경제적 SVD: min(N, D) 성분만 계산
+        try:
+            U, S, Vt = np.linalg.svd(centered, full_matrices=False)
+        except np.linalg.LinAlgError:
+            print("[PCA] SVD 수렴 실패, 진단 스킵")
+            if was_training:
+                self.model.train()
+            return
+
+        explained_var = (S ** 2) / (N - 1)
+        total_var = explained_var.sum()
+        explained_ratio = explained_var / total_var
+        cumulative = np.cumsum(explained_ratio)
+
+        # 3. 실효 차원 측정 (다양한 기준)
+        dim_90 = int(np.searchsorted(cumulative, 0.90) + 1)
+        dim_95 = int(np.searchsorted(cumulative, 0.95) + 1)
+        dim_99 = int(np.searchsorted(cumulative, 0.99) + 1)
+
+        # Participation Ratio (PR): (Σλ)² / Σλ² — 유효 차원의 또 다른 측정법
+        pr = (explained_var.sum() ** 2) / (explained_var ** 2).sum()
+
+        # Top-k 성분의 기여도
+        top1 = explained_ratio[0] * 100
+        top5 = cumulative[4] * 100 if len(cumulative) >= 5 else cumulative[-1] * 100
+        top10 = cumulative[9] * 100 if len(cumulative) >= 10 else cumulative[-1] * 100
+        top50 = cumulative[49] * 100 if len(cumulative) >= 50 else cumulative[-1] * 100
+
+        print(f"\n{'='*60}")
+        print(f"[PCA 진단] 6144D 임베딩 실효 차원 분석 (N={N} samples)")
+        print(f"{'='*60}")
+        print(f"  Participation Ratio (PR): {pr:.1f}D")
+        print(f"  90% 분산 설명 차원: {dim_90}D / 6144D")
+        print(f"  95% 분산 설명 차원: {dim_95}D / 6144D")
+        print(f"  99% 분산 설명 차원: {dim_99}D / 6144D")
+        print(f"")
+        print(f"  Top-1  PC 기여도: {top1:.1f}%")
+        print(f"  Top-5  PC 누적:   {top5:.1f}%")
+        print(f"  Top-10 PC 누적:   {top10:.1f}%")
+        print(f"  Top-50 PC 누적:   {top50:.1f}%")
+
+        # 4. fc(4096D) vs fc1(2048D) 상관 분석
+        feats_raw = feats  # unnormalized
+        fc_part = feats_raw[:, :4096]   # fc 출력
+        fc1_part = feats_raw[:, 4096:]  # fc1 출력
+
+        # 각 부분의 독립적 분산 기여도
+        fc_var = np.var(fc_part, axis=0).sum()
+        fc1_var = np.var(fc1_part, axis=0).sum()
+        total_raw_var = np.var(feats_raw, axis=0).sum()
+
+        # CKA 대신 간단한 RV coefficient (공분산 상관)
+        fc_centered = fc_part - fc_part.mean(axis=0)
+        fc1_centered = fc1_part - fc1_part.mean(axis=0)
+
+        # cross-covariance norm (Frobenius)
+        cross_cov = fc_centered.T @ fc1_centered / (N - 1)  # (4096, 2048)
+        cross_norm = np.linalg.norm(cross_cov, 'fro')
+
+        fc_cov_norm = np.linalg.norm(fc_centered.T @ fc_centered / (N - 1), 'fro')
+        fc1_cov_norm = np.linalg.norm(fc1_centered.T @ fc1_centered / (N - 1), 'fro')
+
+        rv_coeff = cross_norm ** 2 / (fc_cov_norm * fc1_cov_norm + 1e-12)
+
+        print(f"")
+        print(f"  [fc vs fc1 상관 분석]")
+        print(f"  fc(4096D) 분산 비중:  {fc_var/total_raw_var*100:.1f}%")
+        print(f"  fc1(2048D) 분산 비중: {fc1_var/total_raw_var*100:.1f}%")
+        print(f"  RV coefficient (상관): {rv_coeff:.4f}  (1.0=완전상관, 0.0=독립)")
+
+        # 5. 오픈셋 관점 해석
+        print(f"")
+        if pr < 100:
+            print(f"  ⚠ PR={pr:.0f}D: 6144D 중 실효 {pr:.0f}D만 사용 → 오픈셋에 불리")
+            print(f"    → Impostor max cosine이 높아지는 원인 (저차원 부분공간 집중)")
+            print(f"    → Projection Head(512D) 또는 Uniformity Loss 권장")
+        elif pr < 500:
+            print(f"  △ PR={pr:.0f}D: 중간 수준. 개선 여지 있음")
+        else:
+            print(f"  ✓ PR={pr:.0f}D: 충분한 실효 차원")
+
+        if rv_coeff > 0.5:
+            print(f"  ⚠ RV={rv_coeff:.3f}: fc↔fc1 강한 상관 → concat 효율 낮음")
+        elif rv_coeff > 0.2:
+            print(f"  △ RV={rv_coeff:.3f}: fc↔fc1 중간 상관")
+        else:
+            print(f"  ✓ RV={rv_coeff:.3f}: fc↔fc1 독립적 → concat 효율적")
+
+        print(f"{'='*60}\n")
+
+        if was_training:
+            self.model.train()
+
     def _analyze_cosine_distribution_epoch(self):
         """ 에포크마다 코사인 유사도 분포 분석"""
         if len(self.memory_buffer) < 20:  # 최소 샘플 수 확인
