@@ -1,0 +1,84 @@
+{
+  "purpose": "옵션 A (fc 제거, 6144D→2048D) 적용 후 다음 단계 결정을 위해 학습 결과에서 수집해야 할 지표 목록",
+  "context": {
+    "applied_changes": [
+      "ccnet.py forward(): fe = x2 (2048D, fc1 출력만)",
+      "ccnet.py getFeatureCode(): fe = x2 (2048D)",
+      "ccnet.py FullProjectionHead(input_dim=2048)",
+      "trainer.py ProxyAnchor embedding_dim=2048",
+      "trainer.py _diagnose_pca: D 변수 기반 출력으로 수정 (fc/fc1 분리 분석 제거)"
+    ],
+    "baseline_before_option_A": {
+      "embedding_dim": 6144,
+      "PR_exp10": 10.2,
+      "PR_exp20": 19.5,
+      "fc_variance_share": "0.3% (dead)",
+      "fc1_variance_share": "99.7%",
+      "RV_fc_fc1": 0.99,
+      "FNIR_at_FPIR_1pct": "0.18~0.20"
+    },
+    "hypothesis": "fc는 fc1의 선형 pre-stage(활성화 없음)라 임베딩에 redundant. 제거해도 정보 손실 0이어야 함."
+  },
+  "metrics_to_collect": {
+    "1_fnir_at_fpir_1pct": {
+      "priority": "P0 — 가장 중요",
+      "description": "Open-set 핵심 metric. 1% FPIR에서의 FNIR.",
+      "where_in_logs": "evaluate_openset / openset evaluation 출력 블록",
+      "decision_rule": {
+        "improved_or_equal": "옵션 A 성공 — fc 잉여 확정",
+        "degraded": "fc에 미세 신호 있었음 — 옵션 A' (per-block normalize) 검토",
+        "compare_to": "이전 6144D 학습의 0.18~0.20"
+      }
+    },
+    "2_pca_participation_ratio": {
+      "priority": "P0",
+      "description": "임베딩 실효 차원. _diagnose_pca가 Exp 10, 20, ... 에서 자동 출력.",
+      "where_in_logs": "[PCA 진단] {D}D 임베딩 ... Participation Ratio (PR): X.XD",
+      "expected_baseline": "옵션 A 적용 후 PR ≈ 10D (이전과 같음 — fc가 잉여였다면)",
+      "decision_rule": {
+        "PR_around_10": "fc 잉여 확정. 다음 단계는 PR을 키우는 작업",
+        "PR_much_greater_10": "의외의 개선 — fc 제거가 collapse 완화에 기여",
+        "PR_less_than_10": "옵션 A가 뭔가 깨뜨림 — 롤백 검토"
+      }
+    },
+    "3_cosine_distribution_genuine_vs_impostor": {
+      "priority": "P1",
+      "description": "_analyze_cosine_distribution_epoch가 이미 수집 중. genuine/impostor 코사인의 평균, std, overlap.",
+      "where_in_logs": "에포크별 cosine 분포 분석 블록",
+      "key_values": [
+        "genuine_mean, genuine_std",
+        "impostor_mean, impostor_std",
+        "separation = (genuine_mean - impostor_mean) / sqrt((genuine_std² + impostor_std²)/2)",
+        "overlap area"
+      ],
+      "decision_rule": {
+        "high_overlap": "표현력 부족 — VICReg variance/cov, ArcFace, 또는 fc1 비선형성 추가 (P1/P2)",
+        "good_separation_bad_FNIR": "임계치 칼리브레이션 문제 — S-norm 도입 (작업 작음, 손실 추가 없음)"
+      }
+    },
+    "4_progression_over_experiences": {
+      "priority": "P2",
+      "description": "Continual learning 동안 PR/FNIR/cosine 분리도가 experience별로 어떻게 변하는지.",
+      "where_in_logs": "Experience N 평가 블록 + PCA 진단 (10마다)",
+      "checks": [
+        "PR이 클래스 수와 함께 비례 증가하는가 (이전: 1D/class) — 여전하면 collapse 미해결",
+        "FNIR이 forgetting으로 후반에 악화되는가",
+        "QAR/DER++ replay가 안정성 유지하는가"
+      ]
+    }
+  },
+  "decision_table": [
+    { "FNIR": "good", "PR": "~10", "cosine_sep": "ok",     "next_action": "끝. 옵션 A 성공." },
+    { "FNIR": "same", "PR": "~10", "cosine_sep": "ok",     "next_action": "fc 잉여 확정. 다음 최적화 단계로." },
+    { "FNIR": "bad",  "PR": "~10", "cosine_sep": "overlap","next_action": "VICReg/ArcFace 등 표현력 손실 검토 (P1)" },
+    { "FNIR": "bad",  "PR": "~10", "cosine_sep": "ok",     "next_action": "S-norm/칼리브레이션 개선 (손실 추가 없음)" },
+    { "FNIR": "bad",  "PR": "<10", "cosine_sep": "any",    "next_action": "옵션 A가 깨뜨림. 롤백 후 재진단." }
+  ],
+  "what_NOT_to_do_yet": [
+    "손실 추가 (Uniformity, VICReg, ArcFace)",
+    "fc1 뒤 비선형성 삽입",
+    "fc/fc1 통합 + tongji 재학습",
+    "Projection Head 활성화"
+  ],
+  "rationale": "현재 PR=10D가 진짜 FNIR 병목인지는 가설일 뿐. 측정 없이 손실/구조를 추가하면 변수 폭발로 인과 추론 불가. 옵션 A 학습 1회 결과 → 위 4개 지표 → decision_table로 다음 단계 자동 결정."
+}
