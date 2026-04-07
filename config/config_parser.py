@@ -122,7 +122,9 @@ class ConfigParser:
                 openset_dict['verbose_calibration'] = True
             if 'rejection_gate' not in openset_dict:
                 openset_dict['rejection_gate'] = 'cosine_only'
-            
+            if 'use_snorm' not in openset_dict:
+                openset_dict['use_snorm'] = False
+
             #  TTA 기본값 추가
             if 'tta_n_views' not in openset_dict:
                 openset_dict['tta_n_views'] = 1  # 기본: 비활성화
