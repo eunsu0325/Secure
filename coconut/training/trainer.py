@@ -1778,7 +1778,6 @@ class COCONUTTrainer:
                               f"norm cos={_ms[_normal_mask].mean():.3f} r1={_rc[_normal_mask].mean():.3f}")
 
             # --- 3. Per-class Worst/Best ---
-            print(f"\n[DIAG] Per-class Worst/Best 5  [mean_score=해당 사용자 probe의 max cosine 평균]")
             _class_scores = {}
             for i, lbl in enumerate(_labels):
                 if lbl not in _class_scores:
