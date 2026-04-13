@@ -617,7 +617,7 @@ class COCONUTTrainer:
             real_classes = list(unique_labels)
 
             if real_classes:
-                # 새 클래스 피처 평균 계산 — proxy 초기화용 (512D projection 공간)
+                # 새 클래스 피처 평균 계산 — proxy 초기화용 (2048D backbone 공간)
                 new_class_ids = [c for c in real_classes
                                  if c not in self.proxy_anchor_loss.class_to_idx]
                 feature_means = {}
