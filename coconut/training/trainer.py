@@ -2248,9 +2248,9 @@ class COCONUTTrainer:
                       f"min={pv_min:.3e}, max={pv_max:.3e}, max/min={ratio:.1f}"
                       + (" !!NaN/Inf!!" if has_bad else ""))
 
-        # Full PCA whitening (Step 2b)
+        # Full PCA whitening (Step 2b) — supports 'full_whitened' and 'projection_only'
         mahalanobis_variant = getattr(self.config.openset, 'mahalanobis_variant', 'diagonal')
-        if ncm_score_mode == 'mahalanobis' and mahalanobis_variant == 'full_whitened':
+        if ncm_score_mode == 'mahalanobis' and mahalanobis_variant in ('full_whitened', 'projection_only'):
             centered_all = []
             num_classes_cov = 0
             for features_list in class_features.values():
@@ -2269,9 +2269,38 @@ class COCONUTTrainer:
                 D = X.shape[1]
 
                 cov = (X.T @ X) / max(dof_pca, 1)
-                lam_pca = min(1.0, float(D) / (D + dof_pca))
                 tr_mean = torch.diagonal(cov).mean()
-                cov_shrunk = (1 - lam_pca) * cov + lam_pca * tr_mean * torch.eye(D, device=cov.device, dtype=cov.dtype)
+
+                # ── Shrinkage mode 분기 (Phase A) ──────────────────────────
+                shrink_mode = getattr(self.config.openset, 'pca_shrinkage_mode', 'auto')
+                if shrink_mode == 'auto':
+                    lam_pca = min(1.0, float(D) / (D + dof_pca))
+                elif shrink_mode == 'fixed':
+                    lam_pca = float(getattr(self.config.openset, 'pca_shrinkage_lambda', 0.1))
+                    lam_pca = max(0.0, min(1.0, lam_pca))
+                else:  # 'none'
+                    lam_pca = 0.0
+
+                eye_D = torch.eye(D, device=cov.device, dtype=cov.dtype)
+                if lam_pca > 0:
+                    cov_shrunk = (1 - lam_pca) * cov + lam_pca * tr_mean * eye_D
+                else:
+                    jitter = 1e-6 * tr_mean
+                    cov_shrunk = cov + jitter * eye_D
+
+                # ── Raw spectrum 진단 (shrinkage 기여 분리용) ─────────────
+                try:
+                    eigvals_raw = torch.linalg.eigvalsh(cov)
+                    tot_raw = eigvals_raw.sum().clamp(min=1e-12)
+                    cumvar_raw = torch.cumsum(eigvals_raw.flip(0), dim=0) / tot_raw
+                    cv90_raw = int((cumvar_raw >= 0.90).float().argmax().item()) + 1
+                    cv99_raw = int((cumvar_raw >= 0.99).float().argmax().item()) + 1
+                    top5_raw = eigvals_raw[-5:].flip(0)
+                    ratio_raw = (eigvals_raw[-1] / eigvals_raw[-min(32, D)].clamp(min=1e-12)).item()
+                    print(f"   [PCA-W][raw]   top5={[f'{v:.2e}' for v in top5_raw.tolist()]}, "
+                          f"cv90→{cv90_raw}D, cv99→{cv99_raw}D, top1/top32={ratio_raw:.2f}")
+                except Exception as _e:
+                    print(f"   [PCA-W][raw]   eigvalsh failed: {_e}")
 
                 eigvals, eigvecs = torch.linalg.eigh(cov_shrunk)
 
@@ -2279,15 +2308,27 @@ class COCONUTTrainer:
                 pca_max_k = getattr(self.config.openset, 'pca_max_k', 256)
                 total_var = eigvals.sum()
                 cumvar = torch.cumsum(eigvals.flip(0), dim=0) / total_var
-                k = int((cumvar >= pca_explained_var).float().argmax().item()) + 1
-                k = min(k, pca_max_k, D)
-                k = max(k, num_classes_cov)
+
+                # ── k mode 분기 (Phase A) ───────────────────────────────
+                k_mode = getattr(self.config.openset, 'pca_k_mode', 'adaptive')
+                if k_mode == 'fixed':
+                    k = int(getattr(self.config.openset, 'pca_fixed_k', 32))
+                    k = min(k, D)
+                else:
+                    k = int((cumvar >= pca_explained_var).float().argmax().item()) + 1
+                    k = min(k, pca_max_k, D)
+                k = max(k, 2)  # 최소 안전장치 (num_classes_cov 강제 제거)
 
                 top_vals = eigvals[-k:]
                 top_vecs = eigvecs[:, -k:]
                 reg = getattr(self.config.openset, 'var_reg_alpha', 1e-4)
-                inv_sqrt = 1.0 / torch.sqrt(top_vals + reg)
-                W = top_vecs * inv_sqrt.unsqueeze(0)
+                # ── Variant 분기: full_whitened vs projection_only ──────
+                if mahalanobis_variant == 'projection_only':
+                    W = top_vecs  # (D, k) — orthonormal projection only
+                    inv_sqrt = None
+                else:  # full_whitened
+                    inv_sqrt = 1.0 / torch.sqrt(top_vals + reg)
+                    W = top_vecs * inv_sqrt.unsqueeze(0)  # (D, k)
 
                 class_ids_sorted = sorted(class_features.keys())
                 max_id = max(class_ids_sorted)
@@ -2303,8 +2344,10 @@ class COCONUTTrainer:
                 eigval_ratio = eigvals[-1].item() / max(eigvals[-k].item(), 1e-12)
 
                 # 1) 기본 정보
-                print(f"   [PCA-W] k={k} (explain={cumvar[k-1].item():.3f}), "
-                      f"C={num_classes_cov}, dof={dof_pca}, λ_shrink={lam_pca:.3f}")
+                print(f"   [PCA-W] variant={mahalanobis_variant}, k={k} "
+                      f"(mode={k_mode}, explain={cumvar[k-1].item():.3f}), "
+                      f"C={num_classes_cov}, dof={dof_pca}, "
+                      f"λ_shrink={lam_pca:.3f} (mode={shrink_mode})")
 
                 # 2) Eigenvalue spectrum 상세
                 #    ratio>>1이면 차원별 차별화 작동, ≈1이면 diagonal과 동일
@@ -2462,24 +2505,24 @@ class COCONUTTrainer:
                         tail_classes.sort(key=lambda x: x[1])
                         print(f"   [PCA-W] tail_top3={[(c,f'{s:.1f}') for c,s in tail_classes[:3]]}")
 
-                    # 10) Whitening matrix 안정성 (experience 간 변화량)
-                    #     이전 W와 현재 W의 subspace 일치도 — 너무 휘면 reflects drift
-                    if hasattr(self, '_prev_W_pca'):
-                        prev_W = self._prev_W_pca
-                        if prev_W.shape == W.shape:
-                            # principal angle via singular values of W_prev^T @ W
-                            overlap_mat = prev_W.T.cpu() @ W.cpu()  # (k, k)
+                    # 10) Subspace 안정성 (orthonormal top_vecs 기반 principal angles)
+                    #     이전 subspace와의 일치도 — 1에 가까울수록 같은 subspace, 0=orthogonal
+                    cur_U = top_vecs.detach().cpu()  # orthonormal (D, k)
+                    if hasattr(self, '_prev_U_pca'):
+                        prev_U = self._prev_U_pca
+                        if prev_U.shape == cur_U.shape:
+                            overlap_mat = prev_U.T @ cur_U  # (k, k)
                             u_svd = torch.linalg.svdvals(overlap_mat)
-                            # u_svd는 cos of principal angles — 1에 가까울수록 같은 subspace
+                            u_svd = u_svd.clamp(0.0, 1.0)  # numerical safety
                             mean_cos_angle = u_svd.mean().item()
                             min_cos_angle = u_svd.min().item()
-                            print(f"   [PCA-W] W_stability: mean_cos_angle={mean_cos_angle:.3f}, "
+                            print(f"   [PCA-W] U_stability: mean_cos_angle={mean_cos_angle:.3f}, "
                                   f"min_cos_angle={min_cos_angle:.3f} "
                                   f"(1.0=identical subspace, 0=orthogonal)")
                         else:
-                            print(f"   [PCA-W] W_stability: k changed {prev_W.shape[1]}→{W.shape[1]} "
+                            print(f"   [PCA-W] U_stability: k changed {prev_U.shape[1]}→{cur_U.shape[1]} "
                                   f"(rank shift due to new classes)")
-                    self._prev_W_pca = W.detach().clone()
+                    self._prev_U_pca = cur_U.clone()
 
                     # 11) Dimension utilization in whitened space
                     #     각 whitened dim의 std across samples — 사용 안 되는 dim 탐지
