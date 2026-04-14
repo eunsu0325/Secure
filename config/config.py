@@ -134,7 +134,7 @@ class Openset:
     # Score mode (Method 1: Shared Diagonal Mahalanobis)
     score_mode: str = 'cosine'          # 'cosine' | 'mahalanobis'
     var_reg_alpha: float = 1e-4         # Mahalanobis variance regularization
-    rejection_gate: str = 'cosine_only'  # 'cosine_only' | 'cosine_margin'
+    rejection_gate: str = 'top1_only'  # 'top1_only' | 'top1_margin' (score_mode-agnostic)
     use_snorm: bool = False              # per-class Z-score normalization (S-norm)
 
     # GHOST (Gaussian Hypothesis Open-Set Technique, AAAI 2025)
