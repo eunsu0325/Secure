@@ -125,8 +125,10 @@ Openset:
   tta_repeat_aggregation: 'mean'  # Inter-repeat aggregation method
   tta_verbose: true  # TTA debugging output
 
-  # Score mode (Method 1: Shared Diagonal Mahalanobis — 실패, cosine 유지)
-  score_mode: 'cosine'
+  # Score mode: 'cosine' | 'mahalanobis'
+  # Mahalanobis: pooled within-class diagonal variance + OAS shrinkage (trainer.py::_update_ncm)
+  # S-norm과 compose 가능 (ncm.py::forward의 early return 제거됨)
+  score_mode: 'mahalanobis'
   var_reg_alpha: 0.0001
 
   # Rejection gate mode: 'cosine_only' | 'cosine_margin'
