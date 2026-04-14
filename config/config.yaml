@@ -131,8 +131,8 @@ Openset:
   score_mode: 'mahalanobis'
   var_reg_alpha: 0.0001
 
-  # Rejection gate mode: 'cosine_only' | 'cosine_margin'
-  rejection_gate: 'cosine_only'   # cosine_only + S-norm (이중 게이트 → 단일 게이트 전환)
+  # Rejection gate mode: 'top1_only' | 'top1_margin' (score_mode와 독립 — cosine/mahalanobis 모두 사용 가능)
+  rejection_gate: 'top1_only'     # top-1 score ≥ τ 단일 게이트 (+ S-norm)
   use_snorm: true                 # per-class Z-score normalization (crowding 보정)
 
   # GHOST (레거시, use_ghost: true + rejection_gate 미설정 시 사용)
