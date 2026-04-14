@@ -2237,12 +2237,16 @@ class COCONUTTrainer:
                 target = pooled_var.mean()
                 pooled_var = (1.0 - lam) * pooled_var + lam * target
                 self.ncm.set_global_var(pooled_var)
-                if self.verbose:
-                    print(f"   Mahalanobis pooled_var: C={num_classes_used}, "
-                          f"dof={total_dof}, lambda={lam:.3f}, "
-                          f"mean={pooled_var.mean().item():.6e}, "
-                          f"min={pooled_var.min().item():.6e}, "
-                          f"max={pooled_var.max().item():.6e}")
+                # Mahalanobis 진단 로그 (verbose 무관 — smoke test 판단용 필수)
+                pv_mean = pooled_var.mean().item()
+                pv_min = pooled_var.min().item()
+                pv_max = pooled_var.max().item()
+                ratio = (pv_max / pv_min) if pv_min > 0 else float('inf')
+                has_bad = (not torch.isfinite(pooled_var).all().item())
+                print(f"   [Maha] pooled_var: C={num_classes_used}, dof={total_dof}, "
+                      f"lambda={lam:.3f}, mean={pv_mean:.3e}, "
+                      f"min={pv_min:.3e}, max={pv_max:.3e}, max/min={ratio:.1f}"
+                      + (" !!NaN/Inf!!" if has_bad else ""))
 
         # GHOST: augmented raw features로 per-class μ_raw, σ_raw 계산
         if getattr(self, 'use_ghost', False):
