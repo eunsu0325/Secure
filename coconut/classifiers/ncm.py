@@ -115,7 +115,20 @@ class NCMClassifier(nn.Module):
             m2 = (M_w * M_w).sum(dim=1, keepdim=False)      # (C,)
             xm = x_w @ M_w.T                                # (B, C)
             scores = -(x2 + m2.unsqueeze(0) - 2 * xm)      # (B, C)
-            return scores  # 높을수록 가까움 (negative Mahalanobis distance)
+            # S-norm compose: per-class Z-score normalization on Mahalanobis scores
+            # (early return 제거 — Mahalanobis + S-norm의 orthogonal contribution 실험을 위해)
+            if apply_snorm and self.snorm_enabled and self.cohort_mu is not None:
+                mu = self.cohort_mu.to(device=scores.device, dtype=scores.dtype)
+                sigma = self.cohort_sigma.to(device=scores.device, dtype=scores.dtype)
+                C_scores = scores.shape[1]
+                C_cohort = mu.shape[0]
+                if C_cohort < C_scores:
+                    # 새 클래스 추가됨 — cohort 미계산 클래스는 identity (mu=0, σ=1)
+                    pad = C_scores - C_cohort
+                    mu = torch.cat([mu, torch.zeros(pad, device=mu.device, dtype=mu.dtype)])
+                    sigma = torch.cat([sigma, torch.ones(pad, device=sigma.device, dtype=sigma.dtype)])
+                scores = (scores - mu.unsqueeze(0)) / sigma.unsqueeze(0)
+            return scores  # 높을수록 가까움 (negative Mahalanobis distance, optionally S-normed)
 
         if self.normalize:
             # 코사인 유사도 기반
