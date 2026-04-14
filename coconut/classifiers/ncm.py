@@ -31,7 +31,7 @@ class NCMClassifier(nn.Module):
         # 이중 게이트 (cosine + margin)
         self.tau_cos = None          # cosine threshold
         self.tau_margin = None       # margin threshold (top1 - top2)
-        self.rejection_gate = 'cosine_only'  # 'cosine_only' | 'cosine_margin'
+        self.rejection_gate = 'top1_only'  # 'top1_only' | 'top1_margin'
 
         # Mahalanobis 관련
         self.score_mode = score_mode          # 'cosine' | 'mahalanobis'
@@ -327,12 +327,12 @@ class NCMClassifier(nn.Module):
 
     @torch.no_grad()
     def predict_openset(self, x):
-        """오픈셋 예측 (모드별 분기: cosine_margin / GHOST 레거시 / cosine_only)"""
+        """오픈셋 예측 (모드별 분기: top1_margin / GHOST 레거시 / top1_only)"""
         if len(self.class_means_dict) == 0:
             return torch.full((x.shape[0],), -1, dtype=torch.long, device=x.device)
 
-        # --- cosine_margin 이중 게이트 ---
-        if self.rejection_gate == 'cosine_margin':
+        # --- top1_margin 이중 게이트 ---
+        if self.rejection_gate == 'top1_margin':
             result = self.compute_dual_gate_scores(x)
             pred = result['pred_ids']
             accept = torch.ones(x.shape[0], dtype=torch.bool, device=x.device)
@@ -359,7 +359,7 @@ class NCMClassifier(nn.Module):
             pred[~accept] = self.unknown_id
             return pred
 
-        # --- cosine_only 모드 ---
+        # --- top1_only 모드 ---
         scores = self.forward(x)
         top1 = scores.topk(1, dim=1)
         max_score = top1.values[:, 0]
