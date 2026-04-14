@@ -125,6 +125,14 @@ class ConfigParser:
             if 'use_snorm' not in openset_dict:
                 openset_dict['use_snorm'] = False
 
+            # Mahalanobis variant 기본값
+            if 'mahalanobis_variant' not in openset_dict:
+                openset_dict['mahalanobis_variant'] = 'diagonal'
+            if 'pca_explained_var' not in openset_dict:
+                openset_dict['pca_explained_var'] = 0.99
+            if 'pca_max_k' not in openset_dict:
+                openset_dict['pca_max_k'] = 256
+
             #  TTA 기본값 추가
             if 'tta_n_views' not in openset_dict:
                 openset_dict['tta_n_views'] = 1  # 기본: 비활성화
