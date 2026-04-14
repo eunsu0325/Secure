@@ -2299,9 +2299,66 @@ class COCONUTTrainer:
 
                 self.ncm.set_whitening(W.cpu(), M_white.cpu())
 
+                # ============ PCA Whitening 진단 로그 ============
+                eigval_ratio = eigvals[-1].item() / max(eigvals[-k].item(), 1e-12)
+
+                # 1) 기본 정보: k, explained variance, shrinkage
                 print(f"   [PCA-W] k={k} (explain={cumvar[k-1].item():.3f}), "
-                      f"C={num_classes_cov}, dof={dof_pca}, λ_shrink={lam_pca:.3f}, "
-                      f"eigval[top1]={eigvals[-1].item():.3e}, eigval[k]={eigvals[-k].item():.3e}")
+                      f"C={num_classes_cov}, dof={dof_pca}, λ_shrink={lam_pca:.3f}")
+
+                # 2) Eigenvalue spectrum: top-1, top-k, ratio (whitening 강도 지표)
+                #    ratio가 1에 가까우면 → uniform (diagonal과 같음), 클수록 → 차원별 차별화 큼
+                print(f"   [PCA-W] eigval: top1={eigvals[-1].item():.3e}, "
+                      f"topk={eigvals[-k].item():.3e}, ratio={eigval_ratio:.1f}, "
+                      f"bottom={eigvals[0].item():.3e}")
+
+                # 3) Whitened class mean 간 거리 (클래스 분리도)
+                active_ids = [cid for cid in class_ids_sorted if M_white[cid].abs().sum() > 0]
+                if len(active_ids) >= 2:
+                    active_means = M_white[active_ids]
+                    dists = torch.cdist(active_means.unsqueeze(0), active_means.unsqueeze(0)).squeeze(0)
+                    mask = torch.triu(torch.ones_like(dists, dtype=torch.bool), diagonal=1)
+                    pair_dists = dists[mask]
+                    print(f"   [PCA-W] wh_mean_dist: mean={pair_dists.mean().item():.2f}, "
+                          f"min={pair_dists.min().item():.2f}, max={pair_dists.max().item():.2f}, "
+                          f"std={pair_dists.std().item():.2f}")
+
+                # 4) Whitening 전후 비교: 원본 L2-norm mean 간 cosine 거리 vs whitened 거리
+                if len(active_ids) >= 2:
+                    raw_means_norm = []
+                    for cid in active_ids:
+                        rm = torch.stack(class_features[cid]).mean(0)
+                        raw_means_norm.append(F.normalize(rm.unsqueeze(0), p=2, dim=1, eps=1e-12).squeeze(0))
+                    raw_means_t = torch.stack(raw_means_norm)
+                    raw_cos = raw_means_t @ raw_means_t.T
+                    raw_mask = torch.triu(torch.ones_like(raw_cos, dtype=torch.bool), diagonal=1)
+                    raw_cos_pairs = raw_cos[raw_mask]
+                    print(f"   [PCA-W] raw_cos_between_means: mean={raw_cos_pairs.mean().item():.4f}, "
+                          f"max={raw_cos_pairs.max().item():.4f} (높을수록 crowding)")
+
+                # 5) Whitened space에서의 probe genuine/impostor score 샘플 (간이 preview)
+                #    실제 eval은 _evaluate_openset에서 하지만, 여기서 빠른 sanity check
+                if len(active_ids) >= 2:
+                    # 각 클래스 첫 번째 sample을 probe로 사용
+                    n_preview = min(5, len(active_ids))
+                    preview_genuine = []
+                    preview_impostor = []
+                    for i, cid in enumerate(active_ids[:n_preview]):
+                        feat = class_features[cid][0]  # 첫 sample
+                        feat_norm = F.normalize(feat.unsqueeze(0), p=2, dim=1, eps=1e-12)
+                        feat_w = (feat_norm.to(W.device, dtype=W.dtype) @ W).squeeze(0)
+                        # genuine: 자기 클래스 whitened mean과의 거리
+                        gen_dist = -((feat_w - M_white[cid]) ** 2).sum().item()
+                        preview_genuine.append(gen_dist)
+                        # impostor: 다른 클래스 중 가장 가까운 거리
+                        other_ids = [c for c in active_ids if c != cid]
+                        imp_dists = [-((feat_w - M_white[c]) ** 2).sum().item() for c in other_ids]
+                        preview_impostor.append(max(imp_dists))
+                    gen_mean = sum(preview_genuine) / len(preview_genuine)
+                    imp_mean = sum(preview_impostor) / len(preview_impostor)
+                    print(f"   [PCA-W] preview_scores(n={n_preview}): "
+                          f"genuine={gen_mean:.1f}, impostor={imp_mean:.1f}, "
+                          f"gap={gen_mean - imp_mean:.1f}")
 
         # GHOST: augmented raw features로 per-class μ_raw, σ_raw 계산
         if getattr(self, 'use_ghost', False):
