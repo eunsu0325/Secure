@@ -311,7 +311,7 @@ class COCONUTTrainer:
                     print(f" GHOST rejection enabled (n_augment={self.ghost_n_augment}, shrinkage_min_n={self.ncm.ghost_shrinkage_min_n})")
 
             # Rejection gate 모드 설정
-            self.rejection_gate = getattr(config.openset, 'rejection_gate', 'cosine_only')
+            self.rejection_gate = getattr(config.openset, 'rejection_gate', 'top1_only')
             self.ncm.rejection_gate = self.rejection_gate
             self.use_snorm = getattr(config.openset, 'use_snorm', False)
             if self.verbose:
@@ -321,7 +321,7 @@ class COCONUTTrainer:
             score_mode = getattr(config.openset, 'score_mode', 'cosine')
             _cal_verbose = self.verbose and config.openset.verbose_calibration
 
-            if self.rejection_gate == 'cosine_margin':
+            if self.rejection_gate == 'top1_margin':
                 # 이중 게이트: cosine용 + margin용 calibrator 각각 생성
                 self.threshold_calibrator_cos = ThresholdCalibrator(
                     mode='cosine',
@@ -346,7 +346,7 @@ class COCONUTTrainer:
                 # 레거시 호환: 단일 calibrator도 cosine용으로 alias
                 self.threshold_calibrator = self.threshold_calibrator_cos
             else:
-                # 기존 단일 calibrator (cosine_only 또는 GHOST)
+                # 기존 단일 calibrator (top1_only 또는 GHOST)
                 if score_mode == 'mahalanobis':
                     cal_clip_range = None
                 elif self.use_ghost:
@@ -385,13 +385,13 @@ class COCONUTTrainer:
 
             # 초기 임계치 설정
             initial_tau = config.openset.initial_tau
-            if self.rejection_gate == 'cosine_margin':
+            if self.rejection_gate == 'top1_margin':
                 self.ncm.set_thresholds(tau_cos=initial_tau, tau_margin=0.0)
                 self.ncm.tau_s = initial_tau  # 레거시 호환
             elif self.use_ghost:
                 self.ncm.set_thresholds(tau_s=0.0)
             else:
-                # cosine_only
+                # top1_only
                 self.ncm.set_thresholds(tau_s=initial_tau, tau_cos=initial_tau)
 
             if self.verbose:
@@ -990,7 +990,7 @@ class COCONUTTrainer:
                     'tau_s': self.ncm.tau_s,
                     'metrics': metrics
                 }
-                if self.rejection_gate == 'cosine_margin':
+                if self.rejection_gate == 'top1_margin':
                     _eval_entry['tau_cos'] = self.ncm.tau_cos
                     _eval_entry['tau_margin'] = self.ncm.tau_margin
                 self.evaluation_history.append(_eval_entry)
@@ -1157,8 +1157,8 @@ class COCONUTTrainer:
         unknown_dev_file = getattr(self.config.dataset, 'unknown_dev_file', None)
         use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
 
-        # === cosine_margin 이중 게이트 캘리브레이션 ===
-        if self.rejection_gate == 'cosine_margin':
+        # === top1_margin 이중 게이트 캘리브레이션 ===
+        if self.rejection_gate == 'top1_margin':
             s_impostor_cos = np.array([])
             s_impostor_margin = np.array([])
             s_genuine_cos = np.array([])
@@ -1183,7 +1183,7 @@ class COCONUTTrainer:
                         s_impostor_cos = unk_dual['cosine_max'].cpu().numpy()
                         s_impostor_margin = unk_dual['margin'].cpu().numpy()
                 if self.verbose:
-                    print(f"   Unknown Dev: {len(s_impostor_cos)} scores (cosine_margin)")
+                    print(f"   Unknown Dev: {len(s_impostor_cos)} scores (top1_margin)")
             else:
                 print("  [WARN] unknown_dev_file not set. τ calibration skipped.")
 
@@ -1265,7 +1265,7 @@ class COCONUTTrainer:
 
             return  # 이중 게이트 캘리브레이션 완료
 
-        # === 기존 단일 threshold 캘리브레이션 (GHOST / cosine_only) ===
+        # === 기존 단일 threshold 캘리브레이션 (GHOST / top1_only) ===
         s_impostor = np.array([])
 
         if unknown_dev_file and str(unknown_dev_file) != 'None':
@@ -1513,7 +1513,7 @@ class COCONUTTrainer:
         nonmated_max_scores = np.array([])
         if len(nonmated_feats) > 0:
             nonmated_tensor = torch.from_numpy(nonmated_feats).to(self.device)
-            if self.rejection_gate == 'cosine_margin':
+            if self.rejection_gate == 'top1_margin':
                 nm_dual = self.ncm.compute_dual_gate_scores(nonmated_tensor)
                 nonmated_max_scores = nm_dual['cosine_max'].cpu().numpy()
                 nonmated_margins = nm_dual['margin'].cpu().numpy()
@@ -1533,7 +1533,7 @@ class COCONUTTrainer:
         if len(mated_feats) > 0:
             mated_tensor = torch.from_numpy(mated_feats).to(self.device)
 
-            if self.rejection_gate == 'cosine_margin':
+            if self.rejection_gate == 'top1_margin':
                 # 이중 게이트: dual scores + genuine score 계산
                 m_dual = self.ncm.compute_dual_gate_scores(mated_tensor)
                 mated_cosine_max = m_dual['cosine_max'].cpu().numpy()
@@ -1559,7 +1559,7 @@ class COCONUTTrainer:
                     mated_max_scores.append(max_score)
                     mated_rank1_correct.append(pred_id == true_id)
             else:
-                # 기존 로직 (GHOST / cosine_only)
+                # 기존 로직 (GHOST / top1_only)
                 mated_ncm_scores = self.ncm.forward(mated_tensor)
                 mated_registered_scores = mated_ncm_scores[:, registered_ids]
                 id_to_reg_idx = {cid: idx for idx, cid in enumerate(registered_ids)}
@@ -1604,7 +1604,7 @@ class COCONUTTrainer:
         _boot_rank1 = mated_rank1_correct.copy() if len(mated_rank1_correct) > 0 else np.array([])
 
         for target_fpir in target_fpirs:
-            if self.rejection_gate == 'cosine_margin' and len(nonmated_margins) > 0:
+            if self.rejection_gate == 'top1_margin' and len(nonmated_margins) > 0:
                 # 이중 게이트: joint threshold로 정확한 FPIR 달성
                 # margin τ를 고정 후 cosine τ를 sweep하여 joint FPIR = target
                 tau_margin_fixed = np.quantile(nonmated_margins, 1 - target_fpir)
@@ -1680,7 +1680,7 @@ class COCONUTTrainer:
             results[f'both_fail@{fpir_key}%'] = both
 
             # Bootstrap 95% CI (단일 threshold 모드에서만)
-            if (self.rejection_gate != 'cosine_margin'
+            if (self.rejection_gate != 'top1_margin'
                     and len(_boot_nm) > 0 and len(_boot_mated_max) > 0):
                 ci_lo, ci_hi = self._bootstrap_fnir_ci(
                     _boot_mated_max, _boot_rank1, _boot_nm,
@@ -1720,7 +1720,7 @@ class COCONUTTrainer:
         # ========================================
         if len(mated_max_scores_arr) >= 10:
             # _ms는 항상 cosine max score (진단 기준선)
-            if self.rejection_gate == 'cosine_margin':
+            if self.rejection_gate == 'top1_margin':
                 _ms = mated_cosine_max  # 이미 cosine
                 _margins_diag = mated_margins_arr
             elif getattr(self, 'use_ghost', False):
@@ -1842,7 +1842,7 @@ class COCONUTTrainer:
             if len(nonmated_feats) > 0 and _margin is not None:
                 _nmt = torch.from_numpy(nonmated_feats).to(self.device)
 
-                if self.rejection_gate == 'cosine_margin':
+                if self.rejection_gate == 'top1_margin':
                     # 이중 게이트: compute_dual_gate_scores로 통일
                     _nm_dual = self.ncm.compute_dual_gate_scores(_nmt)
                     _nm_top1 = _nm_dual['cosine_max'].cpu().numpy()
@@ -1929,7 +1929,7 @@ class COCONUTTrainer:
                     })
 
             # 이중 게이트 메트릭 추가
-            if self.rejection_gate == 'cosine_margin' and _margins_diag is not None:
+            if self.rejection_gate == 'top1_margin' and _margins_diag is not None:
                 _diag_entry.update({
                     'genuine_margin_mean': float(_margins_diag.mean()),
                     'genuine_margin_std': float(_margins_diag.std()),
@@ -2109,7 +2109,7 @@ class COCONUTTrainer:
 
         # τ 참고값 저장
         results['tau_s_current'] = self.ncm.tau_s
-        if self.rejection_gate == 'cosine_margin':
+        if self.rejection_gate == 'top1_margin':
             results['tau_cos_current'] = self.ncm.tau_cos
             results['tau_margin_current'] = self.ncm.tau_margin
 
@@ -2636,7 +2636,7 @@ class COCONUTTrainer:
                     'tau_s': self.ncm.tau_s,
                     'tau_cos': getattr(self.ncm, 'tau_cos', None),
                     'tau_margin': getattr(self.ncm, 'tau_margin', None),
-                    'rejection_gate': getattr(self, 'rejection_gate', 'cosine_only'),
+                    'rejection_gate': getattr(self, 'rejection_gate', 'top1_only'),
                     'registered_users': list(self.registered_users),
                     'evaluation_history': self.evaluation_history
                 }
@@ -2730,7 +2730,7 @@ class COCONUTTrainer:
             if tau_margin is not None:
                 self.ncm.tau_margin = tau_margin
             if self.verbose:
-                if self.rejection_gate == 'cosine_margin':
+                if self.rejection_gate == 'top1_margin':
                     print(f"[OK] Openset data restored ({len(self.registered_users)} registered users, "
                           f"τ_cos={tau_cos}, τ_margin={tau_margin})")
                 else:
