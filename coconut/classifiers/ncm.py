@@ -223,6 +223,12 @@ class NCMClassifier(nn.Module):
         self.cohort_mu = mu
         self.cohort_sigma = sigma
         self.snorm_enabled = True
+        # 진단: cohort 통계가 어느 score space에서 계산됐는지 확인용
+        nz = (sigma != 1.0).sum().item()
+        print(f"   [S-norm] cohort set on score_mode='{self.score_mode}': "
+              f"C={C}, nz_classes={nz}, "
+              f"mu[mean={mu.mean().item():.3e}, std={mu.std().item():.3e}], "
+              f"sigma[mean={sigma.mean().item():.3e}, min={sigma.min().item():.3e}]")
 
     def set_ghost_stats(self, class_means_raw, class_stds_raw, global_std_raw, class_counts):
         """GHOST용 per-class raw feature 통계 설정"""
