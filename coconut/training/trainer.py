@@ -2248,6 +2248,61 @@ class COCONUTTrainer:
                       f"min={pv_min:.3e}, max={pv_max:.3e}, max/min={ratio:.1f}"
                       + (" !!NaN/Inf!!" if has_bad else ""))
 
+        # Full PCA whitening (Step 2b)
+        mahalanobis_variant = getattr(self.config.openset, 'mahalanobis_variant', 'diagonal')
+        if ncm_score_mode == 'mahalanobis' and mahalanobis_variant == 'full_whitened':
+            centered_all = []
+            num_classes_cov = 0
+            for features_list in class_features.values():
+                n = len(features_list)
+                if n < 2:
+                    continue
+                feat_tensor = torch.stack(features_list)
+                feat_norm = F.normalize(feat_tensor, p=2, dim=1, eps=1e-12)
+                class_mean = feat_norm.mean(dim=0, keepdim=True)
+                centered_all.append(feat_norm - class_mean)
+                num_classes_cov += 1
+
+            if centered_all:
+                X = torch.cat(centered_all, dim=0)
+                dof_pca = X.shape[0] - num_classes_cov
+                D = X.shape[1]
+
+                cov = (X.T @ X) / max(dof_pca, 1)
+                lam_pca = min(1.0, float(D) / (D + dof_pca))
+                tr_mean = torch.diagonal(cov).mean()
+                cov_shrunk = (1 - lam_pca) * cov + lam_pca * tr_mean * torch.eye(D, device=cov.device, dtype=cov.dtype)
+
+                eigvals, eigvecs = torch.linalg.eigh(cov_shrunk)
+
+                pca_explained_var = getattr(self.config.openset, 'pca_explained_var', 0.99)
+                pca_max_k = getattr(self.config.openset, 'pca_max_k', 256)
+                total_var = eigvals.sum()
+                cumvar = torch.cumsum(eigvals.flip(0), dim=0) / total_var
+                k = int((cumvar >= pca_explained_var).float().argmax().item()) + 1
+                k = min(k, pca_max_k, D)
+                k = max(k, num_classes_cov)
+
+                top_vals = eigvals[-k:]
+                top_vecs = eigvecs[:, -k:]
+                reg = getattr(self.config.openset, 'var_reg_alpha', 1e-4)
+                inv_sqrt = 1.0 / torch.sqrt(top_vals + reg)
+                W = top_vecs * inv_sqrt.unsqueeze(0)
+
+                class_ids_sorted = sorted(class_features.keys())
+                max_id = max(class_ids_sorted)
+                M_white = torch.zeros(max_id + 1, k, device=W.device, dtype=W.dtype)
+                for cid in class_ids_sorted:
+                    raw_mean = torch.stack(class_features[cid]).mean(0)
+                    norm_mean = F.normalize(raw_mean.unsqueeze(0), p=2, dim=1, eps=1e-12).squeeze(0)
+                    M_white[cid] = norm_mean.to(W.device, dtype=W.dtype) @ W
+
+                self.ncm.set_whitening(W.cpu(), M_white.cpu())
+
+                print(f"   [PCA-W] k={k} (explain={cumvar[k-1].item():.3f}), "
+                      f"C={num_classes_cov}, dof={dof_pca}, λ_shrink={lam_pca:.3f}, "
+                      f"eigval[top1]={eigvals[-1].item():.3e}, eigval[k]={eigvals[-k].item():.3e}")
+
         # GHOST: augmented raw features로 per-class μ_raw, σ_raw 계산
         if getattr(self, 'use_ghost', False):
             use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
