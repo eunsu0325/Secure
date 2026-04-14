@@ -129,9 +129,14 @@ Openset:
   # Mahalanobis: pooled within-class diagonal variance + OAS shrinkage (trainer.py::_update_ncm)
   # S-norm과 compose 가능 (ncm.py::forward의 early return 제거됨)
   score_mode: 'mahalanobis'
-  mahalanobis_variant: 'full_whitened'  # 'diagonal' | 'full_whitened'
+  mahalanobis_variant: 'diagonal'  # 'diagonal' | 'full_whitened' | 'projection_only'  [A0: diagonal baseline]
   pca_explained_var: 0.99               # adaptive k threshold
   pca_max_k: 256                        # k upper bound
+  # Phase A ablation knobs
+  pca_shrinkage_mode: 'auto'     # 'auto' | 'fixed' | 'none'
+  pca_shrinkage_lambda: 0.1      # fixed λ (pca_shrinkage_mode='fixed'일 때)
+  pca_k_mode: 'adaptive'         # 'adaptive' | 'fixed'
+  pca_fixed_k: 32                # fixed k (pca_k_mode='fixed'일 때)
   var_reg_alpha: 0.0001
 
   # Rejection gate mode: 'top1_only' | 'top1_margin' (score_mode와 독립 — cosine/mahalanobis 모두 사용 가능)
