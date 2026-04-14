@@ -2209,16 +2209,40 @@ class COCONUTTrainer:
         self.ncm.replace_class_means_dict(class_means)
 
         # Global diagonal variance 계산 (Mahalanobis 모드)
+        # Pooled within-class diagonal variance + OAS-style shrinkage
+        # (이전 버그: all_features를 통째로 var → total variance (between+within))
         ncm_score_mode = getattr(self.config.openset, 'score_mode', 'cosine')
         if ncm_score_mode == 'mahalanobis':
-            all_features = []
+            sum_sq = None
+            total_dof = 0
+            num_classes_used = 0
             for features_list in class_features.values():
-                all_features.extend(features_list)
-            if len(all_features) >= 2:
-                all_feat_tensor = torch.stack(all_features)
-                all_feat_norm = F.normalize(all_feat_tensor, p=2, dim=1, eps=1e-12)
-                global_var = all_feat_norm.var(dim=0, unbiased=True)
-                self.ncm.set_global_var(global_var)
+                n = len(features_list)
+                if n < 2:
+                    continue
+                feat_tensor = torch.stack(features_list)
+                feat_norm = F.normalize(feat_tensor, p=2, dim=1, eps=1e-12)
+                class_mean = feat_norm.mean(dim=0, keepdim=True)
+                centered = feat_norm - class_mean
+                class_sum_sq = (centered * centered).sum(dim=0)
+                sum_sq = class_sum_sq if sum_sq is None else sum_sq + class_sum_sq
+                total_dof += (n - 1)
+                num_classes_used += 1
+            if sum_sq is not None and total_dof > 0:
+                pooled_var = sum_sq / total_dof
+                # OAS-style shrinkage toward isotropic target (mean variance)
+                # D=2048, dof≈900 → λ≈0.69 (few-shot high-dim에서 강한 regularization)
+                D = pooled_var.shape[0]
+                lam = min(1.0, float(D) / (D + total_dof))
+                target = pooled_var.mean()
+                pooled_var = (1.0 - lam) * pooled_var + lam * target
+                self.ncm.set_global_var(pooled_var)
+                if self.verbose:
+                    print(f"   Mahalanobis pooled_var: C={num_classes_used}, "
+                          f"dof={total_dof}, lambda={lam:.3f}, "
+                          f"mean={pooled_var.mean().item():.6e}, "
+                          f"min={pooled_var.min().item():.6e}, "
+                          f"max={pooled_var.max().item():.6e}")
 
         # GHOST: augmented raw features로 per-class μ_raw, σ_raw 계산
         if getattr(self, 'use_ghost', False):
