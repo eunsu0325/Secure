@@ -134,9 +134,14 @@ class Openset:
     # Score mode (Method 1: Shared Diagonal Mahalanobis)
     score_mode: str = 'cosine'          # 'cosine' | 'mahalanobis'
     var_reg_alpha: float = 1e-4         # Mahalanobis variance regularization
-    mahalanobis_variant: str = 'diagonal'  # 'diagonal' | 'full_whitened'
+    mahalanobis_variant: str = 'diagonal'  # 'diagonal' | 'full_whitened' | 'projection_only'
     pca_explained_var: float = 0.99     # adaptive k 결정 기준 (full_whitened)
     pca_max_k: int = 256                # k 상한
+    # Shrinkage / k ablation knobs (Phase A)
+    pca_shrinkage_mode: str = 'auto'     # 'auto' | 'fixed' | 'none'
+    pca_shrinkage_lambda: float = 0.1    # fixed 모드 λ
+    pca_k_mode: str = 'adaptive'         # 'adaptive' | 'fixed'
+    pca_fixed_k: int = 32                # fixed 모드 k
     rejection_gate: str = 'top1_only'  # 'top1_only' | 'top1_margin' (score_mode-agnostic)
     use_snorm: bool = False              # per-class Z-score normalization (S-norm)
 
