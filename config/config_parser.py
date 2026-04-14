@@ -132,6 +132,14 @@ class ConfigParser:
                 openset_dict['pca_explained_var'] = 0.99
             if 'pca_max_k' not in openset_dict:
                 openset_dict['pca_max_k'] = 256
+            if 'pca_shrinkage_mode' not in openset_dict:
+                openset_dict['pca_shrinkage_mode'] = 'auto'
+            if 'pca_shrinkage_lambda' not in openset_dict:
+                openset_dict['pca_shrinkage_lambda'] = 0.1
+            if 'pca_k_mode' not in openset_dict:
+                openset_dict['pca_k_mode'] = 'adaptive'
+            if 'pca_fixed_k' not in openset_dict:
+                openset_dict['pca_fixed_k'] = 32
 
             #  TTA 기본값 추가
             if 'tta_n_views' not in openset_dict:
