@@ -129,6 +129,9 @@ Openset:
   # Mahalanobis: pooled within-class diagonal variance + OAS shrinkage (trainer.py::_update_ncm)
   # S-norm과 compose 가능 (ncm.py::forward의 early return 제거됨)
   score_mode: 'mahalanobis'
+  mahalanobis_variant: 'full_whitened'  # 'diagonal' | 'full_whitened'
+  pca_explained_var: 0.99               # adaptive k threshold
+  pca_max_k: 256                        # k upper bound
   var_reg_alpha: 0.0001
 
   # Rejection gate mode: 'top1_only' | 'top1_margin' (score_mode와 독립 — cosine/mahalanobis 모두 사용 가능)
