@@ -2299,20 +2299,33 @@ class COCONUTTrainer:
 
                 self.ncm.set_whitening(W.cpu(), M_white.cpu())
 
-                # ============ PCA Whitening 진단 로그 ============
+                # ============ PCA Whitening 종합 진단 로그 ============
                 eigval_ratio = eigvals[-1].item() / max(eigvals[-k].item(), 1e-12)
 
-                # 1) 기본 정보: k, explained variance, shrinkage
+                # 1) 기본 정보
                 print(f"   [PCA-W] k={k} (explain={cumvar[k-1].item():.3f}), "
                       f"C={num_classes_cov}, dof={dof_pca}, λ_shrink={lam_pca:.3f}")
 
-                # 2) Eigenvalue spectrum: top-1, top-k, ratio (whitening 강도 지표)
-                #    ratio가 1에 가까우면 → uniform (diagonal과 같음), 클수록 → 차원별 차별화 큼
+                # 2) Eigenvalue spectrum 상세
+                #    ratio>>1이면 차원별 차별화 작동, ≈1이면 diagonal과 동일
+                #    90%/95% 도달 차원 → 신호 집중도
+                cumvar_90 = int((cumvar >= 0.90).float().argmax().item()) + 1
+                cumvar_95 = int((cumvar >= 0.95).float().argmax().item()) + 1
+                cumvar_99 = int((cumvar >= 0.99).float().argmax().item()) + 1
                 print(f"   [PCA-W] eigval: top1={eigvals[-1].item():.3e}, "
                       f"topk={eigvals[-k].item():.3e}, ratio={eigval_ratio:.1f}, "
                       f"bottom={eigvals[0].item():.3e}")
+                print(f"   [PCA-W] cumvar: 90%→{cumvar_90}D, 95%→{cumvar_95}D, "
+                      f"99%→{cumvar_99}D (선택 k={k})")
 
-                # 3) Whitened class mean 간 거리 (클래스 분리도)
+                # 3) Eigenvalue 분포 구간별 (whitening이 어떤 방향을 얼마나 증폭하는지)
+                #    inv_sqrt가 곧 가중치 → top eigval은 덜 증폭, bottom은 크게 증폭
+                top5_vals = eigvals[-5:].flip(0)
+                bot5_vals = eigvals[-k:][:5] if k >= 5 else eigvals[-k:]
+                print(f"   [PCA-W] eigval_top5={[f'{v:.2e}' for v in top5_vals.tolist()]}")
+                print(f"   [PCA-W] eigval_botk5={[f'{v:.2e}' for v in bot5_vals.tolist()]}")
+
+                # 4) Whitened class mean 간 거리 (분리도)
                 active_ids = [cid for cid in class_ids_sorted if M_white[cid].abs().sum() > 0]
                 if len(active_ids) >= 2:
                     active_means = M_white[active_ids]
@@ -2322,8 +2335,21 @@ class COCONUTTrainer:
                     print(f"   [PCA-W] wh_mean_dist: mean={pair_dists.mean().item():.2f}, "
                           f"min={pair_dists.min().item():.2f}, max={pair_dists.max().item():.2f}, "
                           f"std={pair_dists.std().item():.2f}")
+                    # 가장 가까운 클래스 쌍 (crowding 위험)
+                    min_idx = pair_dists.argmin().item()
+                    # upper triangle indices → (i,j) 복원
+                    n_active = len(active_ids)
+                    row, col = 0, 0
+                    cnt = 0
+                    for r in range(n_active):
+                        for c_ in range(r+1, n_active):
+                            if cnt == min_idx:
+                                row, col = r, c_
+                            cnt += 1
+                    print(f"   [PCA-W] closest_pair: class {active_ids[row]} ↔ {active_ids[col]} "
+                          f"(dist={pair_dists.min().item():.2f})")
 
-                # 4) Whitening 전후 비교: 원본 L2-norm mean 간 cosine 거리 vs whitened 거리
+                # 5) 원본 cosine 공간 vs whitened 공간 비교
                 if len(active_ids) >= 2:
                     raw_means_norm = []
                     for cid in active_ids:
@@ -2333,32 +2359,168 @@ class COCONUTTrainer:
                     raw_cos = raw_means_t @ raw_means_t.T
                     raw_mask = torch.triu(torch.ones_like(raw_cos, dtype=torch.bool), diagonal=1)
                     raw_cos_pairs = raw_cos[raw_mask]
-                    print(f"   [PCA-W] raw_cos_between_means: mean={raw_cos_pairs.mean().item():.4f}, "
-                          f"max={raw_cos_pairs.max().item():.4f} (높을수록 crowding)")
+                    print(f"   [PCA-W] raw_cos: mean={raw_cos_pairs.mean().item():.4f}, "
+                          f"max={raw_cos_pairs.max().item():.4f}, "
+                          f"min={raw_cos_pairs.min().item():.4f} (높을수록 crowding)")
 
-                # 5) Whitened space에서의 probe genuine/impostor score 샘플 (간이 preview)
-                #    실제 eval은 _evaluate_openset에서 하지만, 여기서 빠른 sanity check
+                # 6) 전체 클래스 genuine/impostor score 분포 (모든 sample 사용)
                 if len(active_ids) >= 2:
-                    # 각 클래스 첫 번째 sample을 probe로 사용
-                    n_preview = min(5, len(active_ids))
-                    preview_genuine = []
-                    preview_impostor = []
-                    for i, cid in enumerate(active_ids[:n_preview]):
-                        feat = class_features[cid][0]  # 첫 sample
-                        feat_norm = F.normalize(feat.unsqueeze(0), p=2, dim=1, eps=1e-12)
-                        feat_w = (feat_norm.to(W.device, dtype=W.dtype) @ W).squeeze(0)
-                        # genuine: 자기 클래스 whitened mean과의 거리
-                        gen_dist = -((feat_w - M_white[cid]) ** 2).sum().item()
-                        preview_genuine.append(gen_dist)
-                        # impostor: 다른 클래스 중 가장 가까운 거리
-                        other_ids = [c for c in active_ids if c != cid]
-                        imp_dists = [-((feat_w - M_white[c]) ** 2).sum().item() for c in other_ids]
-                        preview_impostor.append(max(imp_dists))
-                    gen_mean = sum(preview_genuine) / len(preview_genuine)
-                    imp_mean = sum(preview_impostor) / len(preview_impostor)
-                    print(f"   [PCA-W] preview_scores(n={n_preview}): "
-                          f"genuine={gen_mean:.1f}, impostor={imp_mean:.1f}, "
-                          f"gap={gen_mean - imp_mean:.1f}")
+                    all_genuine_scores = []
+                    all_impostor_scores = []
+                    per_class_genuine = {}
+
+                    for cid in active_ids:
+                        feats_list = class_features[cid]
+                        for feat in feats_list:
+                            feat_norm = F.normalize(feat.unsqueeze(0), p=2, dim=1, eps=1e-12)
+                            feat_w = (feat_norm.to(W.device, dtype=W.dtype) @ W).squeeze(0)
+                            # genuine score (자기 클래스)
+                            gen_score = -((feat_w - M_white[cid]) ** 2).sum().item()
+                            all_genuine_scores.append(gen_score)
+                            if cid not in per_class_genuine:
+                                per_class_genuine[cid] = []
+                            per_class_genuine[cid].append(gen_score)
+                            # impostor score (가장 가까운 타 클래스)
+                            best_imp = float('-inf')
+                            for oid in active_ids:
+                                if oid == cid:
+                                    continue
+                                imp_score = -((feat_w - M_white[oid]) ** 2).sum().item()
+                                if imp_score > best_imp:
+                                    best_imp = imp_score
+                            all_impostor_scores.append(best_imp)
+
+                    import numpy as np
+                    gen_arr = np.array(all_genuine_scores)
+                    imp_arr = np.array(all_impostor_scores)
+                    gen_p5 = np.percentile(gen_arr, 5)
+                    imp_p95 = np.percentile(imp_arr, 95)
+                    overlap = (gen_p5 < imp_p95)
+
+                    print(f"   [PCA-W] genuine(n={len(gen_arr)}): "
+                          f"μ={gen_arr.mean():.1f}, σ={gen_arr.std():.1f}, "
+                          f"p5={gen_p5:.1f}, min={gen_arr.min():.1f}")
+                    print(f"   [PCA-W] impostor(n={len(imp_arr)}): "
+                          f"μ={imp_arr.mean():.1f}, σ={imp_arr.std():.1f}, "
+                          f"p95={imp_p95:.1f}, max={imp_arr.max():.1f}")
+                    print(f"   [PCA-W] separation: gap_μ={gen_arr.mean() - imp_arr.mean():.1f}, "
+                          f"gap_p5_p95={gen_p5 - imp_p95:.1f} "
+                          f"({'⚠ OVERLAP' if overlap else '✓ separated'})")
+
+                    # 7) Per-class genuine score 분포 (tail user 식별)
+                    #    mean genuine이 가장 낮은 클래스 = detection fail 위험
+                    class_gen_means = {cid: np.mean(scores) for cid, scores in per_class_genuine.items()}
+                    sorted_by_gen = sorted(class_gen_means.items(), key=lambda x: x[1])
+                    n_show = min(5, len(sorted_by_gen))
+                    worst = sorted_by_gen[:n_show]
+                    best = sorted_by_gen[-n_show:]
+                    print(f"   [PCA-W] worst_classes(genuine): "
+                          f"{[(cid, f'{sc:.1f}') for cid, sc in worst]}")
+                    print(f"   [PCA-W] best_classes(genuine): "
+                          f"{[(cid, f'{sc:.1f}') for cid, sc in best]}")
+
+                    # 8) Whitening 효과 정량화: diagonal 대비 separation 비교
+                    #    diagonal은 uniform scaling이므로 cosine ordering과 같음
+                    #    여기서 cosine genuine/impostor도 계산하여 비교
+                    cos_genuine = []
+                    cos_impostor = []
+                    for cid in active_ids:
+                        feats_list = class_features[cid]
+                        for feat in feats_list:
+                            feat_norm = F.normalize(feat.unsqueeze(0), p=2, dim=1, eps=1e-12).squeeze(0)
+                            # cosine genuine
+                            cos_gen = (feat_norm @ raw_means_t[active_ids.index(cid)]).item()
+                            cos_genuine.append(cos_gen)
+                            # cosine impostor (best)
+                            best_cos_imp = float('-inf')
+                            for j, oid in enumerate(active_ids):
+                                if oid == cid:
+                                    continue
+                                cs = (feat_norm @ raw_means_t[j]).item()
+                                if cs > best_cos_imp:
+                                    best_cos_imp = cs
+                            cos_impostor.append(best_cos_imp)
+                    cos_gen_arr = np.array(cos_genuine)
+                    cos_imp_arr = np.array(cos_impostor)
+                    cos_sep = cos_gen_arr.mean() - cos_imp_arr.mean()
+                    wh_sep = gen_arr.mean() - imp_arr.mean()
+                    print(f"   [PCA-W] vs_cosine: cos_sep={cos_sep:.4f}, wh_sep={wh_sep:.1f}")
+                    print(f"   [PCA-W] vs_cosine: cos_gen_p5={np.percentile(cos_gen_arr,5):.4f}, "
+                          f"cos_imp_p95={np.percentile(cos_imp_arr,95):.4f}, "
+                          f"cos_gap_p5_p95={np.percentile(cos_gen_arr,5)-np.percentile(cos_imp_arr,95):.4f}")
+
+                    # 9) Tail-specific 지표: tail user 수 (FRR 위험 클래스)
+                    #    genuine mean이 impostor p95 아래면 그 클래스는 detection 실패 위험
+                    tail_classes = []
+                    for cid, scores in per_class_genuine.items():
+                        cls_gen_mean = np.mean(scores)
+                        if cls_gen_mean < imp_p95:
+                            tail_classes.append((cid, cls_gen_mean))
+                    print(f"   [PCA-W] tail_risk: {len(tail_classes)}/{len(active_ids)} classes "
+                          f"(genuine_μ < impostor_p95={imp_p95:.1f})")
+                    if tail_classes:
+                        tail_classes.sort(key=lambda x: x[1])
+                        print(f"   [PCA-W] tail_top3={[(c,f'{s:.1f}') for c,s in tail_classes[:3]]}")
+
+                    # 10) Whitening matrix 안정성 (experience 간 변화량)
+                    #     이전 W와 현재 W의 subspace 일치도 — 너무 휘면 reflects drift
+                    if hasattr(self, '_prev_W_pca'):
+                        prev_W = self._prev_W_pca
+                        if prev_W.shape == W.shape:
+                            # principal angle via singular values of W_prev^T @ W
+                            overlap_mat = prev_W.T.cpu() @ W.cpu()  # (k, k)
+                            u_svd = torch.linalg.svdvals(overlap_mat)
+                            # u_svd는 cos of principal angles — 1에 가까울수록 같은 subspace
+                            mean_cos_angle = u_svd.mean().item()
+                            min_cos_angle = u_svd.min().item()
+                            print(f"   [PCA-W] W_stability: mean_cos_angle={mean_cos_angle:.3f}, "
+                                  f"min_cos_angle={min_cos_angle:.3f} "
+                                  f"(1.0=identical subspace, 0=orthogonal)")
+                        else:
+                            print(f"   [PCA-W] W_stability: k changed {prev_W.shape[1]}→{W.shape[1]} "
+                                  f"(rank shift due to new classes)")
+                    self._prev_W_pca = W.detach().clone()
+
+                    # 11) Dimension utilization in whitened space
+                    #     각 whitened dim의 std across samples — 사용 안 되는 dim 탐지
+                    all_feat_w = []
+                    for cid in active_ids:
+                        for feat in class_features[cid]:
+                            fn = F.normalize(feat.unsqueeze(0), p=2, dim=1, eps=1e-12)
+                            fw = (fn.to(W.device, dtype=W.dtype) @ W).squeeze(0)
+                            all_feat_w.append(fw.cpu())
+                    all_feat_w = torch.stack(all_feat_w)  # (N, k)
+                    dim_stds = all_feat_w.std(dim=0)  # (k,)
+                    dim_means_abs = all_feat_w.abs().mean(dim=0)
+                    # 활성 dim: std > 10% of max std
+                    active_dim_thresh = dim_stds.max().item() * 0.1
+                    n_active_dims = (dim_stds > active_dim_thresh).sum().item()
+                    print(f"   [PCA-W] wh_dim_util: active={n_active_dims}/{k} "
+                          f"(std>10%max), std_range=[{dim_stds.min().item():.3f}, "
+                          f"{dim_stds.max().item():.3f}]")
+
+                    # 12) Between-class vs Within-class variance in whitened space (Fisher ratio proxy)
+                    #     Fisher's criterion: 좋은 discriminative subspace일수록 값이 큼
+                    class_wh_means = {}
+                    class_wh_vars = []
+                    for cid in active_ids:
+                        feats_w = []
+                        for feat in class_features[cid]:
+                            fn = F.normalize(feat.unsqueeze(0), p=2, dim=1, eps=1e-12)
+                            feats_w.append((fn.to(W.device, dtype=W.dtype) @ W).squeeze(0).cpu())
+                        if len(feats_w) > 1:
+                            feats_w_t = torch.stack(feats_w)
+                            class_wh_means[cid] = feats_w_t.mean(dim=0)
+                            class_wh_vars.append(feats_w_t.var(dim=0, unbiased=True).sum().item())
+                    if len(class_wh_means) >= 2:
+                        all_class_wh_means = torch.stack(list(class_wh_means.values()))
+                        global_wh_mean = all_class_wh_means.mean(dim=0)
+                        between_var = ((all_class_wh_means - global_wh_mean) ** 2).sum(dim=1).mean().item()
+                        within_var = sum(class_wh_vars) / len(class_wh_vars)
+                        fisher_ratio = between_var / max(within_var, 1e-12)
+                        print(f"   [PCA-W] fisher_ratio: between/within={fisher_ratio:.2f} "
+                              f"(between={between_var:.2f}, within={within_var:.4f}) "
+                              f"— 클수록 discriminative")
 
         # GHOST: augmented raw features로 per-class μ_raw, σ_raw 계산
         if getattr(self, 'use_ghost', False):
