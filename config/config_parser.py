@@ -121,7 +121,7 @@ class ConfigParser:
             if 'verbose_calibration' not in openset_dict:
                 openset_dict['verbose_calibration'] = True
             if 'rejection_gate' not in openset_dict:
-                openset_dict['rejection_gate'] = 'cosine_only'
+                openset_dict['rejection_gate'] = 'top1_only'
             if 'use_snorm' not in openset_dict:
                 openset_dict['use_snorm'] = False
 
