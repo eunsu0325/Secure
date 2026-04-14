@@ -38,6 +38,10 @@ class NCMClassifier(nn.Module):
         self.var_reg_alpha = var_reg_alpha
         self.global_var = None                # Tensor(D,) — shared diagonal variance
 
+        # Full PCA whitening (Step 2b)
+        self.whitening_matrix = None       # Tensor(D, k) — PCA whitening projection
+        self.whitened_means = None         # Tensor(max_class+1, k) — whitened class means
+
         # GHOST 관련 (z-score 기반 rejection, 레거시)
         self.ghost_enabled = False
         self.ghost_class_means_raw = {}       # {class_id: Tensor(D,)} raw feature mean
@@ -100,35 +104,53 @@ class NCMClassifier(nn.Module):
         # dtype 일치 보장 (fp16/AMP 지원)
         M = self.class_means.to(device=x.device, dtype=x.dtype)
 
-        if self.score_mode == 'mahalanobis' and self.global_var is not None:
-            # L2 normalize → whitening → negative squared euclidean
-            # L2 norm: magnitude 차이 제거 (cosine의 장점 유지)
-            # whitening: 차원별 중요도 가중 (Mahalanobis의 장점 추가)
-            x = F.normalize(x, p=2, dim=1, eps=1e-12)
+        if self.score_mode == 'mahalanobis':
+            scores = None
 
-            inv_std = 1.0 / torch.sqrt(
-                self.global_var.to(device=x.device, dtype=x.dtype) + self.var_reg_alpha
-            )  # (D,)
-            x_w = x * inv_std                                # (B, D)
-            M_w = M * inv_std                                # (C, D)
-            x2 = (x_w * x_w).sum(dim=1, keepdim=True)       # (B, 1)
-            m2 = (M_w * M_w).sum(dim=1, keepdim=False)      # (C,)
-            xm = x_w @ M_w.T                                # (B, C)
-            scores = -(x2 + m2.unsqueeze(0) - 2 * xm)      # (B, C)
-            # S-norm compose: per-class Z-score normalization on Mahalanobis scores
-            # (early return 제거 — Mahalanobis + S-norm의 orthogonal contribution 실험을 위해)
-            if apply_snorm and self.snorm_enabled and self.cohort_mu is not None:
-                mu = self.cohort_mu.to(device=scores.device, dtype=scores.dtype)
-                sigma = self.cohort_sigma.to(device=scores.device, dtype=scores.dtype)
-                C_scores = scores.shape[1]
-                C_cohort = mu.shape[0]
-                if C_cohort < C_scores:
-                    # 새 클래스 추가됨 — cohort 미계산 클래스는 identity (mu=0, σ=1)
-                    pad = C_scores - C_cohort
-                    mu = torch.cat([mu, torch.zeros(pad, device=mu.device, dtype=mu.dtype)])
-                    sigma = torch.cat([sigma, torch.ones(pad, device=sigma.device, dtype=sigma.dtype)])
-                scores = (scores - mu.unsqueeze(0)) / sigma.unsqueeze(0)
-            return scores  # 높을수록 가까움 (negative Mahalanobis distance, optionally S-normed)
+            # --- Full PCA whitened branch ---
+            if self.whitening_matrix is not None and self.whitened_means is not None:
+                x = F.normalize(x, p=2, dim=1, eps=1e-12)
+                W = self.whitening_matrix.to(device=x.device, dtype=x.dtype)
+                M_w = self.whitened_means.to(device=x.device, dtype=x.dtype)
+                x_w = x @ W
+                C_w = M_w.shape[0]
+                C_m = M.shape[0]
+                if C_w < C_m:
+                    extra = F.normalize(M[C_w:], p=2, dim=1, eps=1e-12) @ W
+                    M_w = torch.cat([M_w, extra], dim=0)
+                elif C_w > C_m:
+                    M_w = M_w[:C_m]
+                x2 = (x_w * x_w).sum(dim=1, keepdim=True)
+                m2 = (M_w * M_w).sum(dim=1, keepdim=False)
+                xm = x_w @ M_w.T
+                scores = -(x2 + m2.unsqueeze(0) - 2 * xm)
+
+            # --- Diagonal fallback ---
+            elif self.global_var is not None:
+                x = F.normalize(x, p=2, dim=1, eps=1e-12)
+                inv_std = 1.0 / torch.sqrt(
+                    self.global_var.to(device=x.device, dtype=x.dtype) + self.var_reg_alpha
+                )
+                x_w = x * inv_std
+                M_w = M * inv_std
+                x2 = (x_w * x_w).sum(dim=1, keepdim=True)
+                m2 = (M_w * M_w).sum(dim=1, keepdim=False)
+                xm = x_w @ M_w.T
+                scores = -(x2 + m2.unsqueeze(0) - 2 * xm)
+
+            if scores is not None:
+                # S-norm compose (shared for both branches)
+                if apply_snorm and self.snorm_enabled and self.cohort_mu is not None:
+                    mu = self.cohort_mu.to(device=scores.device, dtype=scores.dtype)
+                    sigma = self.cohort_sigma.to(device=scores.device, dtype=scores.dtype)
+                    C_scores = scores.shape[1]
+                    C_cohort = mu.shape[0]
+                    if C_cohort < C_scores:
+                        pad = C_scores - C_cohort
+                        mu = torch.cat([mu, torch.zeros(pad, device=mu.device, dtype=mu.dtype)])
+                        sigma = torch.cat([sigma, torch.ones(pad, device=sigma.device, dtype=sigma.dtype)])
+                    scores = (scores - mu.unsqueeze(0)) / sigma.unsqueeze(0)
+                return scores
 
         if self.normalize:
             # 코사인 유사도 기반
@@ -203,6 +225,11 @@ class NCMClassifier(nn.Module):
     def set_global_var(self, global_var: Tensor):
         """Global shared diagonal variance 설정 (Mahalanobis용)"""
         self.global_var = global_var.clone()
+
+    def set_whitening(self, W: Tensor, M_white: Tensor):
+        """Full PCA whitening matrix와 whitened class means 설정"""
+        self.whitening_matrix = W.clone()
+        self.whitened_means = M_white.clone()
 
     def set_cohort_stats(self, cohort_mu_dict: Dict[int, float], cohort_sigma_dict: Dict[int, float]):
         """S-norm용 per-class cohort 평균/표준편차 설정.
