@@ -293,4 +293,5 @@ class ccnet(torch.nn.Module):
 if __name__== "__main__" :
     inp = torch.randn(256,1,128,128)
     net = ccnet(weight=0.8)
+    out = net(inp)
     print(f" Output shape: {out.shape}") 
