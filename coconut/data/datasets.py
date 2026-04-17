@@ -10,8 +10,6 @@ from torch.utils.data import Dataset
 
 __all__ = [
     'BaseVeinDataset',
-    'DualViewDataset',
-    'SingleViewDataset',
     'MemoryDataset'
 ]
 
@@ -107,23 +105,6 @@ class BaseVeinDataset(Dataset):
             # Single view
             data = self.transform(img) if self.transform else img
             return data, label
-
-
-class DualViewDataset(BaseVeinDataset):
-    """Dataset that always returns dual views for training"""
-
-    def __init__(self, *args, **kwargs):
-        kwargs['dual_views'] = True
-        super().__init__(*args, **kwargs)
-
-
-class SingleViewDataset(BaseVeinDataset):
-    """Dataset that always returns single view for evaluation"""
-
-    def __init__(self, *args, **kwargs):
-        kwargs['dual_views'] = False
-        kwargs['train'] = False
-        super().__init__(*args, **kwargs)
 
 
 class MemoryDataset(BaseVeinDataset):
