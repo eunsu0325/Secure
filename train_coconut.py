@@ -14,13 +14,11 @@ import json
 import random
 
 import torch
-from torch.utils.data import Subset
 
 # Project imports
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import ConfigParser
-from coconut.models import PretrainedLoader
 
 # 시각화 관련 (t-SNE 디버깅용)
 import matplotlib
@@ -32,7 +30,7 @@ from PIL import Image
 import torch.nn.functional as F
 
 from coconut.models import ccnet
-from coconut.data import BaseVeinDataset, get_scr_transforms, ExperienceStream
+from coconut.data import get_scr_transforms, ExperienceStream
 
 # COCONUT 모듈 import
 from coconut import (
