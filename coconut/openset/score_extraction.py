@@ -12,8 +12,7 @@ from .utils import _open_with_channels, load_paths_labels_excluding, load_paths_
 
 @torch.no_grad()
 def extract_features(model, paths: List[str], transform, device,
-                    batch_size: int = 64, channels: int = 1,
-                    use_projection: bool = False) -> np.ndarray:
+                    batch_size: int = 64, channels: int = 1) -> np.ndarray:
     """
     Extract features from image paths (with L2 normalization)
 
@@ -41,7 +40,7 @@ def extract_features(model, paths: List[str], transform, device,
             continue
 
         x = torch.stack(batch, dim=0).to(device)
-        f = model.getFeatureCode(x, use_projection=use_projection)
+        f = model.getFeatureCode(x)
         # Normalization handled by NCM
         feats.append(f.cpu())
 
@@ -50,8 +49,7 @@ def extract_features(model, paths: List[str], transform, device,
 
 @torch.no_grad()
 def extract_scores_genuine(model, ncm, dev_paths: List[str], dev_labels: List[int],
-                          transform, device, channels: int = 1,
-                          use_projection: bool = False) -> np.ndarray:
+                          transform, device, channels: int = 1) -> np.ndarray:
     """Extract genuine scores (MAX mode)"""
     if not dev_paths:
         return np.array([])
@@ -64,8 +62,7 @@ def extract_scores_genuine(model, ncm, dev_paths: List[str], dev_labels: List[in
         batch_paths = dev_paths[i:i+batch_size]
 
         feats = extract_features(model, batch_paths, transform, device,
-                                batch_size=32, channels=channels,
-                                use_projection=use_projection)
+                                batch_size=32, channels=channels)
         if len(feats) == 0:
             continue
 
@@ -82,8 +79,7 @@ def extract_scores_genuine(model, ncm, dev_paths: List[str], dev_labels: List[in
 @torch.no_grad()
 def extract_scores_impostor_between(model, ncm, dev_paths: List[str], dev_labels: List[int],
                                    transform, device, max_pairs: int = 2000,
-                                   channels: int = 1, seed: int = 42,
-                                   use_projection: bool = False) -> np.ndarray:
+                                   channels: int = 1, seed: int = 42) -> np.ndarray:
     """Extract between-class impostor scores (excluding own class)"""
     if not dev_paths:
         return np.array([])
@@ -110,7 +106,7 @@ def extract_scores_impostor_between(model, ncm, dev_paths: List[str], dev_labels
                 break
 
             feat = extract_features(model, [path], transform, device,
-                                   channels=channels, use_projection=use_projection)
+                                   channels=channels)
             if len(feat) == 0:
                 continue
 
@@ -128,7 +124,7 @@ def extract_scores_impostor_between(model, ncm, dev_paths: List[str], dev_labels
 @torch.no_grad()
 def extract_scores_impostor_unknown(model, ncm, txt_file: str, registered_users: Set[int],
                                    transform, device, max_eval: int = 3000,
-                                   channels: int = 1, use_projection: bool = False,
+                                   channels: int = 1,
                                    seed: int = 42) -> np.ndarray:
     """Extract impostor scores from unregistered users"""
     paths, labels = load_paths_labels_excluding(txt_file, registered_users)
@@ -142,7 +138,7 @@ def extract_scores_impostor_unknown(model, ncm, txt_file: str, registered_users:
         paths = [paths[i] for i in idx]
 
     feats = extract_features(model, paths, transform, device,
-                           channels=channels, use_projection=use_projection)
+                           channels=channels)
 
     if len(feats) == 0:
         return np.array([])
@@ -162,8 +158,7 @@ def extract_scores_impostor_unknown(model, ncm, txt_file: str, registered_users:
 
 @torch.no_grad()
 def extract_scores_impostor_negref(model, ncm, negref_file: str, transform, device, seed: int = 42,
-                                  max_eval: int = 5000, channels: int = 1,
-                                  use_projection: bool = False) -> np.ndarray:
+                                  max_eval: int = 5000, channels: int = 1) -> np.ndarray:
     """Extract impostor scores from negative reference data"""
     if not negref_file or not os.path.exists(negref_file):
         return np.array([])
@@ -179,7 +174,7 @@ def extract_scores_impostor_negref(model, ncm, negref_file: str, transform, devi
         paths = [paths[i] for i in idx]
 
     feats = extract_features(model, paths, transform, device,
-                           channels=channels, use_projection=use_projection)
+                           channels=channels)
 
     if len(feats) == 0:
         return np.array([])
@@ -200,7 +195,7 @@ def extract_scores_impostor_negref(model, ncm, negref_file: str, transform, devi
 @torch.no_grad()
 def extract_scores_for_user(model, ncm, user_id: int, test_paths: List[str], test_labels: List[int],
                            all_registered_users: Set[int], transform, device,
-                           channels: int = 1, use_projection: bool = False) -> tuple:
+                           channels: int = 1) -> tuple:
     """
     Extract genuine and impostor scores for a specific user.
 
@@ -236,8 +231,7 @@ def extract_scores_for_user(model, ncm, user_id: int, test_paths: List[str], tes
 
     # Extract features for user's test samples
     feats = extract_features(model, user_test_paths, transform, device,
-                           batch_size=32, channels=channels,
-                           use_projection=use_projection)
+                           batch_size=32, channels=channels)
 
     if len(feats) == 0:
         return np.array([]), np.array([])

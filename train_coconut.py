@@ -3,7 +3,6 @@
 """
 COCONUT Training Script with Open-set Support
 CCNet + ProxyAnchor + SupCon for Continual Learning
-TTA Support Included
 """
 
 import os
@@ -42,11 +41,8 @@ from coconut import (
     COCONUTTrainer,
     ContinualLearningEvaluator
 )
-from coconut.memory import HerdingBuffer
-
 from coconut.openset import (
     predict_batch,
-    predict_batch_tta,
     load_paths_labels_from_txt
 )
 
@@ -114,9 +110,6 @@ def plot_tsne_from_memory(trainer,
 
         imgs = torch.stack(imgs).to(device)
         features = model(imgs)
-
-        if space == 'z' and hasattr(model, 'projection_head'):
-            features = F.normalize(model.projection_head(features), dim=-1)
 
         features_list.append(features.cpu())
         labels_list.extend([y for _, y in batch])
@@ -314,12 +307,6 @@ def main(args):
             print("\n========== OPEN-SET MODE ENABLED ==========")
             print(f"   Warmup users: {config_obj.openset.warmup_users}")
             print(f"   Initial tau: {config_obj.openset.initial_tau}")
-            if config_obj.openset.tta_n_views > 1:
-                print(f"   TTA Configuration:")
-                print(f"      Views: {config_obj.openset.tta_n_views} (+original: {config_obj.openset.tta_include_original})")
-                print(f"      Type-specific repeats: G={config_obj.openset.tta_n_repeats_genuine}, "
-                      f"B={config_obj.openset.tta_n_repeats_between}")
-                print(f"      Aggregation: {config_obj.openset.tta_aggregation} (repeat: {config_obj.openset.tta_repeat_aggregation})")
             print(f"   Threshold mode: FAR Target ({config_obj.openset.target_far*100:.1f}%)")
             print("=========================================\n")
 
@@ -364,21 +351,8 @@ def main(args):
 
     # CCNet 모델
     model = ccnet(
-        weight=config_obj.model.competition_weight,
-        use_projection=config_obj.model.use_projection,
-        projection_dim=config_obj.model.projection_dim
+        weight=config_obj.model.competition_weight
     )
-
-    if verbose:
-        if config_obj.model.use_projection:
-            print(f"Projection Head Configuration:")
-            print(f"   Enabled: True")
-            print(f"   Dimension: 6144 -> 2048 -> {config_obj.model.projection_dim}")
-            print(f"   Structure: 2 layers with LayerNorm")
-            print(f"   Training: Uses projection ({config_obj.model.projection_dim}D)")
-            print(f"   NCM/Eval: Uses original features (6144D)")
-        else:
-            print(f"Projection Head: Disabled (using raw 6144D features)")
 
     model = model.to(device)
 
@@ -391,39 +365,13 @@ def main(args):
         var_reg_alpha=ncm_var_reg_alpha,
     ).to(device)
 
-    # Memory Buffer (Herding or Random)
-    if hasattr(config_obj.training, 'use_herding') and config_obj.training.use_herding:
-        if verbose:
-            print("\n========== HERDING BUFFER ENABLED ==========")
-            print(f"   Max samples per class: {config_obj.training.max_samples_per_class}")
-            print(f"   Drift threshold: {config_obj.training.drift_threshold}")
-            print("   Using iCaRL-inspired representative sampling")
-            print("===============================================\n")
-
-        transform = get_scr_transforms(
-            train=False,
-            imside=config_obj.dataset.height,
-            channels=config_obj.dataset.channels
-        )
-
-        memory_buffer = HerdingBuffer(
-            max_size=config_obj.training.memory_size,
-            model=model,
-            device=device,
-            transform=transform,
-            min_samples_per_class=config_obj.training.min_samples_per_class,
-            max_samples_per_class=config_obj.training.max_samples_per_class,
-            use_projection=config_obj.model.use_projection,
-            channels=config_obj.dataset.channels
-        )
-        memory_buffer.drift_threshold = config_obj.training.drift_threshold
-    else:
-        if verbose:
-            print("Using standard Class-Balanced Buffer with random sampling")
-        memory_buffer = ClassBalancedBuffer(
-            max_size=config_obj.training.memory_size,
-            min_samples_per_class=config_obj.training.min_samples_per_class
-        )
+    # Memory Buffer
+    if verbose:
+        print("Using standard Class-Balanced Buffer with random sampling")
+    memory_buffer = ClassBalancedBuffer(
+        max_size=config_obj.training.memory_size,
+        min_samples_per_class=config_obj.training.min_samples_per_class
+    )
 
     # COCONUT Trainer
     trainer = COCONUTTrainer(
@@ -475,12 +423,6 @@ def main(args):
         else:
             pretrained_info = "Pretrained: OFF"
 
-        # Projection info
-        if config_obj.model.use_projection:
-            proj_info = f"Projection: {config_obj.model.projection_dim}D"
-        else:
-            proj_info = f"Projection: OFF (6144D)"
-
         # ProxyAnchor info
         pa_info = ""
         if hasattr(config_obj.training, 'use_proxy_anchor') and config_obj.training.use_proxy_anchor:
@@ -498,7 +440,7 @@ def main(args):
             os_info = "Open-set: OFF"
 
         print(f"\n[COCONUT] CCNet + ProxyAnchor + SupCon | {device} | Seed={seed}")
-        print(f"  {pretrained_info} | {proj_info}")
+        print(f"  {pretrained_info}")
         print(f"  {pa_info} | LR={config_obj.training.learning_rate}")
         print(f"  {os_info}")
         print(f"  Data: {stats['num_users']} users, Memory: {config_obj.training.memory_size}, "
@@ -548,25 +490,11 @@ def main(args):
                     verbose=verbose
                 )
 
-                if config_obj.model.use_projection:
-                    tsne_path_z = os.path.join(tsne_dir, f"tsne_z_exp_{exp_id+1:03d}.png")
-                    plot_tsne_from_memory(
-                        trainer=trainer,
-                        save_path=tsne_path_z,
-                        per_class=150,
-                        space='z',
-                        perplexity=30,
-                        max_points=5000,
-                        seed=seed,
-                        verbose=verbose
-                    )
-
             # 모든 사용자 개별 평가
             curves_dir = os.path.join(results_dir, "evaluation_curves", f"exp_{exp_id+1:03d}")
             report = evaluator.evaluate_all_users(
                 trainer=trainer,
                 experience_id=exp_id + 1,
-                use_tta=trainer.use_tta if hasattr(trainer, 'use_tta') else False,
                 save_curves=True,
                 curves_dir=curves_dir
             )
@@ -628,17 +556,6 @@ def main(args):
                       f"Forget={report['overall']['mean_forgetting']:.4f} (망각률 평균) | "
                       f"BWT={bwt:.4f} (음수=망각, 양수=전이) | "
                       f"Buf={len(memory_buffer)}")
-
-            # Herding Buffer drift 통계
-            if isinstance(memory_buffer, HerdingBuffer):
-                drift_stats = memory_buffer.get_drift_statistics()
-                if drift_stats and verbose:
-                    avg_drift = sum(drift_stats.values()) / len(drift_stats)
-                    max_drift_class = max(drift_stats.items(), key=lambda x: x[1])
-                    print(f"\nFeature Drift Analysis:")
-                    print(f"   Average drift: {avg_drift:.4f}")
-                    print(f"   Max drift: Class {max_drift_class[0]} ({max_drift_class[1]:.4f})")
-                    print(f"   Classes monitored: {len(drift_stats)}")
 
             # Save evaluation results
             eval_results_dir = os.path.join(results_dir, "forgetting_analysis")
@@ -804,7 +721,6 @@ def main(args):
             'FPIR_xdom':   last_metrics.get('FPIR_xdom', None),
             'tau_s':       last_eval.get('tau_s', 0),
             'num_users':   last_eval.get('num_users', 0),
-            'tta_enabled': last_metrics.get('tta_enabled', False)
         }
 
     summary_path = os.path.join(results_dir, 'summary.json')

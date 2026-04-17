@@ -242,96 +242,22 @@ class ArcMarginProduct(nn.Module):
 
         return output
 
-#  프로젝션 헤드 클래스 추가
-class ProjectionHead(nn.Module):
-    """
-     논문 기본 구조: 2층 + LayerNorm
-    2048 -> 1024 (LayerNorm) -> ReLU -> projection_dim (LayerNorm)
-    """
-    def __init__(self, input_dim: int = 2048, projection_dim: int = 128):
-        super().__init__()
-
-        # 2층 구조 고정
-        self.fc1 = nn.Linear(input_dim, 1024)
-        self.ln1 = nn.LayerNorm(1024)
-        self.relu = nn.ReLU(inplace=True)
-        self.fc2 = nn.Linear(1024, projection_dim)
-        self.ln2 = nn.LayerNorm(projection_dim)
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.ln1(x)
-        x = self.relu(x)
-        x = self.fc2(x)
-        x = self.ln2(x)
-        return x
-
-# 🍑 새로운 FullProjectionHead 추가 - 6144D 전체를 512D로 축소
-class FullProjectionHead(nn.Module):
-    """
-    🍑 6144D 전체를 받아서 512D로 점진적 축소
-    6144D -> 2048D -> 1024D -> projection_dim
-    """
-    def __init__(self, input_dim: int = 6144, projection_dim: int = 512):
-        super().__init__()
-
-        # 🍑 3층 구조로 점진적 축소
-        self.fc1 = nn.Linear(input_dim, 2048)
-        self.ln1 = nn.LayerNorm(2048)
-        self.relu1 = nn.ReLU(inplace=True)
-
-        self.fc2 = nn.Linear(2048, 1024)
-        self.ln2 = nn.LayerNorm(1024)
-        self.relu2 = nn.ReLU(inplace=True)
-
-        self.fc3 = nn.Linear(1024, projection_dim)
-        self.ln3 = nn.LayerNorm(projection_dim)
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.ln1(x)
-        x = self.relu1(x)
-
-        x = self.fc2(x)
-        x = self.ln2(x)
-        x = self.relu2(x)
-
-        x = self.fc3(x)
-        x = self.ln3(x)
-
-        return x
-
 class ccnet(torch.nn.Module):
     '''
     CompNet = CB1//CB2//CB3 + FC + Dropout + (angular_margin) Output\n
     https://ieeexplore.ieee.org/document/9512475
     '''
 
-    def __init__(self, weight, use_projection: bool = True, projection_dim: int = 512):  # 🍑 기본값 512로 변경
+    def __init__(self, weight):
         super(ccnet, self).__init__()
-
-        #self.num_classes = num_classes
 
         self.cb1 = CompetitiveBlock_Mul_Ord_Comp(channel_in=1, n_competitor=9, ksize=35, stride=3, padding=17, init_ratio=1,weight=weight)
         self.cb2 = CompetitiveBlock_Mul_Ord_Comp(channel_in=1, n_competitor=36, ksize=17, stride=3, padding=8, init_ratio=0.5, o2=24,weight=weight)
         self.cb3 = CompetitiveBlock_Mul_Ord_Comp(channel_in=1, n_competitor=9, ksize=7, stride=3, padding=3, init_ratio=0.25,weight=weight)
 
-        self.fc = torch.nn.Linear(13152, 4096)  # <---
+        self.fc = torch.nn.Linear(13152, 4096)
         self.fc1 = torch.nn.Linear(4096, 2048)
         self.drop = torch.nn.Dropout(p=0.5)
-        # self.arclayer = torch.nn.Linear(1024,num_classes)         # self.arclayer_ = ArcMarginProduct(2048, num_classes, s=30, m=0.5, easy_margin=False)
-
-        # 🍑 기존 projection head 주석처리, 새로운 FullProjectionHead 사용
-        self.use_projection = use_projection
-        if use_projection:
-            # self.projection_head = ProjectionHead(input_dim=2048, projection_dim=projection_dim)
-            # print(f" Projection Head enabled: 2048 -> 1024 -> {projection_dim}D")
-            # print(f"   Structure: 2 layers with LayerNorm (논문 기본)")
-
-            # 🍑 새로운 FullProjectionHead 사용 (6144D -> 512D)
-            self.full_projection_head = FullProjectionHead(input_dim=2048, projection_dim=projection_dim)
-            print(f"🍑 Full Projection Head enabled: 2048D -> 2048D -> 1024D -> {projection_dim}D")
-            print(f"   Structure: 3 layers with LayerNorm (점진적 축소)")
 
 
     def forward(self, x, y=None):
@@ -341,44 +267,14 @@ class ccnet(torch.nn.Module):
 
         x = torch.cat((x1, x2, x3), dim=1)
 
-        x1 = self.fc(x)  # 4096D
+        x1 = self.fc(x)   # 4096D
         x2 = self.fc1(x1)  # 2048D
 
-        # 🍑 옵션 A: fc 출력은 임베딩에서 제외 (fc는 fc1의 선형 pre-stage라 redundant)
-        # PCA 진단: fc 4096D는 L2norm 후 0.3% magnitude만 차지 → 사실상 잉여.
-        # fc 파라미터는 fc1의 입력 경로로 여전히 학습됨.
         fe = x2  # 2048D Feature Embedding
-
-        #x = self.drop(x)
-        # x = self.arclayer_(x, y)
-        # 🍑 핵심 수정: 6144D를 512D로 프로젝션
-        if self.training and self.use_projection:
-            # 학습 모드: 6144D → 512D projection (SupCon + ProxyAnchor 손실용)
-            # 반환값: L2 정규화된 512D 단위 벡터
-            fe_norm = F.normalize(fe, dim=-1)
-            z = self.full_projection_head(fe_norm)
-            z = F.normalize(z, dim=-1)
-            return z  # 512D, unit norm
-        else:
-            # 평가 모드(model.eval() 상태에서 model(x) 직접 호출 시):
-            # 반환값: L2 정규화된 6144D 단위 벡터
-            #
-            # [주의] NCM 관련 feature 추출은 이 경로를 사용하지 말 것.
-            # NCM/평가 전용 경로는 반드시 getFeatureCode()를 사용해야 함.
-            #
-            # 이유: getFeatureCode()는 정규화하지 않은 raw 6144D를 반환하고
-            #       NCM 내부에서 F.normalize()로 통합 처리함.
-            #       이 경로(정규화된 단위벡터)와 혼용하면 NCM 점수에는
-            #       영향 없지만 코드 흐름이 불명확해져 유지보수 오류 가능.
-            return F.normalize(fe, dim=-1)  # 6144D, unit norm
+        return F.normalize(fe, dim=-1)  # 2048D, unit norm
     
-    # 🍑 getFeatureCode에 projection 옵션 추가
-    def getFeatureCode(self, x, use_projection=False):
-        """
-        🍑 Args:
-            x: 입력 이미지
-            use_projection: True면 512D projection, False면 6144D raw
-        """
+    def getFeatureCode(self, x):
+        """2048D raw feature 추출 (unnormalized). NCM에서 내부적으로 L2 normalize 처리."""
         x1 = self.cb1(x)
         x2 = self.cb2(x)
         x3 = self.cb3(x)
@@ -388,36 +284,13 @@ class ccnet(torch.nn.Module):
         x3 = x3.view(x3.shape[0], -1)
         x = torch.cat((x1, x2, x3), dim=1)
 
-        x1 = self.fc(x)  # 4096D
+        x1 = self.fc(x)   # 4096D
         x2 = self.fc1(x1)  # 2048D
-        # x = x / torch.norm(x, p=2, dim=1, keepdim=True)
 
-        # 🍑 옵션 A: fc1 출력만 임베딩으로 사용 (forward()와 일치)
-        fe = x2  # 2048D
-
-        if use_projection and self.use_projection:
-            # use_projection_for_ncm=True 일 때: 512D projection 공간에서 NCM 운영
-            # 반환값: L2 정규화된 512D 단위 벡터
-            # forward()의 학습 모드와 동일한 공간 → Loss와 NCM 공간 일치
-            fe_norm = F.normalize(fe, dim=-1)
-            z = self.full_projection_head(fe_norm)
-            return F.normalize(z, dim=-1)  # 512D, unit norm
-        else:
-            # use_projection_for_ncm=False 일 때 (기본값): 6144D backbone 공간에서 NCM 운영
-            # 반환값: 정규화하지 않은 raw 6144D (임의 스케일)
-            #
-            # [설계 의도] 정규화를 여기서 하지 않는 이유:
-            #   NCM.forward()가 내부적으로 F.normalize(x, dim=1)을 적용하므로
-            #   최종 코사인 유사도 계산 결과는 동일함.
-            #   정규화 책임을 NCM에 위임하여 단일 정규화 지점을 유지.
-            #
-            # [주의] 이 반환값을 NCM을 거치지 않고 직접 사용할 경우
-            #   forward() eval 모드의 정규화된 6144D와 스케일이 다름.
-            #   두 경로를 혼용하지 말 것.
-            return fe  # 6144D, raw (unnormalized)
+        return x2  # 2048D, raw (unnormalized)
 
 
 if __name__== "__main__" :
     inp = torch.randn(256,1,128,128)
-    net = ccnet(weight=0.8, use_projection=True, projection_dim=128)  #     out = net(inp)
+    net = ccnet(weight=0.8)
     print(f" Output shape: {out.shape}") 

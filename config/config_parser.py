@@ -53,11 +53,6 @@ class ConfigParser:
                 model_dict['use_pretrained'] = False
             if 'pretrained_path' not in model_dict:
                 model_dict['pretrained_path'] = None
-            # 프로젝션 헤드 기본값 설정
-            if 'use_projection' not in model_dict:
-                model_dict['use_projection'] = True
-            if 'projection_dim' not in model_dict:
-                model_dict['projection_dim'] = 128
             self.model = Model(**model_dict)
         
         # Parse Training section
@@ -141,36 +136,6 @@ class ConfigParser:
             if 'pca_fixed_k' not in openset_dict:
                 openset_dict['pca_fixed_k'] = 32
 
-            #  TTA 기본값 추가
-            if 'tta_n_views' not in openset_dict:
-                openset_dict['tta_n_views'] = 1  # 기본: 비활성화
-            if 'tta_include_original' not in openset_dict:
-                openset_dict['tta_include_original'] = True
-            if 'tta_agree_k' not in openset_dict:
-                openset_dict['tta_agree_k'] = 0
-            if 'tta_augmentation_strength' not in openset_dict:
-                openset_dict['tta_augmentation_strength'] = 0.5
-            if 'tta_aggregation' not in openset_dict:
-                openset_dict['tta_aggregation'] = 'median'
-            
-            #  기존 TTA 반복 기본값
-            # if 'tta_n_repeats' not in openset_dict:
-            #     openset_dict['tta_n_repeats'] = 1
-            
-            #  TTA 반복 기본값 추가
-            if 'tta_n_repeats' not in openset_dict:
-                openset_dict['tta_n_repeats'] = 1
-            if 'tta_repeat_aggregation' not in openset_dict:
-                openset_dict['tta_repeat_aggregation'] = 'median'
-            if 'tta_verbose' not in openset_dict:
-                openset_dict['tta_verbose'] = False
-            
-            #  타입별 TTA 반복 기본값 추가
-            if 'tta_n_repeats_genuine' not in openset_dict:
-                openset_dict['tta_n_repeats_genuine'] = None
-            if 'tta_n_repeats_between' not in openset_dict:
-                openset_dict['tta_n_repeats_between'] = None
-            
             self.openset = Openset(**openset_dict)
 
             _verbose = getattr(self.training, 'verbose', False) if self.training else False
@@ -178,27 +143,6 @@ class ConfigParser:
             if _verbose:
                 mode_info = f" (FPIR target {self.openset.target_far*100:.1f}%)"
                 print(f"Open-set configuration loaded{mode_info}")
-
-                #  TTA 설정 출력
-                if openset_dict.get('tta_n_views', 1) > 1:
-                    print(f" TTA enabled: {openset_dict['tta_n_views']} views")
-                    print(f"   Include original: {openset_dict.get('tta_include_original', True)}")
-                    print(f"   Augmentation strength: {openset_dict.get('tta_augmentation_strength', 0.5)}")
-                    print(f"   Aggregation: {openset_dict.get('tta_aggregation', 'median')}")
-
-                    #  타입별 TTA 반복 설정 출력
-                    print(f"   Type-specific repeats:")
-                    print(f"     - Genuine: {self.openset.tta_n_repeats_genuine} repeats")
-                    print(f"     - Between: {self.openset.tta_n_repeats_between} repeats")
-                    print(f"   Repeat aggregation: {openset_dict.get('tta_repeat_aggregation', 'median')}")
-
-                    # 총 평가 횟수 계산
-                    total_evals_genuine = openset_dict['tta_n_views'] * self.openset.tta_n_repeats_genuine
-                    total_evals_between = openset_dict['tta_n_views'] * self.openset.tta_n_repeats_between
-
-                    print(f"   Total evaluations per sample:")
-                    print(f"     - Genuine: {total_evals_genuine}")
-                    print(f"     - Between: {total_evals_between}")
 
                 unknown_dev = getattr(self.dataset, 'unknown_dev_file', None)
                 unknown_test = getattr(self.dataset, 'unknown_test_file', None)

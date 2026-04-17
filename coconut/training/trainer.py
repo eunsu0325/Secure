@@ -24,48 +24,19 @@ from coconut.models import PretrainedLoader
 from coconut.classifiers.threshold import ThresholdCalibrator
 
 # 오픈셋 유틸리티 함수들
-try:
-    from coconut.openset import (
-        split_user_data,
-        extract_features,
-        extract_scores_genuine,
-        extract_scores_impostor_between,
-        extract_scores_impostor_unknown,
-        extract_scores_impostor_negref,
-        balance_impostor_scores,
-        predict_batch,
-        load_paths_labels_from_txt,
-        # TTA 관련
-        predict_batch_tta,
-        extract_scores_genuine_tta,
-        extract_scores_impostor_between_tta,
-        extract_scores_impostor_negref_tta,
-        set_seed
-    )
-    from coconut.openset.utils import _open_with_channels
-    TTA_FUNCTIONS_AVAILABLE = True
-except ImportError:
-    from coconut.openset import (
-        split_user_data,
-        extract_features,
-        extract_scores_genuine,
-        extract_scores_impostor_between,
-        extract_scores_impostor_unknown,
-        extract_scores_impostor_negref,
-        balance_impostor_scores,
-        predict_batch,
-        load_paths_labels_from_txt,
-        set_seed
-    )
-    TTA_FUNCTIONS_AVAILABLE = False
-    print("WARNING: TTA functions not available, using max score only")
-
-    def _open_with_channels(path: str, channels: int):
-        img = Image.open(path)
-        if channels == 1:
-            return img.convert('L')
-        else:
-            return img.convert('RGB')
+from coconut.openset import (
+    split_user_data,
+    extract_features,
+    extract_scores_genuine,
+    extract_scores_impostor_between,
+    extract_scores_impostor_unknown,
+    extract_scores_impostor_negref,
+    balance_impostor_scores,
+    predict_batch,
+    load_paths_labels_from_txt,
+    set_seed,
+    _open_with_channels
+)
 
 
 def worker_init_fn(worker_id):
@@ -110,7 +81,7 @@ class COCONUTTrainer:
     - ProxyAnchorLoss for metric learning
     - Supervised Contrastive Learning (SupCon)
     - Memory replay for continual learning
-    - Open-set recognition with TTA support
+    - Open-set recognition support
     """
 
     def __init__(self,
@@ -176,10 +147,7 @@ class COCONUTTrainer:
 
         if self.use_proxy_anchor:
             #  실제 특징 차원에 맞춰 ProxyAnchor 초기화
-            if config.model.use_projection:
-                embedding_dim = config.model.projection_dim  # 프로젝션 헤드 사용 시
-            else:
-                embedding_dim = 2048  # 🍑 옵션 A: fc1 출력만 사용 (fc는 redundant라 임베딩에서 제외)
+            embedding_dim = 2048
 
             self.proxy_anchor_loss = ProxyAnchorLoss(
                 embedding_size=embedding_dim,
@@ -280,26 +248,8 @@ class COCONUTTrainer:
             self.openset_config = config.openset
             self._first_calibration_done = False
 
-            # TTA 설정 확인
-            self.use_tta = self.openset_config.tta_n_views > 1
-            if self.use_tta:
-                if TTA_FUNCTIONS_AVAILABLE:
-                    if self.verbose:
-                        print(f"[TARGET] TTA enabled for evaluation:")
-                        print(f"   Views: {self.openset_config.tta_n_views}")
-                        print(f"   Include original: {self.openset_config.tta_include_original}")
-                        print(f"   Augmentation: {self.openset_config.tta_augmentation_strength}")
-                        print(f"   Aggregation: {self.openset_config.tta_aggregation}")
-                        print(f"   Type-specific repeats:")
-                        print(f"     - Genuine: {self.openset_config.tta_n_repeats_genuine}")
-                        print(f"     - Between: {self.openset_config.tta_n_repeats_between}")
-                else:
-                    print("WARNING: TTA requested but functions not available")
-                    self.use_tta = False
-
             if self.verbose:
-                mode_str = f"MAX + TTA({self.openset_config.tta_n_views})" if self.use_tta else "MAX"
-                print(f" Open-set mode: {mode_str}")
+                print(f" Open-set mode: MAX")
 
             # GHOST 초기화 (레거시)
             self.use_ghost = getattr(config.openset, 'use_ghost', False)
@@ -400,7 +350,6 @@ class COCONUTTrainer:
                 print(f"   Initial τ_s: {initial_tau}")
         else:
             self.registered_users = set()
-            self.use_tta = False
             self.use_ghost = False
             if self.verbose:
                 print(" Open-set mode disabled")
@@ -422,17 +371,8 @@ class COCONUTTrainer:
         """ 파라미터 그룹별로 다른 학습률 적용한 옵티마이저 생성"""
         param_groups = []
 
-        # 백본과 프로젝션 헤드 파라미터 분리
-        backbone_params = []
-        projection_params = []
-
-        for name, param in self.model.named_parameters():
-            if 'projection_head' in name:
-                projection_params.append(param)
-            else:
-                backbone_params.append(param)
-
         # 백본 파라미터 그룹 (사전학습된 CCNet)
+        backbone_params = list(self.model.parameters())
         if backbone_params:
             param_groups.append({
                 'params': backbone_params,
@@ -441,16 +381,6 @@ class COCONUTTrainer:
             })
             if self.verbose:
                 print(f"️ Backbone LR: {self.config.training.learning_rate:.6f}")
-
-        # 프로젝션 헤드 파라미터 그룹 (새로 초기화된 레이어)
-        if projection_params and self.config.model.use_projection:
-            param_groups.append({
-                'params': projection_params,
-                'lr': self.config.training.projection_learning_rate,
-                'name': 'projection'
-            })
-            if self.verbose:
-                print(f" Projection Head LR: {self.config.training.projection_learning_rate:.6f}")
 
         # 프록시 파라미터 그룹 (새로 초기화된 프록시)
         if include_proxies and self.use_proxy_anchor and hasattr(self, 'proxy_anchor_loss') and self.proxy_anchor_loss.proxies is not None:
@@ -472,7 +402,7 @@ class COCONUTTrainer:
         current_num_proxies = self.proxy_anchor_loss.num_classes
 
         if current_num_proxies != self.last_num_proxies:
-            # 백본/프로젝션 헤드 state 저장 (파라미터 객체가 동일하므로 복원 가능)
+            # 백본 state 저장 (파라미터 객체가 동일하므로 복원 가능)
             old_model_states = {}
             for param in self.model.parameters():
                 if param in self.optimizer.state and self.optimizer.state[param]:
@@ -487,7 +417,7 @@ class COCONUTTrainer:
             # 새 옵티마이저 생성
             self.optimizer = self._create_optimizer_with_grouped_params(include_proxies=True)
 
-            # 백본/프로젝션 state 복원
+            # 백본 state 복원
             for param, state in old_model_states.items():
                 self.optimizer.state[param] = state
 
@@ -534,77 +464,6 @@ class COCONUTTrainer:
                 print(f" Optimizer recreated: {current_num_proxies} proxies "
                       f"(preserved {n_old} existing, fresh {current_num_proxies - n_old} new)")
 
-    @torch.no_grad()
-    def _extract_features_with_tta(self, batch_images):
-        """
-        Extract features with Test-Time Augmentation (TTA).
-
-        Args:
-            batch_images: Batch of images (B, C, H, W)
-
-        Returns:
-            Features tensor (B, D) where D is the feature dimension
-        """
-        if not hasattr(self, 'openset_config'):
-            # No TTA config, fallback to normal extraction using getFeatureCode
-            # 🍑 config에 따라 projection 사용
-            use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
-            return self.model.getFeatureCode(batch_images, use_projection=use_projection)
-
-        # TTA configuration
-        n_views = self.openset_config.tta_n_views
-        include_original = self.openset_config.tta_include_original
-        aug_strength = self.openset_config.tta_augmentation_strength
-        aggregation = self.openset_config.tta_aggregation
-
-        # Get augmentation transform
-        from torchvision import transforms as T
-        from ..openset.tta_operations import get_light_augmentation
-
-        light_aug = get_light_augmentation(aug_strength, self.config.dataset.height)
-
-        batch_size = batch_images.shape[0]
-        all_features = []
-
-        self.model.eval()
-
-        for i in range(batch_size):
-            img = batch_images[i]  # Single image tensor
-            view_features = []
-
-            # Process multiple views
-            for v_idx in range(n_views):
-                if v_idx == 0 and include_original:
-                    # Use original image for first view
-                    view = img
-                else:
-                    # Apply augmentation for other views
-                    # Convert tensor to PIL for augmentation
-                    img_pil = T.ToPILImage()(img.cpu())
-                    aug_img = light_aug(img_pil) if aug_strength > 0 else img_pil
-                    view = T.ToTensor()(aug_img).to(img.device)
-
-                # Extract features using getFeatureCode for NCM compatibility
-                view = view.unsqueeze(0)  # Add batch dimension
-                # 🍑 config에 따라 projection 사용
-                use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
-                features = self.model.getFeatureCode(view, use_projection=use_projection)  # 6144D 또는 512D
-
-                view_features.append(features.squeeze(0))
-
-            # Aggregate features from multiple views
-            view_features = torch.stack(view_features)
-            if aggregation == 'mean':
-                aggregated = view_features.mean(dim=0)
-            elif aggregation == 'median':
-                aggregated = view_features.median(dim=0)[0]
-            else:
-                aggregated = view_features.mean(dim=0)  # Default to mean
-
-            all_features.append(aggregated)
-
-        return torch.stack(all_features)
-
     def train_experience(self, user_id: int, image_paths: List[str], labels: List[int]) -> Dict:
         """하나의 experience (한 명의 사용자) 학습 - 오픈셋 지원."""
 
@@ -630,7 +489,7 @@ class COCONUTTrainer:
                             for p in cls_paths:
                                 img = _open_with_channels(p, self.config.dataset.channels)
                                 img = self.test_transform(img).unsqueeze(0).to(self.device)
-                                feat = self.model.getFeatureCode(img, use_projection=True)
+                                feat = self.model.getFeatureCode(img)
                                 feats.append(feat.squeeze(0))
                             feature_means[cid] = torch.stack(feats).mean(dim=0)
                     self.model.train()
@@ -779,7 +638,7 @@ class COCONUTTrainer:
 
                     self.optimizer.zero_grad()
 
-                    # Forward: CCNet이 알아서 처리 (projection 포함)
+                    # Forward: CCNet feature extraction
                     features_all = self.model(x)
 
                     f1 = features_all[:batch_size]
@@ -887,9 +746,7 @@ class COCONUTTrainer:
                                 # eval mode: 저장 시점과 동일한 BatchNorm (running stats)
                                 # gradient는 여전히 흐름
                                 self.model.eval()
-                                current_feats = self.model.getFeatureCode(
-                                    der_batch, use_projection=False
-                                )
+                                current_feats = self.model.getFeatureCode(der_batch)
                                 current_feats = F.normalize(current_feats, dim=-1)
                                 self.model.train()
 
@@ -934,7 +791,7 @@ class COCONUTTrainer:
                 for path in train_paths:
                     img = _open_with_channels(path, self.config.dataset.channels)
                     img_tensor = self.test_transform(img).unsqueeze(0).to(self.device)
-                    feat = self.model.getFeatureCode(img_tensor, use_projection=False)
+                    feat = self.model.getFeatureCode(img_tensor)
                     feat = F.normalize(feat, dim=-1)
                     stored_features.append(feat.squeeze(0).cpu())
             self.model.train()
@@ -1126,36 +983,17 @@ class COCONUTTrainer:
 
     @torch.no_grad()
     def _calibrate_threshold(self):
-        """임계치 캘리브레이션 (타입별 독립 TTA 반복, 동적 비율)"""
-
-        use_tta = self.use_tta and TTA_FUNCTIONS_AVAILABLE
-
-        # 타입별 독립적인 TTA 반복 설정
-        n_repeats_genuine = getattr(self.openset_config, 'tta_n_repeats_genuine', 1)
-        n_repeats_between = getattr(self.openset_config, 'tta_n_repeats_between', 1)
-        n_repeats_negref = 0  # NegRef not used
-
-        repeat_agg = getattr(self.openset_config, 'tta_repeat_aggregation', 'median')
-        tta_verbose = getattr(self.openset_config, 'tta_verbose', False)
+        """임계치 캘리브레이션 (동적 비율)"""
 
         seed = getattr(self.config.training, 'seed', 42)
         img_size = self.config.dataset.height
         channels = self.config.dataset.channels
 
         if self.verbose:
-            mode_str = f"MAX + TTA(views={self.openset_config.tta_n_views})" if use_tta else "MAX"
-            print(f" Using {mode_str} scores for calibration ({self.rejection_gate})")
-
-            if use_tta:
-                print(f" TTA with type-specific repeats:")
-                print(f"   Genuine: {self.openset_config.tta_n_views} views × {n_repeats_genuine} repeats")
-                print(f"   Between: {self.openset_config.tta_n_views} views × {n_repeats_between} repeats")
-                print(f"   NegRef: {self.openset_config.tta_n_views} views × {n_repeats_negref} repeats")
-
+            print(f" Using MAX scores for calibration ({self.rejection_gate})")
             print(f"\nExtracting Unknown Dev scores for FPIR calibration...")
 
         unknown_dev_file = getattr(self.config.dataset, 'unknown_dev_file', None)
-        use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
 
         # === top1_margin 이중 게이트 캘리브레이션 ===
         if self.rejection_gate == 'top1_margin':
@@ -1175,7 +1013,7 @@ class COCONUTTrainer:
                 if unk_paths:
                     unk_feats = extract_features(
                         self.model, unk_paths, self.test_transform, self.device,
-                        channels=channels, use_projection=use_projection
+                        channels=channels
                     )
                     if len(unk_feats) > 0:
                         unk_tensor = torch.from_numpy(unk_feats).to(self.device)
@@ -1194,7 +1032,7 @@ class COCONUTTrainer:
             if all_probe_paths:
                 gen_feats = extract_features(
                     self.model, all_probe_paths, self.test_transform, self.device,
-                    channels=channels, use_projection=use_projection
+                    channels=channels
                 )
                 if len(gen_feats) > 0:
                     gen_tensor = torch.from_numpy(gen_feats).to(self.device)
@@ -1280,7 +1118,7 @@ class COCONUTTrainer:
                 if unk_paths:
                     unk_feats = extract_features(
                         self.model, unk_paths, self.test_transform, self.device,
-                        channels=channels, use_projection=use_projection
+                        channels=channels
                     )
                     if len(unk_feats) > 0:
                         unk_tensor = torch.from_numpy(unk_feats).to(self.device)
@@ -1296,7 +1134,7 @@ class COCONUTTrainer:
                 if unk_paths:
                     unk_feats = extract_features(
                         self.model, unk_paths, self.test_transform, self.device,
-                        channels=channels, use_projection=use_projection
+                        channels=channels
                     )
                     if len(unk_feats) > 0:
                         unk_tensor = torch.from_numpy(unk_feats).to(self.device)
@@ -1331,8 +1169,7 @@ class COCONUTTrainer:
                     self.registered_users,
                     self.test_transform, self.device,
                     max_eval=3000,
-                    channels=channels,
-                    use_projection=use_projection
+                    channels=channels
                 )
             if self.verbose:
                 snorm_tag = " (S-norm)" if self.use_snorm else ""
@@ -1354,7 +1191,7 @@ class COCONUTTrainer:
             if all_probe_paths:
                 gen_feats = extract_features(
                     self.model, all_probe_paths, self.test_transform, self.device,
-                    channels=channels, use_projection=use_projection
+                    channels=channels
                 )
                 if len(gen_feats) > 0:
                     gen_tensor = torch.from_numpy(gen_feats).to(self.device)
@@ -1368,8 +1205,7 @@ class COCONUTTrainer:
                 self.model, self.ncm,
                 all_probe_paths, all_probe_labels,
                 self.test_transform, self.device,
-                channels=channels,
-                use_projection=use_projection
+                channels=channels
             )
 
         if self.verbose:
@@ -1439,7 +1275,6 @@ class COCONUTTrainer:
         eval_seed = getattr(self.config.training, 'seed', 42)
         set_seed(eval_seed)
         channels = self.config.dataset.channels
-        use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
 
         self.model.eval()
 
@@ -1491,12 +1326,12 @@ class COCONUTTrainer:
         # ========================================
         mated_feats = extract_features(
             self.model, mated_paths, self.test_transform, self.device,
-            batch_size=64, channels=channels, use_projection=use_projection
+            batch_size=64, channels=channels
         )
 
         nonmated_feats = extract_features(
             self.model, nonmated_paths, self.test_transform, self.device,
-            batch_size=64, channels=channels, use_projection=use_projection
+            batch_size=64, channels=channels
         )
 
         # ========================================
@@ -1707,7 +1542,7 @@ class COCONUTTrainer:
         if negref_paths:
             preds_neg = predict_batch(
                 self.model, self.ncm, negref_paths, self.test_transform, self.device,
-                channels=channels, use_projection=use_projection
+                channels=channels
             )
             TRR_n = sum(1 for p in preds_neg if p == -1) / len(preds_neg)
             FAR_n = 1 - TRR_n
@@ -2188,9 +2023,7 @@ class COCONUTTrainer:
             data = data.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
-            # 🍑 config에 따라 6144D 또는 512D 사용
-            use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
-            features = self.model.getFeatureCode(data, use_projection=use_projection)
+            features = self.model.getFeatureCode(data)
 
             for i, label in enumerate(labels):
                 label_item = label.item()
@@ -2567,7 +2400,6 @@ class COCONUTTrainer:
 
         # GHOST: augmented raw features로 per-class μ_raw, σ_raw 계산
         if getattr(self, 'use_ghost', False):
-            use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
             channels = self.config.dataset.channels
 
             # class별 경로 그룹핑
@@ -2588,7 +2420,7 @@ class COCONUTTrainer:
                     img = _open_with_channels(path, channels)
                     for _ in range(self.ghost_n_augment):
                         aug_tensor = self.train_transform(img).unsqueeze(0).to(self.device)
-                        feat = self.model.getFeatureCode(aug_tensor, use_projection=use_projection)
+                        feat = self.model.getFeatureCode(aug_tensor)
                         # raw feature (L2 norm 안 함!)
                         raw_feats.append(feat.squeeze(0).cpu())
 
@@ -2653,10 +2485,10 @@ class COCONUTTrainer:
 
         channels = self.config.dataset.channels
 
-        # raw 6144D feature 추출 (projection 미사용)
+        # raw 6144D feature 추출
         feats = extract_features(
             self.model, all_paths, self.test_transform, self.device,
-            batch_size=64, channels=channels, use_projection=False
+            batch_size=64, channels=channels
         )
 
         if len(feats) < 20:
@@ -2796,9 +2628,7 @@ class COCONUTTrainer:
                 img_tensor = self.test_transform(img).unsqueeze(0).to(self.device)
 
                 # NCM 점수 계산 (config에 따라 6144D 또는 512D 특징 사용)
-                # 🍑 use_projection_for_ncm 옵션 추가
-                use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
-                feat = self.model.getFeatureCode(img_tensor, use_projection=use_projection)
+                feat = self.model.getFeatureCode(img_tensor)
                 ncm_scores = self.ncm.forward(feat)
 
                 if ncm_scores.numel() > 0:
@@ -2827,9 +2657,7 @@ class COCONUTTrainer:
                 img_tensor = self.test_transform(img).unsqueeze(0).to(self.device)
 
                 # NCM 점수 계산
-                # 🍑 use_projection_for_ncm 옵션 추가
-                use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
-                feat = self.model.getFeatureCode(img_tensor, use_projection=use_projection)
+                feat = self.model.getFeatureCode(img_tensor)
                 ncm_scores = self.ncm.forward(feat)
 
                 if ncm_scores.numel() > 0:
@@ -2903,9 +2731,7 @@ class COCONUTTrainer:
                 data = data.to(self.device, non_blocking=True)
                 labels = labels.to(self.device, non_blocking=True)
 
-                # 🍑 use_projection_for_ncm 옵션 추가
-                use_projection = getattr(self.config.model, 'use_projection_for_ncm', False)
-                features = self.model.getFeatureCode(data, use_projection=use_projection)
+                features = self.model.getFeatureCode(data)
                 predictions = self.ncm.predict(features)
 
                 correct += (predictions == labels).sum().item()

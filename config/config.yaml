@@ -25,11 +25,6 @@ Model:
   competition_weight: 0.8
   use_pretrained: true
   pretrained_path: /content/drive/MyDrive/tongji.pth
-  # Projection head settings
-  projection_dim: 512  # 🍑 6144D -> 512D projection
-  use_projection: false
-  use_projection_for_ncm: false  # 🍑 NCM도 512D projection 사용할지 (false=6144D, true=512D)
-
 Training:
   experience_batch_size: 16
   memory_batch_size: 160  # 200→160 (QAR rehab 추가분 감안, 총 배치 ~200-240 유지)
@@ -37,17 +32,10 @@ Training:
   memory_size: 1000
   min_samples_per_class: 9
 
-  # Herding buffer settings (iCaRL-inspired)
-  use_herding: false  # Enable herding buffer instead of random sampling
-  max_samples_per_class: 20  # Maximum samples per class for herding
-  herding_batch_size: 32  # Batch size for feature extraction
-  drift_threshold: 0.5  # Threshold for feature drift detection
-
   epochs_per_experience: 10
   iterations_per_epoch: 5
   num_workers: 8
   learning_rate: 0.0001
-  projection_learning_rate: 0.0005  # 5x backbone LR
   scheduler_step_size: 40           # 50→40 (LR decay를 조금 더 일찍, 2회 decay 가능)
   scheduler_gamma: 0.5              # 0.8→0.5 (더 확실한 LR 감소: 0.0001→0.00005→0.000025)
   temperature: 0.07  # SupConLoss temperature
@@ -111,19 +99,6 @@ Openset:
 
   # Logging
   verbose_calibration: true  # Verbose output
-
-  # TTA settings (Test-Time Augmentation)
-  tta_n_views: 1  # 1=disabled, 2-3 recommended
-  tta_include_original: true  # Include original recommended
-  tta_agree_k: 0  # 0=auto majority, 2=2+ agreement
-  tta_augmentation_strength: 0.5  # 0.3-0.7 recommended (1.0→0.5: TTA 왜곡 과도 방지)
-  tta_aggregation: 'mean'  # 'median' or 'mean'
-
-  # Type-specific TTA repeat settings
-  tta_n_repeats_genuine: 1      # Genuine scores: 3 repeats (accuracy important)
-  tta_n_repeats_between: 1      # Between impostor: 3 repeats (balanced)
-  tta_repeat_aggregation: 'mean'  # Inter-repeat aggregation method
-  tta_verbose: true  # TTA debugging output
 
   # Score mode: 'cosine' | 'mahalanobis'
   # Mahalanobis: pooled within-class diagonal variance + OAS shrinkage (trainer.py::_update_ncm)

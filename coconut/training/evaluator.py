@@ -140,12 +140,10 @@ class ContinualLearningEvaluator:
             device=trainer.device,
             max_eval=max_samples,
             channels=self.config.dataset.channels,
-            use_projection=getattr(trainer.config.model, 'use_projection_for_ncm', False)
         )
         return scores if len(scores) >= 10 else None
 
     def evaluate_single_user(self, trainer, user_id: int,
-                            use_tta: bool = False,
                             unknown_impostor_scores: Optional[np.ndarray] = None) -> Dict[str, float]:
         """
         Evaluate a single user's performance.
@@ -153,7 +151,6 @@ class ContinualLearningEvaluator:
         Args:
             trainer: COCONUT trainer instance
             user_id: User to evaluate
-            use_tta: Whether to use test-time augmentation
             unknown_impostor_scores: Pre-computed max scores for unknown users
                 (from unknown_test_file). If None, falls back to between-class scores.
 
@@ -189,11 +186,7 @@ class ContinualLearningEvaluator:
             for batch_images, batch_labels in loader:
                 batch_images = batch_images.to(trainer.device)
 
-                if use_tta and hasattr(trainer, 'use_tta') and trainer.use_tta:
-                    features = trainer._extract_features_with_tta(batch_images)
-                else:
-                    use_projection = getattr(trainer.config.model, 'use_projection_for_ncm', False)
-                    features = trainer.model.getFeatureCode(batch_images, use_projection=use_projection)
+                features = trainer.model.getFeatureCode(batch_images)
 
                 for feat in features:
                     feat = feat.unsqueeze(0)
@@ -238,7 +231,6 @@ class ContinualLearningEvaluator:
         return metrics
 
     def evaluate_all_users(self, trainer, experience_id: int,
-                          use_tta: bool = False,
                           save_curves: bool = False,
                           curves_dir: Optional[str] = None) -> Dict:
         """
@@ -247,7 +239,6 @@ class ContinualLearningEvaluator:
         Args:
             trainer: COCONUT trainer instance
             experience_id: Current experience count
-            use_tta: Whether to use test-time augmentation
             save_curves: Whether to save ROC/DET curves
             curves_dir: Directory to save curves (if save_curves=True)
 
@@ -280,7 +271,7 @@ class ContinualLearningEvaluator:
             if self.verbose:
                 print(f"\nEvaluating User {user_id}...", end=' ')
 
-            metrics = self.evaluate_single_user(trainer, user_id, use_tta,
+            metrics = self.evaluate_single_user(trainer, user_id,
                                                 unknown_impostor_scores=unknown_impostor_scores)
 
             # Collect scores for aggregate analysis

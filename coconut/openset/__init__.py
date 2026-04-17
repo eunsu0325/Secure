@@ -19,14 +19,6 @@ from .score_extraction import (
     extract_scores_for_user  # Per-user evaluation
 )
 
-from .tta_operations import (
-    get_light_augmentation,
-    predict_batch_tta,
-    extract_scores_genuine_tta,
-    extract_scores_impostor_between_tta,
-    extract_scores_impostor_negref_tta
-)
-
 __all__ = [
     # Utils
     'set_seed',
@@ -43,10 +35,4 @@ __all__ = [
     'extract_scores_impostor_unknown',
     'extract_scores_impostor_negref',
     'extract_scores_for_user',
-    # TTA operations
-    'get_light_augmentation',
-    'predict_batch_tta',
-    'extract_scores_genuine_tta',
-    'extract_scores_impostor_between_tta',
-    'extract_scores_impostor_negref_tta'
 ]

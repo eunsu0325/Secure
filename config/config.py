@@ -27,10 +27,6 @@ class Model:
     competition_weight: float
     use_pretrained: bool = False
     pretrained_path: Optional[Path] = None
-    # 프로젝션 헤드 설정 추가
-    use_projection: bool = True
-    projection_dim: int = 128  # 출력 차원만 조절 가능
-    use_projection_for_ncm: bool = False  # 🍑 NCM도 512D projection 사용할지 (false=6144D, true=512D)
 
 @dataclasses.dataclass
 class Training:
@@ -54,7 +50,6 @@ class Training:
     ncm_momentum: float
 
     # 기본값이 있는 선택적 필드들
-    projection_learning_rate: float = 0.0005  # 프로젝션 헤드 학습률
     batch_size: int = 128
     seed: int = 42  # 추가!
 
@@ -69,12 +64,6 @@ class Training:
 
     # 로그 출력 설정
     verbose: bool = False  # True: 전체 출력, False: compact 출력 (논문 지표 중심)
-
-    # Herding buffer 설정
-    use_herding: bool = False  # Herding buffer 사용 여부
-    max_samples_per_class: int = 20  # Herding 시 클래스당 최대 샘플 수
-    herding_batch_size: int = 32  # Feature extraction 배치 크기
-    drift_threshold: float = 0.5  # Feature drift 감지 임계값
 
     # IDL+RTM Loss 설정 (Su et al., "Open-Set Biometrics")
     use_idl_rtm: bool = False
@@ -115,22 +104,6 @@ class Openset:
     # 추가 옵션
     verbose_calibration: bool = True      # 상세 출력
     
-    # TTA (Test-Time Augmentation) 설정 추가
-    tta_n_views: int = 1  # 1이면 비활성화, 2~3 권장
-    tta_include_original: bool = True  # 원본 포함 여부
-    tta_agree_k: int = 0  # 0이면 과반 자동 계산
-    tta_augmentation_strength: float = 0.5  # 증강 강도 (0.0~1.0)
-    tta_aggregation: str = 'median'  # 'median' or 'mean' for scores
-    
-    # TTA 반복 설정
-    tta_n_repeats: int = 1  # 전체 기본값 (타입별 설정이 없을 때 사용)
-    tta_repeat_aggregation: str = 'median'  # 반복 간 집계 방법
-    tta_verbose: bool = False  # TTA 디버깅 출력
-    
-    # 타입별 독립적인 TTA 반복 설정 추가
-    tta_n_repeats_genuine: Optional[int] = None      # Genuine 점수용
-    tta_n_repeats_between: Optional[int] = None      # Between impostor용
-
     # Score mode (Method 1: Shared Diagonal Mahalanobis)
     score_mode: str = 'cosine'          # 'cosine' | 'mahalanobis'
     var_reg_alpha: float = 1e-4         # Mahalanobis variance regularization
@@ -157,12 +130,3 @@ class Openset:
     gen_temperature: float = 1.0        # softmax temperature T
     gen_gamma: float = 0.1              # Rényi entropy order γ
 
-    def __post_init__(self):
-        """타입별 반복 설정이 없으면 기본값 사용"""
-        # Genuine: 기본값 사용
-        if self.tta_n_repeats_genuine is None:
-            self.tta_n_repeats_genuine = self.tta_n_repeats
-
-        # Between: 기본값 사용
-        if self.tta_n_repeats_between is None:
-            self.tta_n_repeats_between = self.tta_n_repeats
