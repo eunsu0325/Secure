@@ -400,6 +400,7 @@ class COCONUTTrainer:
             return
 
         current_num_proxies = self.proxy_anchor_loss.num_classes
+        old_scheduler_state = None  # scope 누수 방지: 블록 밖에서 초기화
 
         if current_num_proxies != self.last_num_proxies:
             # 백본 state 저장 (파라미터 객체가 동일하므로 복원 가능)
@@ -421,36 +422,36 @@ class COCONUTTrainer:
             for param, state in old_model_states.items():
                 self.optimizer.state[param] = state
 
-        # 프록시 state 이전: 기존 N개 복원 + 새 슬롯은 0으로 초기화
-        if old_proxy_state and n_old > 0:
-            # 차원이 바뀌었으면 기존 state는 폐기하고 새로 초기화한다
-            old_dim = old_proxy_state.get('exp_avg', torch.empty(0)).shape[1] if 'exp_avg' in old_proxy_state else None
-            D = self.proxy_anchor_loss.embedding_size
-            if old_dim is not None and old_dim != D:
-                old_proxy_state = {}
+            # 프록시 state 이전: 기존 N개 복원 + 새 슬롯은 0으로 초기화
+            if old_proxy_state and n_old > 0:
+                # 차원이 바뀌었으면 기존 state는 폐기하고 새로 초기화한다
+                old_dim = old_proxy_state.get('exp_avg', torch.empty(0)).shape[1] if 'exp_avg' in old_proxy_state else None
+                D = self.proxy_anchor_loss.embedding_size
+                if old_dim is not None and old_dim != D:
+                    old_proxy_state = {}
 
-        if n_old > 0 and old_proxy_state:
-            n_new = current_num_proxies - n_old
-            D = self.proxy_anchor_loss.embedding_size
-            device = self.proxy_anchor_loss.proxies.device
+            if n_old > 0 and old_proxy_state:
+                n_new = current_num_proxies - n_old
+                D = self.proxy_anchor_loss.embedding_size
+                device = self.proxy_anchor_loss.proxies.device
 
-            new_proxy_state = {}
-            if 'exp_avg' in old_proxy_state:
-                new_proxy_state['exp_avg'] = torch.cat([
-                    old_proxy_state['exp_avg'].to(device),
-                    torch.zeros(n_new, D, device=device)
-                ], dim=0)
-            if 'exp_avg_sq' in old_proxy_state:
-                new_proxy_state['exp_avg_sq'] = torch.cat([
-                    old_proxy_state['exp_avg_sq'].to(device),
-                    torch.zeros(n_new, D, device=device)
-                ], dim=0)
-            if 'step' in old_proxy_state:
-                new_proxy_state['step'] = old_proxy_state['step']
+                new_proxy_state = {}
+                if 'exp_avg' in old_proxy_state:
+                    new_proxy_state['exp_avg'] = torch.cat([
+                        old_proxy_state['exp_avg'].to(device),
+                        torch.zeros(n_new, D, device=device)
+                    ], dim=0)
+                if 'exp_avg_sq' in old_proxy_state:
+                    new_proxy_state['exp_avg_sq'] = torch.cat([
+                        old_proxy_state['exp_avg_sq'].to(device),
+                        torch.zeros(n_new, D, device=device)
+                    ], dim=0)
+                if 'step' in old_proxy_state:
+                    new_proxy_state['step'] = old_proxy_state['step']
 
-            self.optimizer.state[self.proxy_anchor_loss.proxies] = new_proxy_state
+                self.optimizer.state[self.proxy_anchor_loss.proxies] = new_proxy_state
 
-            # 스케줄러 재생성 + step 위치 복원
+            # scheduler 재생성: optimizer 교체 시 항상 수행 (n_old 무관)
             self.scheduler = lr_scheduler.StepLR(
                 self.optimizer,
                 step_size=self.config.training.scheduler_step_size,

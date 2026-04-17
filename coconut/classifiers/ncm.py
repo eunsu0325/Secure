@@ -58,8 +58,32 @@ class NCMClassifier(nn.Module):
         self.cohort_sigma = None    # Tensor(C,)
         self.snorm_min_sigma = 1e-2
 
+    def state_dict(self):
+        """register_buffer 외 plain 속성도 함께 저장합니다."""
+        sd = super().state_dict()
+        # Mahalanobis
+        sd['_custom_score_mode'] = self.score_mode
+        sd['_custom_global_var'] = self.global_var
+        sd['_custom_whitening_matrix'] = self.whitening_matrix
+        sd['_custom_whitened_means'] = self.whitened_means
+        # S-norm
+        sd['_custom_snorm_enabled'] = self.snorm_enabled
+        sd['_custom_cohort_mu'] = self.cohort_mu
+        sd['_custom_cohort_sigma'] = self.cohort_sigma
+        # GHOST
+        sd['_custom_ghost_enabled'] = self.ghost_enabled
+        sd['_custom_ghost_class_means_raw'] = self.ghost_class_means_raw
+        sd['_custom_ghost_class_stds_raw'] = self.ghost_class_stds_raw
+        sd['_custom_ghost_global_std_raw'] = self.ghost_global_std_raw
+        sd['_custom_ghost_class_counts'] = self.ghost_class_counts
+        sd['_custom_ghost_shrinkage_min_n'] = self.ghost_shrinkage_min_n
+        return sd
+
     def load_state_dict(self, state_dict, strict: bool = True):
-        """체크포인트에서 상태를 로드합니다."""
+        """체크포인트에서 상태를 로드합니다. _custom_ 키도 복원합니다."""
+        # _custom_ 키 추출 (super()에 전달하면 unexpected key 에러)
+        custom_keys = {k: state_dict.pop(k) for k in list(state_dict.keys()) if k.startswith('_custom_')}
+
         self.class_means = state_dict["class_means"]
         super().load_state_dict(state_dict, strict)
         if self.class_means is not None:
@@ -67,6 +91,22 @@ class NCMClassifier(nn.Module):
                 if (self.class_means[i] != 0).any():
                     self.class_means_dict[i] = self.class_means[i].clone()
         self.max_class = max(self.class_means_dict.keys()) if self.class_means_dict else -1
+
+        # custom 상태 복원 (이전 체크포인트 하위 호환: 키 없으면 기본값 유지)
+        if custom_keys:
+            self.score_mode = custom_keys.get('_custom_score_mode', self.score_mode)
+            self.global_var = custom_keys.get('_custom_global_var', None)
+            self.whitening_matrix = custom_keys.get('_custom_whitening_matrix', None)
+            self.whitened_means = custom_keys.get('_custom_whitened_means', None)
+            self.snorm_enabled = custom_keys.get('_custom_snorm_enabled', False)
+            self.cohort_mu = custom_keys.get('_custom_cohort_mu', None)
+            self.cohort_sigma = custom_keys.get('_custom_cohort_sigma', None)
+            self.ghost_enabled = custom_keys.get('_custom_ghost_enabled', False)
+            self.ghost_class_means_raw = custom_keys.get('_custom_ghost_class_means_raw', {})
+            self.ghost_class_stds_raw = custom_keys.get('_custom_ghost_class_stds_raw', {})
+            self.ghost_global_std_raw = custom_keys.get('_custom_ghost_global_std_raw', None)
+            self.ghost_class_counts = custom_keys.get('_custom_ghost_class_counts', {})
+            self.ghost_shrinkage_min_n = custom_keys.get('_custom_ghost_shrinkage_min_n', 10)
 
     def _vectorize_means_dict(self):
         """딕셔너리를 텐서로 변환합니다."""
