@@ -123,10 +123,4 @@ class Openset:
     ghost_n_augment: int = 10           # per-class σ 추정용 이미지당 augmentation 횟수
     ghost_shrinkage_min_n: int = 10     # shrinkage 기준 (augmented feature 수)
 
-    # Detection mode: 'cosine' | 'cohort' | 'margin' | 'gen'
-    detection_mode: str = 'cosine'
-
-    # GEN score parameters (Liu et al., CVPR 2023)
-    gen_temperature: float = 1.0        # softmax temperature T
-    gen_gamma: float = 0.1              # Rényi entropy order γ
 
