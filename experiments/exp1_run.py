@@ -100,9 +100,10 @@ def main():
     print(" STEP 2: Identity Split")
     print("=" * 60)
     all_ids = sorted(id_to_paths.keys())
-    # 10개 샘플인 ID만 사용
-    usable_ids = [i for i in all_ids if len(id_to_paths[i]) == 10]
-    print(f"[SPLIT] usable IDs (exactly 10 samples): {len(usable_ids)}")
+    s_cfg = cfg['sample_split']
+    n_min = s_cfg['n_enroll'] + s_cfg['n_dev'] + s_cfg.get('n_test_min', 1)
+    usable_ids = [i for i in all_ids if len(id_to_paths[i]) >= n_min]
+    print(f"[SPLIT] usable IDs (>= {n_min} samples): {len(usable_ids)}")
 
     id_cfg = cfg['identity_split']
     identity_split = split_identities(
@@ -121,7 +122,6 @@ def main():
     all_selected_ids = (identity_split['base_ids'] +
                         identity_split['future_ids'] +
                         identity_split['external_ids'])
-    s_cfg = cfg['sample_split']
     sample_split = split_samples_per_id(
         id_to_paths, all_selected_ids,
         n_enroll=s_cfg['n_enroll'], n_dev=s_cfg['n_dev'], base_seed=seed
