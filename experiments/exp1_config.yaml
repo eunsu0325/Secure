@@ -7,7 +7,7 @@ experiment:
   output_dir: results/exp1_protocol_comparison
 
 dataset:
-  txt_file: data/iitd_exp1.txt
+  txt_file: data/bjtu_exp1.txt
   # txt 파일에 절대경로(심링크)를 쓰면 base_path는 빈 문자열로 둠
   base_path: ""
   height: 128
@@ -15,9 +15,9 @@ dataset:
   channels: 1
 
 identity_split:
-  n_base: 60
-  n_future: 200
-  n_external: 200
+  n_base: 30
+  n_future: 130
+  n_external: 130
 
 sample_split:
   n_enroll: 2
@@ -38,4 +38,4 @@ scoring:
   target_fpir: 0.01
 
 protocol_c:
-  future_batch_size: 20  # step당 추가할 Future ID 수 (200/20 = 10 step)
+  future_batch_size: 10  # step당 추가할 Future ID 수 (130/10 = 13 step)
