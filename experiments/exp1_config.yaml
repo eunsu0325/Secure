@@ -1,0 +1,39 @@
+# Experiment 1: Protocol Comparison
+# "같은 모델, 세 가지 평가 프로토콜 → 서로 다른 결론"
+
+experiment:
+  name: exp1_protocol_comparison
+  seed: 42
+  output_dir: results/exp1_protocol_comparison
+
+dataset:
+  txt_file: data/train_Tongji.txt
+  # txt 파일 내 경로가 ./TongJi/... 형식이므로, 이 base_path가 앞에 붙음
+  base_path: data
+  height: 128
+  width: 128
+  channels: 1
+
+identity_split:
+  n_base: 20
+  n_future: 40
+  n_external: 40
+
+sample_split:
+  n_enroll: 3
+  n_dev: 3
+  # n_test는 자동 계산 (10 - n_enroll - n_dev = 4)
+
+model:
+  architecture: ccnet
+  competition_weight: 0.8
+  # 로컬 pretrained 경로 — 실행 전 반드시 확인
+  pretrained_path: checkpoints/tongji.pth
+
+scoring:
+  mode: cosine
+  # threshold: external unknown dev의 99th percentile (FPIR=1%)
+  target_fpir: 0.01
+
+protocol_c:
+  future_batch_size: 5  # step당 추가할 Future ID 수
