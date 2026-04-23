@@ -15,9 +15,9 @@ dataset:
   channels: 1
 
 identity_split:
-  n_base: 20
-  n_future: 40
-  n_external: 40
+  n_base: 60
+  n_future: 200
+  n_external: 200
 
 sample_split:
   n_enroll: 2
@@ -38,4 +38,4 @@ scoring:
   target_fpir: 0.01
 
 protocol_c:
-  future_batch_size: 5  # step당 추가할 Future ID 수
+  future_batch_size: 20  # step당 추가할 Future ID 수 (200/20 = 10 step)
