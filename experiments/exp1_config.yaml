@@ -7,9 +7,9 @@ experiment:
   output_dir: results/exp1_protocol_comparison
 
 dataset:
-  txt_file: data/train_Tongji.txt
-  # txt 파일 내 경로가 ./TongJi/... 형식이므로, 이 base_path가 앞에 붙음
-  base_path: data
+  txt_file: data/iitd_exp1.txt
+  # txt 파일에 절대경로(심링크)를 쓰면 base_path는 빈 문자열로 둠
+  base_path: ""
   height: 128
   width: 128
   channels: 1
@@ -20,9 +20,11 @@ identity_split:
   n_external: 40
 
 sample_split:
-  n_enroll: 3
-  n_dev: 3
-  # n_test는 자동 계산 (10 - n_enroll - n_dev = 4)
+  n_enroll: 2
+  n_dev: 1
+  # n_test는 자동: (해당 ID 전체 샘플 수 - n_enroll - n_dev)
+  # 필터 기준: 각 ID의 샘플 수가 최소 (n_enroll + n_dev + n_test_min) 이상이어야 usable
+  n_test_min: 2
 
 model:
   architecture: ccnet
