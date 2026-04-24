@@ -39,3 +39,11 @@ scoring:
 
 protocol_c:
   future_batch_size: 10  # step당 추가할 Future ID 수 (130/10 = 13 step)
+
+# Static open-set size sweep용 gallery size list (B-s1/s2/s3/sF).
+# - 첫 값은 n_base 와 동일 (baseline)
+# - 마지막 값은 n_base + n_future 와 동일 (size-matched sanity: B-sF ≈ C-recalib-final)
+# - 각 s에 대해 (s - n_base) % future_batch_size == 0 이어야 C_step_k 와 정확히 매핑
+# BJTU: [30, 60, 100, 160] → C_step {0, 3, 7, 13}
+# IITD: [60, 120, 180, 260] → C_step {0, 3, 6, 10}
+static_gallery_sizes: [30, 60, 100, 160]
