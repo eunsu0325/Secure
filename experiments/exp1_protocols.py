@@ -41,6 +41,8 @@ from coconut.data.transforms import get_scr_transforms
 # ============================================================
 
 def load_and_validate_data(txt_file: str, base_path: str = "") -> Dict[int, List[str]]:
+    """Load + group by ID. Dataset-agnostic: prints sample-count distribution only."""
+    from collections import Counter as _Counter
     paths, labels = load_paths_labels_from_txt(txt_file)
     if base_path:
         paths = [os.path.join(base_path, p) for p in paths]
@@ -51,15 +53,14 @@ def load_and_validate_data(txt_file: str, base_path: str = "") -> Dict[int, List
 
     all_ids = sorted(id_to_paths.keys())
     sample_counts = [len(id_to_paths[i]) for i in all_ids]
-    bad_ids = [i for i in all_ids if len(id_to_paths[i]) != 10]
+    dist = _Counter(sample_counts)
 
     print(f"[DATA] total IDs found: {len(all_ids)}")
     print(f"[DATA] sample count range: {min(sample_counts)}-{max(sample_counts)}")
-    if bad_ids:
-        print(f"[DATA] WARNING: IDs with sample count != 10: {bad_ids[:10]}...")
-    else:
-        print(f"[DATA] all IDs have exactly 10 samples")
+    print(f"[DATA] sample count distribution: "
+          + ", ".join(f"{c}→{n}" for c, n in sorted(dist.items())))
     print(f"[DATA] total samples: {sum(sample_counts)}")
+    # usable-ID filtering은 exp1_run.py의 n_min 기준으로 별도 수행
     return dict(id_to_paths)
 
 
@@ -385,6 +386,7 @@ def run_static_open_set(embeddings,
     known_total = 0
     known_max_scores = []
     known_pred_ids = []
+    known_probe_keys = []
     for uid in gallery_ids:
         test_feats = embeddings[uid]['test']
         max_sc, pred_ids = compute_max_scores_restricted(
@@ -394,7 +396,9 @@ def run_static_open_set(embeddings,
         known_accepted += int(((pred_ids == uid) & (max_sc >= threshold)).sum())
         known_total += len(pred_ids)
         known_max_scores.extend(max_sc.tolist())
-        known_pred_ids.extend(pred_ids.tolist())
+        known_pred_ids.extend([int(p) for p in pred_ids.tolist()])
+        for i in range(len(max_sc)):
+            known_probe_keys.append((int(uid), i))
 
     known_rank1 = known_correct / known_total if known_total > 0 else 0.0
     tpir = known_accepted / known_total if known_total > 0 else 0.0
@@ -403,6 +407,7 @@ def run_static_open_set(embeddings,
     external_rejected = 0
     external_total = 0
     external_max_scores = []
+    external_probe_keys = []
     for uid in external_ids:
         test_feats = embeddings[uid]['test']
         max_sc, _ = compute_max_scores_restricted(
@@ -411,6 +416,8 @@ def run_static_open_set(embeddings,
         external_rejected += int((max_sc < threshold).sum())
         external_total += len(max_sc)
         external_max_scores.extend(max_sc.tolist())
+        for i in range(len(max_sc)):
+            external_probe_keys.append((int(uid), i))
 
     external_rejection = external_rejected / external_total if external_total > 0 else 0.0
     achieved_fpir = 1.0 - external_rejection
@@ -420,13 +427,15 @@ def run_static_open_set(embeddings,
         'protocol': f'B_static_{gallery_size_label}',
         'score_mode': 'cosine',
         'apply_snorm': False,
-        'threshold_mode': 'fixed',
+        # 'fixed'는 C의 step-0-fixed와 구분하기 애매 → static_calibrated
+        'threshold_mode': 'static_calibrated',
         'threshold_space': 'raw_cosine',
         'target_fpir': target_fpir,
         'threshold_source': 'external_dev',
         'threshold': float(threshold),
         'gallery_step_key': gallery_step_key,
         'gallery_size': len(gallery_ids),
+        'gallery_ids': [int(x) for x in gallery_ids],
         'n_gallery': len(gallery_ids),
 
         'rank1': float(known_rank1),
@@ -444,7 +453,9 @@ def run_static_open_set(embeddings,
         # sanity diagnostics
         'known_max_scores': known_max_scores,
         'known_pred_ids': known_pred_ids,
+        'known_probe_keys': known_probe_keys,
         'external_max_scores': external_max_scores,
+        'external_probe_keys': external_probe_keys,
     }
 
     print(f"  [B-{gallery_size_label}] gallery_size={len(gallery_ids)} step_key={gallery_step_key}, τ={threshold:.4f}")
@@ -465,6 +476,9 @@ def _eval_step_groups(ncm: NCMClassifier, embeddings,
     """
     한 step에서 3 group (known / not-yet-enrolled / external) 평가.
     모든 max/argmax는 enrolled_ids (= current gallery)에 restrict.
+
+    Probe order는 deterministic: 그룹별 ID list 순회 + 각 ID 내부 sample_split 순서.
+    probe_keys = [(uid, local_idx), ...] 로 기록되어 sanity check에서 활용.
     """
     # Known
     known_correct = 0
@@ -472,6 +486,7 @@ def _eval_step_groups(ncm: NCMClassifier, embeddings,
     known_total = 0
     known_scores = []
     known_pred_ids = []
+    known_probe_keys = []   # list of (uid, sample_idx)
     for uid in enrolled_ids:
         test_feats = embeddings[uid]['test']
         max_sc, pred_ids = compute_max_scores_restricted(
@@ -482,11 +497,14 @@ def _eval_step_groups(ncm: NCMClassifier, embeddings,
         known_total += len(pred_ids)
         known_scores.extend(max_sc.tolist())
         known_pred_ids.extend(pred_ids.tolist())
+        for i in range(len(max_sc)):
+            known_probe_keys.append((int(uid), i))
 
     # Not-yet-enrolled
     nye_rejected = 0
     nye_total = 0
     nye_scores = []
+    nye_probe_keys = []
     for uid in remaining_future_ids:
         test_feats = embeddings[uid]['test']
         max_sc, _ = compute_max_scores_restricted(
@@ -495,11 +513,14 @@ def _eval_step_groups(ncm: NCMClassifier, embeddings,
         nye_rejected += int((max_sc < threshold).sum())
         nye_total += len(max_sc)
         nye_scores.extend(max_sc.tolist())
+        for i in range(len(max_sc)):
+            nye_probe_keys.append((int(uid), i))
 
     # External
     ext_rejected = 0
     ext_total = 0
     ext_scores = []
+    ext_probe_keys = []
     for uid in external_ids:
         test_feats = embeddings[uid]['test']
         max_sc, _ = compute_max_scores_restricted(
@@ -508,6 +529,8 @@ def _eval_step_groups(ncm: NCMClassifier, embeddings,
         ext_rejected += int((max_sc < threshold).sum())
         ext_total += len(max_sc)
         ext_scores.extend(max_sc.tolist())
+        for i in range(len(max_sc)):
+            ext_probe_keys.append((int(uid), i))
 
     known_rank1 = known_correct / known_total if known_total > 0 else 0.0
     tpir = known_accepted / known_total if known_total > 0 else 0.0
@@ -530,8 +553,11 @@ def _eval_step_groups(ncm: NCMClassifier, embeddings,
         'achieved_external_fpir': achieved_fpir,
         'known_scores': known_scores,
         'known_pred_ids': known_pred_ids,
+        'known_probe_keys': known_probe_keys,
         'nye_scores': nye_scores,
+        'nye_probe_keys': nye_probe_keys,
         'external_scores': ext_scores,
+        'external_probe_keys': ext_probe_keys,
     }
 
 
@@ -554,11 +580,17 @@ def _build_c_steps(gallery_schedule: Dict[str, List[int]],
 
 def _step_result_dict(step_key: str, enrolled_ids: List[int],
                       remaining_future_ids: List[int], threshold: float,
-                      group_eval: Dict, n_dev_used: int) -> Dict:
-    return {
+                      group_eval: Dict, n_dev_used: int,
+                      condition_meta: Optional[Dict] = None) -> Dict:
+    """
+    Per-step result. Includes gallery_ids + condition-level metadata
+    for per-step standalone analysis.
+    """
+    out = {
         'step': step_key,
         'gallery_step_key': step_key,
         'gallery_size': len(enrolled_ids),
+        'gallery_ids': [int(x) for x in enrolled_ids],
         'n_enrolled': len(enrolled_ids),
         'n_remaining_future': len(remaining_future_ids),
         'threshold': float(threshold),
@@ -582,6 +614,15 @@ def _step_result_dict(step_key: str, enrolled_ids: List[int],
         'not_yet_enrolled_probes': group_eval['nye_total'],
         'future_probes': group_eval['nye_total'],  # legacy
     }
+    if condition_meta is not None:
+        out.update({
+            'score_mode': condition_meta.get('score_mode'),
+            'apply_snorm': condition_meta.get('apply_snorm'),
+            'threshold_mode': condition_meta.get('threshold_mode'),
+            'threshold_space': condition_meta.get('threshold_space'),
+            'target_fpir': condition_meta.get('target_fpir'),
+        })
+    return out
 
 
 # ============================================================
@@ -596,6 +637,11 @@ def run_sequential_raw_fixed(embeddings,
                              device: torch.device) -> Dict:
     """Sequential, raw cosine, fixed τ (step 0)."""
     steps = _build_c_steps(gallery_schedule, future_ids)
+    cond_meta = {
+        'score_mode': 'cosine', 'apply_snorm': False,
+        'threshold_mode': 'fixed', 'threshold_space': 'raw_cosine',
+        'target_fpir': target_fpir,
+    }
     results = {
         'condition': 'C-raw-fixed',
         'protocol': 'C_raw_fixed',
@@ -628,12 +674,16 @@ def run_sequential_raw_fixed(embeddings,
 
         results['steps'].append(
             _step_result_dict(step_key, enrolled_ids, remaining_future_ids,
-                              threshold, ge, n_dev_used)
+                              threshold, ge, n_dev_used, cond_meta)
         )
         score_distributions[step_key] = {
             'known': ge['known_scores'],
+            'known_pred_ids': ge['known_pred_ids'],
+            'known_probe_keys': ge['known_probe_keys'],
             'future': ge['nye_scores'],
+            'nye_probe_keys': ge['nye_probe_keys'],
             'external': ge['external_scores'],
+            'external_probe_keys': ge['external_probe_keys'],
         }
         print(f"  [C-raw-fixed] {step_key}: n={len(enrolled_ids)}, τ={threshold:.4f}, "
               f"Rank-1={ge['known_rank1']:.4f}, TPIR={ge['tpir_at_1pct_fpir']:.4f}, "
@@ -654,9 +704,20 @@ def run_sequential_raw_recalib(embeddings,
                                external_ids: List[int],
                                target_fpir: float,
                                device: torch.device,
-                               monotonicity_tol: float = 1e-8) -> Dict:
-    """Sequential, raw cosine, τ recalibrated each step."""
+                               monotonicity_tol: float = 1e-8,
+                               strict_monotonicity: bool = True) -> Dict:
+    """
+    Sequential, raw cosine, τ recalibrated each step.
+
+    strict_monotonicity: True면 raw cosine threshold가 cumulative gallery에서
+    non-decreasing이어야 함 (수학적으로 보장). violation 발생 시 AssertionError.
+    """
     steps = _build_c_steps(gallery_schedule, future_ids)
+    cond_meta = {
+        'score_mode': 'cosine', 'apply_snorm': False,
+        'threshold_mode': 'recalib', 'threshold_space': 'raw_cosine',
+        'target_fpir': target_fpir,
+    }
     results = {
         'condition': 'C-raw-recalib',
         'protocol': 'C_raw_recalib',
@@ -688,12 +749,16 @@ def run_sequential_raw_recalib(embeddings,
 
         results['steps'].append(
             _step_result_dict(step_key, enrolled_ids, remaining_future_ids,
-                              threshold, ge, n_dev_used)
+                              threshold, ge, n_dev_used, cond_meta)
         )
         score_distributions[step_key] = {
             'known': ge['known_scores'],
+            'known_pred_ids': ge['known_pred_ids'],
+            'known_probe_keys': ge['known_probe_keys'],
             'future': ge['nye_scores'],
+            'nye_probe_keys': ge['nye_probe_keys'],
             'external': ge['external_scores'],
+            'external_probe_keys': ge['external_probe_keys'],
         }
         print(f"  [C-raw-recalib] {step_key}: n={len(enrolled_ids)}, τ={threshold:.4f}, "
               f"Rank-1={ge['known_rank1']:.4f}, TPIR={ge['tpir_at_1pct_fpir']:.4f}, "
@@ -710,8 +775,13 @@ def run_sequential_raw_recalib(embeddings,
                 'delta': thresholds_trajectory[k] - thresholds_trajectory[k-1],
             })
     if mono_violations:
-        print(f"  [C-raw-recalib] ⚠ monotonicity violations (tol={monotonicity_tol}): "
-              f"{len(mono_violations)} cases — sample: {mono_violations[0]}")
+        msg = (f"[C-raw-recalib] raw cosine threshold monotonicity violated "
+               f"(tol={monotonicity_tol}): {len(mono_violations)} cases, "
+               f"first: {mono_violations[0]}")
+        if strict_monotonicity:
+            raise AssertionError(msg)
+        else:
+            print("  ⚠ " + msg)
     else:
         print(f"  [C-raw-recalib] ✓ threshold monotonicity OK (tol={monotonicity_tol})")
 
@@ -730,12 +800,22 @@ def run_sequential_snorm_fixed(embeddings,
                                future_ids: List[int],
                                external_ids: List[int],
                                target_fpir: float,
-                               device: torch.device) -> Dict:
+                               device: torch.device,
+                               strict_cohort_invariance: bool = True,
+                               invariance_tol: float = 1e-12) -> Dict:
     """
     Sequential, S-norm, fixed τ (step 0 S-norm space).
     Cohort stats는 enrollment 시점에 새 class에 대해서만 계산 (기존 class 불변).
+
+    strict_cohort_invariance=True: old class cohort (μ, σ)가 바뀌면 AssertionError.
+      비교 기준은 NCM에 저장된 post-floor sigma (snorm_min_sigma 적용 후).
     """
     steps = _build_c_steps(gallery_schedule, future_ids)
+    cond_meta = {
+        'score_mode': 'snorm', 'apply_snorm': True,
+        'threshold_mode': 'fixed', 'threshold_space': 'snorm',
+        'target_fpir': target_fpir,
+    }
     results = {
         'condition': 'C-snorm-fixed',
         'protocol': 'C_snorm_fixed',
@@ -800,9 +880,14 @@ def run_sequential_snorm_fixed(embeddings,
                 'old_class_sigma_delta_max': old_sigma_delta,
             }
             results['cohort_invariance_checks'].append(check)
-            if old_mu_delta > 0.0 or old_sigma_delta > 0.0:
-                print(f"  [C-snorm-fixed] ⚠ cohort invariance violated at {step_key}: "
-                      f"μ_delta={old_mu_delta:.3e}, σ_delta={old_sigma_delta:.3e}")
+            if old_mu_delta > invariance_tol or old_sigma_delta > invariance_tol:
+                msg = (f"[C-snorm-fixed] old class cohort invariance violated at "
+                       f"{step_key}: μ_delta={old_mu_delta:.3e}, σ_delta={old_sigma_delta:.3e} "
+                       f"(tol={invariance_tol})")
+                if strict_cohort_invariance:
+                    raise AssertionError(msg)
+                else:
+                    print("  ⚠ " + msg)
 
         print(f"  [C-snorm-fixed] {step_key}: cohort size = {len(cohort_mu_dict)} (+{len(new_classes)} new)")
 
@@ -819,12 +904,16 @@ def run_sequential_snorm_fixed(embeddings,
 
         results['steps'].append(
             _step_result_dict(step_key, enrolled_ids, remaining_future_ids,
-                              threshold, ge, n_dev_used)
+                              threshold, ge, n_dev_used, cond_meta)
         )
         score_distributions[step_key] = {
             'known': ge['known_scores'],
+            'known_pred_ids': ge['known_pred_ids'],
+            'known_probe_keys': ge['known_probe_keys'],
             'future': ge['nye_scores'],
+            'nye_probe_keys': ge['nye_probe_keys'],
             'external': ge['external_scores'],
+            'external_probe_keys': ge['external_probe_keys'],
         }
         print(f"  [C-snorm-fixed] {step_key}: n={len(enrolled_ids)}, τ(snorm)={threshold:.4f}, "
               f"Rank-1={ge['known_rank1']:.4f}, TPIR={ge['tpir_at_1pct_fpir']:.4f}, "
@@ -846,12 +935,19 @@ def run_sequential_snorm_recalib(embeddings,
                                  future_ids: List[int],
                                  external_ids: List[int],
                                  target_fpir: float,
-                                 device: torch.device) -> Dict:
+                                 device: torch.device,
+                                 strict_cohort_invariance: bool = True,
+                                 invariance_tol: float = 1e-12) -> Dict:
     """
     Sequential, S-norm, τ recalibrated each step (S-norm space).
     Cohort stats는 새 class 증분 계산 (기존 class 불변).
     """
     steps = _build_c_steps(gallery_schedule, future_ids)
+    cond_meta = {
+        'score_mode': 'snorm', 'apply_snorm': True,
+        'threshold_mode': 'recalib', 'threshold_space': 'snorm',
+        'target_fpir': target_fpir,
+    }
     results = {
         'condition': 'C-snorm-recalib',
         'protocol': 'C_snorm_recalib',
@@ -904,6 +1000,14 @@ def run_sequential_snorm_recalib(embeddings,
                 'old_class_mu_delta_max': old_mu_delta,
                 'old_class_sigma_delta_max': old_sigma_delta,
             })
+            if old_mu_delta > invariance_tol or old_sigma_delta > invariance_tol:
+                msg = (f"[C-snorm-recalib] old class cohort invariance violated at "
+                       f"{step_key}: μ_delta={old_mu_delta:.3e}, σ_delta={old_sigma_delta:.3e} "
+                       f"(tol={invariance_tol})")
+                if strict_cohort_invariance:
+                    raise AssertionError(msg)
+                else:
+                    print("  ⚠ " + msg)
 
         # 매 step threshold 재계산 (S-norm space)
         threshold, n_dev_used = calibrate_threshold(
@@ -918,12 +1022,16 @@ def run_sequential_snorm_recalib(embeddings,
 
         results['steps'].append(
             _step_result_dict(step_key, enrolled_ids, remaining_future_ids,
-                              threshold, ge, n_dev_used)
+                              threshold, ge, n_dev_used, cond_meta)
         )
         score_distributions[step_key] = {
             'known': ge['known_scores'],
+            'known_pred_ids': ge['known_pred_ids'],
+            'known_probe_keys': ge['known_probe_keys'],
             'future': ge['nye_scores'],
+            'nye_probe_keys': ge['nye_probe_keys'],
             'external': ge['external_scores'],
+            'external_probe_keys': ge['external_probe_keys'],
         }
         print(f"  [C-snorm-recalib] {step_key}: n={len(enrolled_ids)}, τ(snorm)={threshold:.4f}, "
               f"Rank-1={ge['known_rank1']:.4f}, TPIR={ge['tpir_at_1pct_fpir']:.4f}, "
@@ -942,20 +1050,32 @@ def run_sequential_snorm_recalib(embeddings,
 
 def sanity_check_b_vs_c_recalib(b_result: Dict, c_recalib_result: Dict) -> Dict:
     """
-    Gallery set 일치 + probe order 일치 전제 하에서
+    Gallery set + probe order + predictions가 실제로 일치할 때
     B-sF final snapshot과 C-recalib final step이 score/threshold/metric 전부 동일해야 함.
     """
     c_final_step = c_recalib_result['steps'][-1]
+    step_key = c_final_step['step']
+    c_sd = c_recalib_result['score_distributions'][step_key]
 
-    # gallery size
+    # gallery diagnostics
     gallery_size_match = (b_result['gallery_size'] == c_final_step['gallery_size'])
     gallery_step_key_match = (b_result['gallery_step_key'] == c_final_step['gallery_step_key'])
+    b_gallery = [int(x) for x in b_result['gallery_ids']]
+    c_gallery = [int(x) for x in c_final_step['gallery_ids']]
+    gallery_ids_match = (b_gallery == c_gallery)
 
-    # probe count (order는 코드가 enrolled_ids 순회 순서로 deterministic이므로 count로 근사)
+    # probe diagnostics: compare the actual ordered probe identities.
     known_probe_count_match = (b_result['known_probes'] == c_final_step['known_probes'])
     external_probe_count_match = (
         b_result['external_test_probe_count'] == c_final_step['external_test_probe_count']
     )
+    b_known_keys = [tuple(x) for x in b_result['known_probe_keys']]
+    c_known_keys = [tuple(x) for x in c_sd['known_probe_keys']]
+    known_probe_order_match = (b_known_keys == c_known_keys)
+
+    b_ext_keys = [tuple(x) for x in b_result['external_probe_keys']]
+    c_ext_keys = [tuple(x) for x in c_sd['external_probe_keys']]
+    external_probe_order_match = (b_ext_keys == c_ext_keys)
 
     # threshold / metric diff
     threshold_diff = abs(b_result['threshold'] - c_final_step['threshold'])
@@ -964,37 +1084,53 @@ def sanity_check_b_vs_c_recalib(b_result: Dict, c_recalib_result: Dict) -> Dict:
     ext_rej_diff = abs(b_result['external_rejection_rate'] - c_final_step['external_rejection_rate'])
     achieved_fpir_diff = abs(b_result['achieved_external_fpir'] - c_final_step['achieved_external_fpir'])
 
-    # score diff (순서 같다고 가정하고 abs diff max)
-    b_known_scores = np.array(b_result.get('known_max_scores', []))
-    # C-recalib-final의 known_scores는 eval_step_groups의 known_scores와 같음
-    c_known_scores = np.array(
-        c_recalib_result['score_distributions'][c_final_step['step']]['known']
-    )
-    if len(b_known_scores) == len(c_known_scores) and len(b_known_scores) > 0:
+    # score diff is meaningful only when the probe order is exactly identical.
+    b_known_scores = np.asarray(b_result['known_max_scores'])
+    c_known_scores = np.asarray(c_sd['known'])
+    if (known_probe_order_match and len(b_known_scores) == len(c_known_scores)
+            and len(b_known_scores) > 0):
         known_max_abs_diff = float(np.max(np.abs(b_known_scores - c_known_scores)))
     else:
         known_max_abs_diff = float('nan')
 
-    b_ext_scores = np.array(b_result.get('external_max_scores', []))
-    c_ext_scores = np.array(
-        c_recalib_result['score_distributions'][c_final_step['step']]['external']
-    )
-    if len(b_ext_scores) == len(c_ext_scores) and len(b_ext_scores) > 0:
+    b_ext_scores = np.asarray(b_result['external_max_scores'])
+    c_ext_scores = np.asarray(c_sd['external'])
+    if (external_probe_order_match and len(b_ext_scores) == len(c_ext_scores)
+            and len(b_ext_scores) > 0):
         external_max_abs_diff = float(np.max(np.abs(b_ext_scores - c_ext_scores)))
     else:
         external_max_abs_diff = float('nan')
 
-    b_pred = b_result.get('known_pred_ids', [])
-    # C-recalib-final pred_ids 비교 데이터가 필요하면 _eval_step_groups에서 꺼낼 수 있지만
-    # 여기선 score 기반으로 간접 확인. Pred match는 score equality와 gallery 일치로부터 follow.
-    pred_match_rate = 1.0 if known_max_abs_diff < 1e-6 else float('nan')
+    b_pred = np.asarray(b_result['known_pred_ids'])
+    c_pred = np.asarray(c_sd['known_pred_ids'])
+    if (known_probe_order_match and len(b_pred) == len(c_pred)
+            and len(b_pred) > 0):
+        pred_match_rate = float(np.mean(b_pred == c_pred))
+    else:
+        pred_match_rate = float('nan')
+
+    sanity_pass = (
+        gallery_ids_match
+        and known_probe_order_match
+        and external_probe_order_match
+        and known_max_abs_diff < 1e-6
+        and external_max_abs_diff < 1e-6
+        and pred_match_rate == 1.0
+        and threshold_diff < 1e-8
+        and rank1_diff < 1e-12
+        and tpir_diff < 1e-12
+        and ext_rej_diff < 1e-12
+        and achieved_fpir_diff < 1e-12
+    )
 
     summary = {
-        'gallery_ids_match': gallery_size_match and gallery_step_key_match,
+        'gallery_ids_match': gallery_ids_match,
         'gallery_size_match': gallery_size_match,
         'gallery_step_key_match': gallery_step_key_match,
-        'known_probe_order_match': known_probe_count_match,
-        'external_probe_order_match': external_probe_count_match,
+        'known_probe_order_match': known_probe_order_match,
+        'known_probe_count_match': known_probe_count_match,
+        'external_probe_order_match': external_probe_order_match,
+        'external_probe_count_match': external_probe_count_match,
         'known_max_abs_diff': known_max_abs_diff,
         'external_max_abs_diff': external_max_abs_diff,
         'pred_match_rate': pred_match_rate,
@@ -1003,6 +1139,7 @@ def sanity_check_b_vs_c_recalib(b_result: Dict, c_recalib_result: Dict) -> Dict:
         'tpir_diff': tpir_diff,
         'external_rejection_rate_diff': ext_rej_diff,
         'achieved_fpir_diff': achieved_fpir_diff,
+        'sanity_pass': sanity_pass,
     }
 
     print("\n[SANITY] B-sF vs C-recalib-final")

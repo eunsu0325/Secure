@@ -7,10 +7,10 @@ Fig 3: Score distribution (step 0 vs final, raw cosine + S-norm panel)
 Appendix: Not-yet-enrolled rejection (sample-size annotated)
 """
 
-import numpy as np
-import matplotlib.pyplot as plt
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use('Agg')  # must be set BEFORE pyplot import (headless safety)
+import matplotlib.pyplot as plt
+import numpy as np
 from typing import Dict, List
 from pathlib import Path
 
@@ -144,12 +144,16 @@ def plot_fig2_sequential_curves(c_raw_fixed: Dict,
                                 c_raw_recalib: Dict,
                                 c_snorm_fixed: Dict,
                                 c_snorm_recalib: Dict,
-                                save_path: str):
+                                save_path: str,
+                                include_snorm_recalib: bool = False):
     """
     3 subplot:
       (a) TPIR@dev-calibrated 1% FPIR
       (b) Achieved External FPIR (test)
       (c) Threshold trajectory — raw / S-norm subplot 분리
+
+    Main figure: C-raw-fixed, C-raw-recalib, C-snorm-fixed (3 curves)
+    Appendix:    include_snorm_recalib=True → C-snorm-recalib 추가 (4 curves)
     """
     _setup_style()
 
@@ -157,8 +161,11 @@ def plot_fig2_sequential_curves(c_raw_fixed: Dict,
         ('C_raw_fixed', c_raw_fixed, 'C-raw-fixed', 'o-'),
         ('C_raw_recalib', c_raw_recalib, 'C-raw-recalib', 's--'),
         ('C_snorm_fixed', c_snorm_fixed, 'C-snorm-fixed', '^-'),
-        ('C_snorm_recalib', c_snorm_recalib, 'C-snorm-recalib (app.)', 'd:'),
     ]
+    if include_snorm_recalib:
+        conditions.append(
+            ('C_snorm_recalib', c_snorm_recalib, 'C-snorm-recalib', 'd:')
+        )
 
     # x-axis: gallery size
     xs = {}
@@ -210,10 +217,14 @@ def plot_fig2_sequential_curves(c_raw_fixed: Dict,
     ax.set_title('(c) Threshold trajectory — raw vs S-norm (separate axes)')
 
     ax_sn = ax.twinx()
-    for key, res, label, style in [
+    snorm_lines = [
         ('C_snorm_fixed', c_snorm_fixed, 'C-snorm-fixed (S-norm)', '^-'),
-        ('C_snorm_recalib', c_snorm_recalib, 'C-snorm-recalib (S-norm)', 'd:'),
-    ]:
+    ]
+    if include_snorm_recalib:
+        snorm_lines.append(
+            ('C_snorm_recalib', c_snorm_recalib, 'C-snorm-recalib (S-norm)', 'd:')
+        )
+    for key, res, label, style in snorm_lines:
         vals = [s['threshold'] for s in res['steps']]
         ax_sn.plot(xs[key], vals, style, color=COLORS[key], label=label,
                    linewidth=1.8, markersize=5, alpha=0.85)

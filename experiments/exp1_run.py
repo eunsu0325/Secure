@@ -17,6 +17,7 @@ Usage:
 import sys
 import os
 import argparse
+import json
 import yaml
 import numpy as np
 import torch
@@ -76,6 +77,88 @@ def setup_model(cfg: dict, device: torch.device):
                                    imside=cfg['dataset']['height'],
                                    channels=cfg['dataset']['channels'])
     return model, transform
+
+
+def build_embedding_meta(cfg: dict, seed: int, s_cfg: dict,
+                         selected_ids: list) -> dict:
+    return {
+        'dataset_txt_file': cfg['dataset']['txt_file'],
+        'dataset_base_path': cfg['dataset'].get('base_path', ''),
+        'seed': int(seed),
+        'n_enroll': int(s_cfg['n_enroll']),
+        'n_dev': int(s_cfg['n_dev']),
+        'n_test_min': int(s_cfg.get('n_test_min', 1)),
+        'selected_ids': [int(x) for x in selected_ids],
+        'height': int(cfg['dataset']['height']),
+        'width': int(cfg['dataset']['width']),
+        'channels': int(cfg['dataset']['channels']),
+        'model_architecture': cfg['model']['architecture'],
+        'pretrained_path': cfg['model']['pretrained_path'],
+        'competition_weight': float(cfg['model']['competition_weight']),
+    }
+
+
+def validate_embedding_meta(meta: dict, expected_meta: dict) -> None:
+    errors = []
+    scalar_keys = [
+        'dataset_txt_file',
+        'dataset_base_path',
+        'seed',
+        'n_enroll',
+        'n_dev',
+        'n_test_min',
+        'height',
+        'width',
+        'channels',
+        'model_architecture',
+        'pretrained_path',
+        'competition_weight',
+    ]
+    for key in scalar_keys:
+        if meta.get(key) != expected_meta[key]:
+            errors.append((key, meta.get(key), expected_meta[key]))
+
+    actual_ids = meta.get('selected_ids')
+    expected_ids = expected_meta['selected_ids']
+    if actual_ids != expected_ids:
+        actual_len = len(actual_ids) if isinstance(actual_ids, list) else None
+        errors.append(('selected_ids', actual_len, len(expected_ids)))
+
+    if errors:
+        raise ValueError(
+            f"Embedding reuse metadata mismatch: {errors[:10]}. "
+            "Regenerate embeddings without --reuse_embeddings."
+        )
+
+
+def validate_reused_embeddings(embeddings: dict, sample_split: dict) -> None:
+    errors = []
+    expected_ids = set(sample_split.keys())
+    actual_ids = set(embeddings.keys())
+
+    for uid in sorted(expected_ids - actual_ids):
+        errors.append((int(uid), 'missing_id'))
+    for uid in sorted(actual_ids - expected_ids):
+        errors.append((int(uid), 'unexpected_id'))
+
+    for uid in sorted(expected_ids & actual_ids):
+        parts = sample_split[uid]
+        for split_name in ['enroll', 'dev', 'test']:
+            if split_name not in embeddings[uid]:
+                errors.append((int(uid), split_name, 'missing_split'))
+                continue
+            actual_count = len(embeddings[uid][split_name])
+            expected_count = len(parts[split_name])
+            if actual_count != expected_count:
+                errors.append(
+                    (int(uid), split_name, actual_count, expected_count)
+                )
+
+    if errors:
+        raise ValueError(
+            f"Embedding reuse mismatch: {errors[:10]}. "
+            "Regenerate embeddings without --reuse_embeddings."
+        )
 
 
 def main():
@@ -168,20 +251,35 @@ def main():
     emb_dir = output_dir / 'embeddings'
     emb_dir.mkdir(parents=True, exist_ok=True)
     emb_path = emb_dir / 'all_embeddings.npz'
+    emb_meta_path = emb_dir / 'embedding_meta.json'
+    expected_embedding_meta = build_embedding_meta(
+        cfg, seed, s_cfg, all_selected_ids
+    )
 
     if args.reuse_embeddings and emb_path.exists():
         print("\n" + "=" * 60)
         print(" STEP 4-5: Reuse embeddings (skip model loading + forward)")
         print("=" * 60)
-        npz = np.load(str(emb_path))
+        if not emb_meta_path.exists():
+            raise ValueError(
+                f"Embedding metadata is missing for {emb_path}. "
+                "Legacy embedding caches cannot be safely reused; "
+                "regenerate embeddings without --reuse_embeddings."
+            )
+        with open(emb_meta_path, 'r') as f:
+            embedding_meta = json.load(f)
+        validate_embedding_meta(embedding_meta, expected_embedding_meta)
+
         embeddings = {}
-        for key in npz.files:
-            # key 형식: "{uid}_{split_name}"
-            uid_str, split_name = key.rsplit('_', 1)
-            uid = int(uid_str)
-            if uid not in embeddings:
-                embeddings[uid] = {}
-            embeddings[uid][split_name] = npz[key]
+        with np.load(str(emb_path)) as npz:
+            for key in npz.files:
+                # key 형식: "{uid}_{split_name}"
+                uid_str, split_name = key.rsplit('_', 1)
+                uid = int(uid_str)
+                if uid not in embeddings:
+                    embeddings[uid] = {}
+                embeddings[uid][split_name] = npz[key]
+        validate_reused_embeddings(embeddings, sample_split)
         print(f"[EMBEDDING] loaded from {emb_path} ({len(embeddings)} IDs)")
     else:
         print("\n" + "=" * 60)
@@ -202,6 +300,7 @@ def main():
                 key = f"{uid}_{split_name}"
                 all_emb_flat[key] = embeddings[uid][split_name]
         np.savez_compressed(str(emb_path), **all_emb_flat)
+        save_results(expected_embedding_meta, str(emb_meta_path))
         print(f"[SAVE] embeddings saved to {emb_path}")
 
     # ============================================================
