@@ -38,6 +38,14 @@ def _setup_style():
     })
 
 
+def _tpir_value(d: Dict):
+    return d.get('tpir_at_target_fpir', d.get('tpir_at_1pct_fpir'))
+
+
+def _fpir_label(target_fpir):
+    return f"{100 * float(target_fpir):g}% FPIR"
+
+
 # ============================================================
 # Fig 1: Gallery-size effect + size-matched sanity
 # ============================================================
@@ -46,7 +54,8 @@ def plot_fig1_gallery_size(b_results_by_size: Dict[int, Dict],
                            c_raw_fixed: Dict,
                            c_raw_recalib: Dict,
                            save_path: str,
-                           dataset_label: str = ''):
+                           dataset_label: str = '',
+                           target_fpir: float = 0.01):
     """
     2 subplot (TPIR, External FPIR).
     x: gallery size. Static bars + C-fixed-final / C-recalib-final overlay.
@@ -54,16 +63,19 @@ def plot_fig1_gallery_size(b_results_by_size: Dict[int, Dict],
     _setup_style()
 
     sizes = sorted(b_results_by_size.keys())
-    tpir_vals = [b_results_by_size[s]['tpir_at_1pct_fpir'] for s in sizes]
+    fpir_label = _fpir_label(target_fpir)
+    tpir_vals = [_tpir_value(b_results_by_size[s]) for s in sizes]
     ext_fpir_vals = [b_results_by_size[s]['achieved_external_fpir'] for s in sizes]
     ext_rej_vals = [b_results_by_size[s]['external_rejection_rate'] for s in sizes]
 
     c_final_rf = c_raw_fixed['steps'][-1]
     c_final_rr = c_raw_recalib['steps'][-1]
+    c_final_rf_tpir = _tpir_value(c_final_rf)
+    c_final_rr_tpir = _tpir_value(c_final_rr)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
 
-    # Left: TPIR@1%FPIR
+    # Left: TPIR@target FPIR
     ax = axes[0]
     bars = ax.bar(range(len(sizes)), tpir_vals, color=COLORS['B'], alpha=0.75,
                   edgecolor='black', linewidth=0.5, width=0.6, label='Static B-s')
@@ -71,19 +83,18 @@ def plot_fig1_gallery_size(b_results_by_size: Dict[int, Dict],
         ax.text(xi, val + 0.01, f'{val:.3f}', ha='center', va='bottom', fontsize=9)
     # Overlay C-fixed-final / C-recalib-final at the last size
     final_x = len(sizes) - 1
-    ax.scatter([final_x - 0.15], [c_final_rf['tpir_at_1pct_fpir']],
+    ax.scatter([final_x - 0.15], [c_final_rf_tpir],
                color=COLORS['C_raw_fixed'], s=80, zorder=5, marker='o',
-               label=f"C-raw-fixed final ({c_final_rf['tpir_at_1pct_fpir']:.3f})")
-    ax.scatter([final_x + 0.15], [c_final_rr['tpir_at_1pct_fpir']],
+               label=f"C-raw-fixed final ({c_final_rf_tpir:.3f})")
+    ax.scatter([final_x + 0.15], [c_final_rr_tpir],
                color=COLORS['C_raw_recalib'], s=80, zorder=5, marker='s',
-               label=f"C-raw-recalib final ({c_final_rr['tpir_at_1pct_fpir']:.3f})")
+               label=f"C-raw-recalib final ({c_final_rr_tpir:.3f})")
     ax.set_xticks(range(len(sizes)))
     ax.set_xticklabels([str(s) for s in sizes])
     ax.set_xlabel('Gallery size')
-    ax.set_ylabel('TPIR at dev-calibrated 1% FPIR threshold')
+    ax.set_ylabel(f'TPIR at dev-calibrated {fpir_label} threshold')
     ax.set_title('TPIR vs gallery size')
-    ax.set_ylim(0, min(1.05, max(tpir_vals + [c_final_rf['tpir_at_1pct_fpir'],
-                                               c_final_rr['tpir_at_1pct_fpir']]) + 0.12))
+    ax.set_ylim(0, min(1.05, max(tpir_vals + [c_final_rf_tpir, c_final_rr_tpir]) + 0.12))
     ax.legend(loc='lower left', fontsize=8, frameon=True)
     ax.grid(True, alpha=0.25)
     ax.spines['top'].set_visible(False)
@@ -145,10 +156,11 @@ def plot_fig2_sequential_curves(c_raw_fixed: Dict,
                                 c_snorm_fixed: Dict,
                                 c_snorm_recalib: Dict,
                                 save_path: str,
-                                include_snorm_recalib: bool = False):
+                                include_snorm_recalib: bool = False,
+                                target_fpir: float = 0.01):
     """
     3 subplot:
-      (a) TPIR@dev-calibrated 1% FPIR
+      (a) TPIR@dev-calibrated target FPIR
       (b) Achieved External FPIR (test)
       (c) Threshold trajectory — raw / S-norm subplot 분리
 
@@ -162,10 +174,12 @@ def plot_fig2_sequential_curves(c_raw_fixed: Dict,
         ('C_raw_recalib', c_raw_recalib, 'C-raw-recalib', 's--'),
         ('C_snorm_fixed', c_snorm_fixed, 'C-snorm-fixed', '^-'),
     ]
-    if include_snorm_recalib:
+    if include_snorm_recalib and c_snorm_recalib is not None:
         conditions.append(
             ('C_snorm_recalib', c_snorm_recalib, 'C-snorm-recalib', 'd:')
         )
+
+    fpir_label = _fpir_label(target_fpir)
 
     # x-axis: gallery size
     xs = {}
@@ -177,10 +191,10 @@ def plot_fig2_sequential_curves(c_raw_fixed: Dict,
     # (a) TPIR
     ax = axes[0]
     for key, res, label, style in conditions:
-        vals = [s['tpir_at_1pct_fpir'] for s in res['steps']]
+        vals = [_tpir_value(s) for s in res['steps']]
         ax.plot(xs[key], vals, style, color=COLORS[key], label=label,
                 linewidth=1.8, markersize=5)
-    ax.set_ylabel('TPIR at dev-calibrated 1% FPIR')
+    ax.set_ylabel(f'TPIR at dev-calibrated {fpir_label}')
     ax.set_title('(a) TPIR vs gallery size')
     ax.set_xlabel('Enrolled identities')
     ax.legend(fontsize=9, frameon=True)
@@ -220,7 +234,7 @@ def plot_fig2_sequential_curves(c_raw_fixed: Dict,
     snorm_lines = [
         ('C_snorm_fixed', c_snorm_fixed, 'C-snorm-fixed (S-norm)', '^-'),
     ]
-    if include_snorm_recalib:
+    if include_snorm_recalib and c_snorm_recalib is not None:
         snorm_lines.append(
             ('C_snorm_recalib', c_snorm_recalib, 'C-snorm-recalib (S-norm)', 'd:')
         )
@@ -464,19 +478,21 @@ def plot_appendix_nye_rejection(c_raw_fixed: Dict,
 # Console summary
 # ============================================================
 
-def plot_console_summary(all_condition_results: Dict, sanity_summary: Dict):
+def plot_console_summary(all_condition_results: Dict, sanity_summary: Dict,
+                         target_fpir: float = 0.01):
     """Final-step summary table 콘솔 출력."""
+    fpir_label = _fpir_label(target_fpir)
     print("\n" + "=" * 90)
     print("  EXPERIMENT 1 SUMMARY — Final-step metrics")
     print("=" * 90)
     print(f"  {'Condition':<22} {'Gallery':<10} {'Rank-1':<10} "
-          f"{'TPIR@1%':<10} {'ExtRej':<10} {'AchFPIR':<10} {'τ':<10}")
+          f"{'TPIR@' + fpir_label:<10} {'ExtRej':<10} {'AchFPIR':<10} {'τ':<10}")
     print("-" * 90)
 
     def _row(label, step, tau_field='threshold'):
         print(f"  {label:<22} {step['gallery_size']:<10} "
               f"{step['rank1']:.4f}    "
-              f"{step['tpir_at_1pct_fpir']:.4f}    "
+              f"{_tpir_value(step):.4f}    "
               f"{step['external_rejection_rate']:.4f}    "
               f"{step['achieved_external_fpir']:.4f}    "
               f"{step.get(tau_field, float('nan')):.4f}")
@@ -492,7 +508,7 @@ def plot_console_summary(all_condition_results: Dict, sanity_summary: Dict):
         # res is not a step — it's a static snapshot
         print(f"  {'B-'+str(size):<22} {res['gallery_size']:<10} "
               f"{res['rank1']:.4f}    "
-              f"{res['tpir_at_1pct_fpir']:.4f}    "
+              f"{_tpir_value(res):.4f}    "
               f"{res['external_rejection_rate']:.4f}    "
               f"{res['achieved_external_fpir']:.4f}    "
               f"{res['threshold']:.4f}")
@@ -504,6 +520,8 @@ def plot_console_summary(all_condition_results: Dict, sanity_summary: Dict):
         ('C_snorm_fixed', 'C-snorm-fixed'),
         ('C_snorm_recalib', 'C-snorm-recalib'),
     ]:
+        if key not in all_condition_results:
+            continue
         res = all_condition_results[key]
         _row(label + ' (final)', res['steps'][-1])
 

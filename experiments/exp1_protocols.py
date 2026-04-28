@@ -25,6 +25,7 @@ import torch
 import torch.nn.functional as F
 from pathlib import Path
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -34,6 +35,7 @@ from coconut.openset.utils import load_paths_labels_from_txt, set_seed
 from coconut.openset.score_extraction import extract_features
 from coconut.classifiers.ncm import NCMClassifier
 from coconut.data.transforms import get_scr_transforms
+from experiments.exp1_common.calibration import threshold_from_dev_scores
 
 
 # ============================================================
@@ -240,37 +242,66 @@ def compute_max_scores_restricted(ncm: NCMClassifier, feats: np.ndarray,
 # Threshold calibration
 # ============================================================
 
-def calibrate_threshold(ncm: NCMClassifier,
-                        embeddings: Dict[int, Dict[str, np.ndarray]],
-                        external_ids: List[int],
-                        gallery_ids: List[int],
-                        target_fpir: float,
-                        device: torch.device,
-                        apply_snorm: bool = False,
-                        verbose: bool = False) -> Tuple[float, int]:
-    """
-    External Unknown dev 샘플의 max score → (1-target_fpir) percentile.
-    Gallery restrict 적용. raw cosine 또는 S-norm space 모두 지원.
+@dataclass
+class CalibrationResult:
+    threshold: float
+    n_dev: int
+    scores: List[float]
+    probe_keys: List[Tuple[int, int]]
 
-    Returns: (threshold, n_dev_probes_used)
-    """
-    impostor_scores = []
-    for uid in external_ids:
+
+def collect_external_dev_scores(ncm: NCMClassifier,
+                                embeddings: Dict[int, Dict[str, np.ndarray]],
+                                external_dev_ids: List[int],
+                                gallery_ids: List[int],
+                                device: torch.device,
+                                apply_snorm: bool = False
+                                ) -> Tuple[List[float], List[Tuple[int, int]]]:
+    """Collect external-dev impostor max-scores restricted to gallery_ids."""
+    scores = []
+    probe_keys = []
+    for uid in external_dev_ids:
         dev_feats = embeddings[uid]['dev']
         max_sc, _ = compute_max_scores_restricted(
             ncm, dev_feats, gallery_ids, device, apply_snorm=apply_snorm
         )
-        impostor_scores.extend(max_sc.tolist())
+        scores.extend(max_sc.tolist())
+        probe_keys.extend((int(uid), i) for i in range(len(max_sc)))
+    return scores, probe_keys
 
-    impostor_scores = np.array(impostor_scores)
-    threshold = float(np.percentile(impostor_scores, 100 * (1 - target_fpir)))
+
+def calibrate_threshold(ncm: NCMClassifier,
+                        embeddings: Dict[int, Dict[str, np.ndarray]],
+                        external_dev_ids: List[int],
+                        gallery_ids: List[int],
+                        target_fpir: float,
+                        device: torch.device,
+                        apply_snorm: bool = False,
+                        verbose: bool = False) -> CalibrationResult:
+    """
+    External Unknown dev 샘플의 max score → (1-target_fpir) percentile.
+    Gallery restrict 적용. raw cosine 또는 S-norm space 모두 지원.
+
+    Returns: CalibrationResult with threshold and the dev impostor scores used.
+    """
+    impostor_scores, probe_keys = collect_external_dev_scores(
+        ncm, embeddings, external_dev_ids, gallery_ids, device,
+        apply_snorm=apply_snorm
+    )
+    threshold = threshold_from_dev_scores(impostor_scores, target_fpir)
 
     if verbose:
+        arr = np.asarray(impostor_scores, dtype=np.float64)
         mode = 'snorm' if apply_snorm else 'cosine'
-        print(f"[THRESHOLD/{mode}] n={len(impostor_scores)}, "
-              f"mean={impostor_scores.mean():.4f}, std={impostor_scores.std():.4f}, "
+        print(f"[THRESHOLD/{mode}] n={len(arr)}, "
+              f"mean={arr.mean():.4f}, std={arr.std():.4f}, "
               f"τ(target_fpir={target_fpir})={threshold:.4f}")
-    return threshold, len(impostor_scores)
+    return CalibrationResult(
+        threshold=float(threshold),
+        n_dev=len(impostor_scores),
+        scores=impostor_scores,
+        probe_keys=probe_keys,
+    )
 
 
 # ============================================================
@@ -299,10 +330,10 @@ def compute_cohort_for_class(ncm: NCMClassifier,
 
 
 def gather_external_dev_feats(embeddings: Dict[int, Dict[str, np.ndarray]],
-                              external_ids: List[int]) -> np.ndarray:
+                              external_dev_ids: List[int]) -> np.ndarray:
     """external_dev 전체 sample을 하나의 (N, D) 배열로 합침."""
     feats_list = []
-    for uid in external_ids:
+    for uid in external_dev_ids:
         feats_list.append(embeddings[uid]['dev'])
     return np.concatenate(feats_list, axis=0)
 
@@ -363,7 +394,8 @@ def run_closed_set_expanding(embeddings, gallery_schedule: Dict[str, List[int]],
 
 def run_static_open_set(embeddings,
                         gallery_ids: List[int],
-                        external_ids: List[int],
+                        external_dev_ids: List[int],
+                        external_test_ids: List[int],
                         gallery_size_label: int,
                         gallery_step_key: str,
                         target_fpir: float,
@@ -375,10 +407,12 @@ def run_static_open_set(embeddings,
     build_prototypes(ncm, embeddings, gallery_ids, device)
 
     # threshold: external_dev + this gallery
-    threshold, n_dev = calibrate_threshold(
-        ncm, embeddings, external_ids, gallery_ids, target_fpir,
+    cal = calibrate_threshold(
+        ncm, embeddings, external_dev_ids, gallery_ids, target_fpir,
         device, apply_snorm=False, verbose=True
     )
+    threshold = cal.threshold
+    n_dev = cal.n_dev
 
     # Known (gallery 내 ID들)
     known_correct = 0
@@ -408,7 +442,7 @@ def run_static_open_set(embeddings,
     external_total = 0
     external_max_scores = []
     external_probe_keys = []
-    for uid in external_ids:
+    for uid in external_test_ids:
         test_feats = embeddings[uid]['test']
         max_sc, _ = compute_max_scores_restricted(
             ncm, test_feats, gallery_ids, device, apply_snorm=False
@@ -427,9 +461,12 @@ def run_static_open_set(embeddings,
         'protocol': f'B_static_{gallery_size_label}',
         'score_mode': 'cosine',
         'apply_snorm': False,
+        'score_space': 'raw_cosine',
         # 'fixed'는 C의 step-0-fixed와 구분하기 애매 → static_calibrated
         'threshold_mode': 'static_calibrated',
         'threshold_space': 'raw_cosine',
+        'threshold_quantile_method': 'higher',
+        'conservative_calibration': True,
         'target_fpir': target_fpir,
         'threshold_source': 'external_dev',
         'threshold': float(threshold),
@@ -437,9 +474,14 @@ def run_static_open_set(embeddings,
         'gallery_size': len(gallery_ids),
         'gallery_ids': [int(x) for x in gallery_ids],
         'n_gallery': len(gallery_ids),
+        'known_identity_count': len(gallery_ids),
+        'external_dev_identity_count': len(external_dev_ids),
+        'external_test_identity_count': len(external_test_ids),
+        'external_identity_count': len(external_dev_ids) + len(external_test_ids),
 
         'rank1': float(known_rank1),
         'known_rank1': float(known_rank1),  # legacy
+        'tpir_at_target_fpir': float(tpir),
         'tpir_at_1pct_fpir': float(tpir),
         'known_acceptance': float(tpir),  # legacy alias
         'external_rejection_rate': float(external_rejection),
@@ -451,11 +493,15 @@ def run_static_open_set(embeddings,
         'external_probes': external_total,  # legacy
 
         # sanity diagnostics
+        'known_scores': known_max_scores,
         'known_max_scores': known_max_scores,
         'known_pred_ids': known_pred_ids,
         'known_probe_keys': known_probe_keys,
+        'external_scores': external_max_scores,
         'external_max_scores': external_max_scores,
         'external_probe_keys': external_probe_keys,
+        'external_dev_impostor_max_scores': cal.scores,
+        'external_dev_probe_keys': cal.probe_keys,
     }
 
     print(f"  [B-{gallery_size_label}] gallery_size={len(gallery_ids)} step_key={gallery_step_key}, τ={threshold:.4f}")
@@ -469,7 +515,7 @@ def run_static_open_set(embeddings,
 # ============================================================
 
 def _eval_step_groups(ncm: NCMClassifier, embeddings,
-                      enrolled_ids: List[int], external_ids: List[int],
+                      enrolled_ids: List[int], external_test_ids: List[int],
                       remaining_future_ids: List[int],
                       threshold: float, device: torch.device,
                       apply_snorm: bool) -> Dict:
@@ -521,7 +567,7 @@ def _eval_step_groups(ncm: NCMClassifier, embeddings,
     ext_total = 0
     ext_scores = []
     ext_probe_keys = []
-    for uid in external_ids:
+    for uid in external_test_ids:
         test_feats = embeddings[uid]['test']
         max_sc, _ = compute_max_scores_restricted(
             ncm, test_feats, enrolled_ids, device, apply_snorm=apply_snorm
@@ -581,6 +627,8 @@ def _build_c_steps(gallery_schedule: Dict[str, List[int]],
 def _step_result_dict(step_key: str, enrolled_ids: List[int],
                       remaining_future_ids: List[int], threshold: float,
                       group_eval: Dict, n_dev_used: int,
+                      external_dev_identity_count: int,
+                      external_test_identity_count: int,
                       condition_meta: Optional[Dict] = None) -> Dict:
     """
     Per-step result. Includes gallery_ids + condition-level metadata
@@ -593,10 +641,16 @@ def _step_result_dict(step_key: str, enrolled_ids: List[int],
         'gallery_ids': [int(x) for x in enrolled_ids],
         'n_enrolled': len(enrolled_ids),
         'n_remaining_future': len(remaining_future_ids),
+        'known_identity_count': len(enrolled_ids),
+        'external_dev_identity_count': external_dev_identity_count,
+        'external_test_identity_count': external_test_identity_count,
+        'external_identity_count': external_dev_identity_count + external_test_identity_count,
+        'not_yet_enrolled_identity_count': len(remaining_future_ids),
         'threshold': float(threshold),
 
         'rank1': float(group_eval['known_rank1']),
         'known_rank1': float(group_eval['known_rank1']),  # legacy
+        'tpir_at_target_fpir': float(group_eval['tpir_at_1pct_fpir']),
         'tpir_at_1pct_fpir': float(group_eval['tpir_at_1pct_fpir']),
         'known_acceptance': float(group_eval['tpir_at_1pct_fpir']),  # legacy
 
@@ -632,7 +686,8 @@ def _step_result_dict(step_key: str, enrolled_ids: List[int],
 def run_sequential_raw_fixed(embeddings,
                              gallery_schedule: Dict[str, List[int]],
                              future_ids: List[int],
-                             external_ids: List[int],
+                             external_dev_ids: List[int],
+                             external_test_ids: List[int],
                              target_fpir: float,
                              device: torch.device) -> Dict:
     """Sequential, raw cosine, fixed τ (step 0)."""
@@ -649,6 +704,8 @@ def run_sequential_raw_fixed(embeddings,
         'apply_snorm': False,
         'threshold_mode': 'fixed',
         'threshold_space': 'raw_cosine',
+        'threshold_quantile_method': 'higher',
+        'conservative_calibration': True,
         'target_fpir': target_fpir,
         'threshold_source': 'external_dev',
         'steps': [],
@@ -656,6 +713,8 @@ def run_sequential_raw_fixed(embeddings,
     score_distributions = {}
     threshold = None
     n_dev_used = 0
+    cal_scores = []
+    cal_probe_keys = []
 
     for step_key, enrolled_ids, remaining_future_ids in steps:
         ncm = fresh_ncm(device)
@@ -663,20 +722,26 @@ def run_sequential_raw_fixed(embeddings,
 
         # Step 0에서만 calibrate, 이후 고정
         if threshold is None:
-            threshold, n_dev_used = calibrate_threshold(
-                ncm, embeddings, external_ids, enrolled_ids, target_fpir,
+            cal = calibrate_threshold(
+                ncm, embeddings, external_dev_ids, enrolled_ids, target_fpir,
                 device, apply_snorm=False, verbose=True
             )
+            threshold = cal.threshold
+            n_dev_used = cal.n_dev
+            cal_scores = cal.scores
+            cal_probe_keys = cal.probe_keys
 
-        ge = _eval_step_groups(ncm, embeddings, enrolled_ids, external_ids,
+        ge = _eval_step_groups(ncm, embeddings, enrolled_ids, external_test_ids,
                                remaining_future_ids, threshold, device,
                                apply_snorm=False)
 
         results['steps'].append(
             _step_result_dict(step_key, enrolled_ids, remaining_future_ids,
-                              threshold, ge, n_dev_used, cond_meta)
+                              threshold, ge, n_dev_used, len(external_dev_ids), len(external_test_ids),
+                              cond_meta)
         )
         score_distributions[step_key] = {
+            'score_space': 'raw_cosine',
             'known': ge['known_scores'],
             'known_pred_ids': ge['known_pred_ids'],
             'known_probe_keys': ge['known_probe_keys'],
@@ -684,6 +749,8 @@ def run_sequential_raw_fixed(embeddings,
             'nye_probe_keys': ge['nye_probe_keys'],
             'external': ge['external_scores'],
             'external_probe_keys': ge['external_probe_keys'],
+            'external_dev_impostor_max_scores': cal_scores,
+            'external_dev_probe_keys': cal_probe_keys,
         }
         print(f"  [C-raw-fixed] {step_key}: n={len(enrolled_ids)}, τ={threshold:.4f}, "
               f"Rank-1={ge['known_rank1']:.4f}, TPIR={ge['tpir_at_1pct_fpir']:.4f}, "
@@ -701,7 +768,8 @@ def run_sequential_raw_fixed(embeddings,
 def run_sequential_raw_recalib(embeddings,
                                gallery_schedule: Dict[str, List[int]],
                                future_ids: List[int],
-                               external_ids: List[int],
+                               external_dev_ids: List[int],
+                               external_test_ids: List[int],
                                target_fpir: float,
                                device: torch.device,
                                monotonicity_tol: float = 1e-8,
@@ -725,6 +793,8 @@ def run_sequential_raw_recalib(embeddings,
         'apply_snorm': False,
         'threshold_mode': 'recalib',
         'threshold_space': 'raw_cosine',
+        'threshold_quantile_method': 'higher',
+        'conservative_calibration': True,
         'target_fpir': target_fpir,
         'threshold_source': 'external_dev',
         'steps': [],
@@ -737,21 +807,25 @@ def run_sequential_raw_recalib(embeddings,
         build_prototypes(ncm, embeddings, enrolled_ids, device)
 
         # 매 step threshold 재계산
-        threshold, n_dev_used = calibrate_threshold(
-            ncm, embeddings, external_ids, enrolled_ids, target_fpir,
+        cal = calibrate_threshold(
+            ncm, embeddings, external_dev_ids, enrolled_ids, target_fpir,
             device, apply_snorm=False, verbose=True
         )
+        threshold = cal.threshold
+        n_dev_used = cal.n_dev
         thresholds_trajectory.append(threshold)
 
-        ge = _eval_step_groups(ncm, embeddings, enrolled_ids, external_ids,
+        ge = _eval_step_groups(ncm, embeddings, enrolled_ids, external_test_ids,
                                remaining_future_ids, threshold, device,
                                apply_snorm=False)
 
         results['steps'].append(
             _step_result_dict(step_key, enrolled_ids, remaining_future_ids,
-                              threshold, ge, n_dev_used, cond_meta)
+                              threshold, ge, n_dev_used, len(external_dev_ids), len(external_test_ids),
+                              cond_meta)
         )
         score_distributions[step_key] = {
+            'score_space': 'raw_cosine',
             'known': ge['known_scores'],
             'known_pred_ids': ge['known_pred_ids'],
             'known_probe_keys': ge['known_probe_keys'],
@@ -759,6 +833,8 @@ def run_sequential_raw_recalib(embeddings,
             'nye_probe_keys': ge['nye_probe_keys'],
             'external': ge['external_scores'],
             'external_probe_keys': ge['external_probe_keys'],
+            'external_dev_impostor_max_scores': cal.scores,
+            'external_dev_probe_keys': cal.probe_keys,
         }
         print(f"  [C-raw-recalib] {step_key}: n={len(enrolled_ids)}, τ={threshold:.4f}, "
               f"Rank-1={ge['known_rank1']:.4f}, TPIR={ge['tpir_at_1pct_fpir']:.4f}, "
@@ -798,7 +874,8 @@ def run_sequential_raw_recalib(embeddings,
 def run_sequential_snorm_fixed(embeddings,
                                gallery_schedule: Dict[str, List[int]],
                                future_ids: List[int],
-                               external_ids: List[int],
+                               external_dev_ids: List[int],
+                               external_test_ids: List[int],
                                target_fpir: float,
                                device: torch.device,
                                strict_cohort_invariance: bool = True,
@@ -823,6 +900,8 @@ def run_sequential_snorm_fixed(embeddings,
         'apply_snorm': True,
         'threshold_mode': 'fixed',
         'threshold_space': 'snorm',
+        'threshold_quantile_method': 'higher',
+        'conservative_calibration': True,
         'target_fpir': target_fpir,
         'threshold_source': 'external_dev',
         'steps': [],
@@ -831,7 +910,7 @@ def run_sequential_snorm_fixed(embeddings,
     score_distributions = {}
 
     # external_dev features (모든 step에서 재사용)
-    external_dev_feats = gather_external_dev_feats(embeddings, external_ids)
+    external_dev_feats = gather_external_dev_feats(embeddings, external_dev_ids)
 
     # 누적 cohort state (fresh NCM 매 step마다 생성해도 이 dict는 carry-over)
     cohort_mu_dict: Dict[int, float] = {}
@@ -840,6 +919,8 @@ def run_sequential_snorm_fixed(embeddings,
 
     threshold = None
     n_dev_used = 0
+    cal_scores = []
+    cal_probe_keys = []
     enrolled_set_prev = set()
 
     for step_key, enrolled_ids, remaining_future_ids in steps:
@@ -893,20 +974,26 @@ def run_sequential_snorm_fixed(embeddings,
 
         # Step 0에서 threshold를 S-norm space에서 calibrate (FIXED)
         if threshold is None:
-            threshold, n_dev_used = calibrate_threshold(
-                ncm, embeddings, external_ids, enrolled_ids, target_fpir,
+            cal = calibrate_threshold(
+                ncm, embeddings, external_dev_ids, enrolled_ids, target_fpir,
                 device, apply_snorm=True, verbose=True
             )
+            threshold = cal.threshold
+            n_dev_used = cal.n_dev
+            cal_scores = cal.scores
+            cal_probe_keys = cal.probe_keys
 
-        ge = _eval_step_groups(ncm, embeddings, enrolled_ids, external_ids,
+        ge = _eval_step_groups(ncm, embeddings, enrolled_ids, external_test_ids,
                                remaining_future_ids, threshold, device,
                                apply_snorm=True)
 
         results['steps'].append(
             _step_result_dict(step_key, enrolled_ids, remaining_future_ids,
-                              threshold, ge, n_dev_used, cond_meta)
+                              threshold, ge, n_dev_used, len(external_dev_ids), len(external_test_ids),
+                              cond_meta)
         )
         score_distributions[step_key] = {
+            'score_space': 'snorm',
             'known': ge['known_scores'],
             'known_pred_ids': ge['known_pred_ids'],
             'known_probe_keys': ge['known_probe_keys'],
@@ -914,6 +1001,9 @@ def run_sequential_snorm_fixed(embeddings,
             'nye_probe_keys': ge['nye_probe_keys'],
             'external': ge['external_scores'],
             'external_probe_keys': ge['external_probe_keys'],
+            'external_dev_impostor_max_scores': cal_scores,
+            'external_dev_probe_keys': cal_probe_keys,
+            'external_dev_impostor_max_scores_snorm': cal_scores,
         }
         print(f"  [C-snorm-fixed] {step_key}: n={len(enrolled_ids)}, τ(snorm)={threshold:.4f}, "
               f"Rank-1={ge['known_rank1']:.4f}, TPIR={ge['tpir_at_1pct_fpir']:.4f}, "
@@ -933,7 +1023,8 @@ def run_sequential_snorm_fixed(embeddings,
 def run_sequential_snorm_recalib(embeddings,
                                  gallery_schedule: Dict[str, List[int]],
                                  future_ids: List[int],
-                                 external_ids: List[int],
+                                 external_dev_ids: List[int],
+                                 external_test_ids: List[int],
                                  target_fpir: float,
                                  device: torch.device,
                                  strict_cohort_invariance: bool = True,
@@ -955,6 +1046,8 @@ def run_sequential_snorm_recalib(embeddings,
         'apply_snorm': True,
         'threshold_mode': 'recalib',
         'threshold_space': 'snorm',
+        'threshold_quantile_method': 'higher',
+        'conservative_calibration': True,
         'target_fpir': target_fpir,
         'threshold_source': 'external_dev',
         'steps': [],
@@ -963,7 +1056,7 @@ def run_sequential_snorm_recalib(embeddings,
     score_distributions = {}
     thresholds_trajectory = []
 
-    external_dev_feats = gather_external_dev_feats(embeddings, external_ids)
+    external_dev_feats = gather_external_dev_feats(embeddings, external_dev_ids)
     cohort_mu_dict: Dict[int, float] = {}
     cohort_sigma_dict: Dict[int, float] = {}
     snorm_min_sigma = 1e-2
@@ -1010,21 +1103,25 @@ def run_sequential_snorm_recalib(embeddings,
                     print("  ⚠ " + msg)
 
         # 매 step threshold 재계산 (S-norm space)
-        threshold, n_dev_used = calibrate_threshold(
-            ncm, embeddings, external_ids, enrolled_ids, target_fpir,
+        cal = calibrate_threshold(
+            ncm, embeddings, external_dev_ids, enrolled_ids, target_fpir,
             device, apply_snorm=True, verbose=True
         )
+        threshold = cal.threshold
+        n_dev_used = cal.n_dev
         thresholds_trajectory.append(threshold)
 
-        ge = _eval_step_groups(ncm, embeddings, enrolled_ids, external_ids,
+        ge = _eval_step_groups(ncm, embeddings, enrolled_ids, external_test_ids,
                                remaining_future_ids, threshold, device,
                                apply_snorm=True)
 
         results['steps'].append(
             _step_result_dict(step_key, enrolled_ids, remaining_future_ids,
-                              threshold, ge, n_dev_used, cond_meta)
+                              threshold, ge, n_dev_used, len(external_dev_ids), len(external_test_ids),
+                              cond_meta)
         )
         score_distributions[step_key] = {
+            'score_space': 'snorm',
             'known': ge['known_scores'],
             'known_pred_ids': ge['known_pred_ids'],
             'known_probe_keys': ge['known_probe_keys'],
@@ -1032,6 +1129,9 @@ def run_sequential_snorm_recalib(embeddings,
             'nye_probe_keys': ge['nye_probe_keys'],
             'external': ge['external_scores'],
             'external_probe_keys': ge['external_probe_keys'],
+            'external_dev_impostor_max_scores': cal.scores,
+            'external_dev_probe_keys': cal.probe_keys,
+            'external_dev_impostor_max_scores_snorm': cal.scores,
         }
         print(f"  [C-snorm-recalib] {step_key}: n={len(enrolled_ids)}, τ(snorm)={threshold:.4f}, "
               f"Rank-1={ge['known_rank1']:.4f}, TPIR={ge['tpir_at_1pct_fpir']:.4f}, "

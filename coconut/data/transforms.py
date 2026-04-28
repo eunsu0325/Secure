@@ -70,3 +70,27 @@ def get_scr_transforms(train=True, imside=128, channels=1):
             T.ToTensor(),
             NormSingleROI(outchannels=channels)
         ])
+
+
+def get_repvit_transforms(train=False, imside=224):
+    """Transform pipeline for the RepViT robustness backbone (Exp1).
+
+    Resize to (imside, imside) and convert to tensor. ImageNet normalization is
+    intentionally **not** applied here -- it lives inside RepViTWrapper.getFeatureCode
+    so we can never accidentally normalize twice (e.g. if the runner reuses
+    embeddings cached under a different transform). 1-channel input is repeated
+    to 3 channels inside the wrapper as well.
+
+    Exp1 is a frozen-backbone diagnostic; train=True is provided for symmetry
+    with get_scr_transforms but should not be needed in this codebase.
+    """
+    if not train:
+        return T.Compose([
+            T.Resize((int(imside), int(imside))),
+            T.ToTensor(),
+        ])
+    return T.Compose([
+        T.Resize((int(imside), int(imside))),
+        T.RandomHorizontalFlip(p=0.5),
+        T.ToTensor(),
+    ])
