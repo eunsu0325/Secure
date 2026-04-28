@@ -304,6 +304,7 @@ def write_summary(
     summary["sanity_pass"] = bool(sanity.get("all_pass", sanity.get("sanity_pass", False)))
 
     b_final_key, b_final = _get_b_final(full, final_gallery_size)
+    split_meta = full.get("external_eval_split", {}) or {}
     if b_final:
         summary["external_identity_count"] = int(
             b_final.get("external_identity_count", b_final.get("n_external", 0)) or 0
@@ -313,6 +314,22 @@ def write_summary(
         )
         summary["external_test_probe_count"] = int(
             b_final.get("external_test_probe_count", b_final.get("n_external_test_probes", 0)) or 0
+        )
+        summary["external_dev_identity_count"] = int(
+            b_final.get("external_dev_identity_count",
+                        split_meta.get("external_dev_identity_count", 0)) or 0
+        )
+        summary["external_test_identity_count"] = int(
+            b_final.get("external_test_identity_count",
+                        split_meta.get("external_test_identity_count", 0)) or 0
+        )
+    elif split_meta:
+        # B-final missing — fall back to runner-level external_eval_split block
+        summary["external_dev_identity_count"] = int(
+            split_meta.get("external_dev_identity_count", 0) or 0
+        )
+        summary["external_test_identity_count"] = int(
+            split_meta.get("external_test_identity_count", 0) or 0
         )
 
     # ---- A: closed-set rank-1 ----

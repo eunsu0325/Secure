@@ -108,6 +108,11 @@ def split_external_identities_for_calibration(
     Returns dict with 'external_dev_ids' and 'external_test_ids' (both sorted).
     """
     external_ids_sorted = sorted(external_ids)
+    if len(external_ids_sorted) < min_dev + min_test:
+        raise ValueError(
+            f"Need at least {min_dev + min_test} external IDs for "
+            f"identity-level dev/test split, got {len(external_ids_sorted)}"
+        )
     rng = np.random.RandomState(seed + fixed_offset)
     shuffled = rng.permutation(external_ids_sorted)
 
@@ -390,26 +395,14 @@ def main():
     splits_dir.mkdir(parents=True, exist_ok=True)
     save_results(identity_split, str(splits_dir / 'identity_split.json'))
 
-    # Split external_ids into dev (calibration) and test (evaluation)
+    # Split external_ids into dev (calibration) and test (evaluation).
+    # Compute in memory only — validation requires sample_split (loaded in STEP 3),
+    # so the JSON file is persisted only after validation passes.
     external_eval_split_dict = split_external_identities_for_calibration(
         identity_split['external_ids'], seed
     )
     external_dev_ids = external_eval_split_dict['external_dev_ids']
     external_test_ids = external_eval_split_dict['external_test_ids']
-    validate_external_eval_split(
-        identity_split['external_ids'],
-        external_dev_ids, external_test_ids,
-        identity_split['base_ids'], identity_split['future_ids'],
-        {}  # sample_split will be loaded later; for now just validate structure
-    )
-    save_results({
-        'external_dev_ids': external_dev_ids,
-        'external_test_ids': external_test_ids,
-        'seed': external_eval_split_dict['seed'],
-        'fixed_offset': external_eval_split_dict['fixed_offset'],
-        'dev_fraction': external_eval_split_dict['dev_fraction'],
-        'source_external_ids_count': external_eval_split_dict['source_external_ids_count'],
-    }, str(splits_dir / 'external_eval_split.json'))
 
     # Gallery schedule 빌드 + 저장 (always recomputed; deterministic given splits)
     gallery_schedule = build_gallery_schedule(
@@ -469,6 +462,27 @@ def main():
         save_results({"source": "random_fallback_debug", "seed": seed}, str(splits_dir / 'sample_split_source.json'))
     save_results({str(k): v for k, v in sample_split.items()},
                  str(splits_dir / 'sample_split.json'))
+
+    # Validate external dev/test split now that sample_split is populated.
+    # Defensive int-coercion: validator compares int uids against sample_split
+    # keys, so any future loader change that leaves str keys must not silently
+    # break the coverage check.
+    sample_split_int_keys = {int(k): v for k, v in sample_split.items()}
+    validate_external_eval_split(
+        identity_split['external_ids'],
+        external_dev_ids, external_test_ids,
+        identity_split['base_ids'], identity_split['future_ids'],
+        sample_split_int_keys,
+    )
+    # Validation passed — persist the split as authoritative.
+    save_results({
+        'external_dev_ids': external_dev_ids,
+        'external_test_ids': external_test_ids,
+        'seed': external_eval_split_dict['seed'],
+        'fixed_offset': external_eval_split_dict['fixed_offset'],
+        'dev_fraction': external_eval_split_dict['dev_fraction'],
+        'source_external_ids_count': external_eval_split_dict['source_external_ids_count'],
+    }, str(splits_dir / 'external_eval_split.json'))
 
     # Copy upstream metadata.json into the run output for traceability.
     metadata_file = cfg['dataset'].get('metadata_file')
@@ -720,6 +734,15 @@ def main():
     # ============================================================
     full_results = {
         'config': cfg,
+        'external_eval_split': {
+            'external_dev_ids': [int(x) for x in external_dev_ids],
+            'external_test_ids': [int(x) for x in external_test_ids],
+            'external_dev_identity_count': len(external_dev_ids),
+            'external_test_identity_count': len(external_test_ids),
+            'seed': int(seed),
+            'fixed_offset': int(external_eval_split_dict['fixed_offset']),
+            'dev_fraction': float(external_eval_split_dict['dev_fraction']),
+        },
         'A': res_a,
         'B': {str(k): v for k, v in b_results.items()},
         'C_raw_fixed': {k: v for k, v in res_c_rf.items() if k != 'score_distributions'},

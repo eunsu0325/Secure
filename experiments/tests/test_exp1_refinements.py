@@ -14,6 +14,8 @@ os.environ.setdefault(
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EXPERIMENTS_DIR = PROJECT_ROOT / "experiments"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 if str(EXPERIMENTS_DIR) not in sys.path:
     sys.path.insert(0, str(EXPERIMENTS_DIR))
 
@@ -111,7 +113,7 @@ def test_b_final_additional_fpir_keys_are_computed(tmp_path):
     assert summary["B_final_achieved_external_fpir_at_0.4_fpir"] == pytest.approx(1.0)
 
 
-def test_protocol_static_result_score_aliases_match():
+def test_protocol_static_result_score_aliases_match_with_external_dev_test_split():
     import torch
     from exp1_protocols import run_static_open_set
 
@@ -131,11 +133,17 @@ def test_protocol_static_result_score_aliases_match():
             "dev": np.asarray([[0.5, 0.5]], dtype=np.float32),
             "test": np.asarray([[0.5, 0.5], [0.4, 0.6]], dtype=np.float32),
         },
+        3: {
+            "enroll": np.asarray([[0.6, 0.4]], dtype=np.float32),
+            "dev": np.asarray([[0.6, 0.4]], dtype=np.float32),
+            "test": np.asarray([[0.6, 0.4], [0.7, 0.3]], dtype=np.float32),
+        },
     }
     result = run_static_open_set(
         embeddings=embeddings,
         gallery_ids=[0, 1],
-        external_ids=[2],
+        external_dev_ids=[2],
+        external_test_ids=[3],
         gallery_size_label=2,
         gallery_step_key="step_0",
         target_fpir=0.5,
