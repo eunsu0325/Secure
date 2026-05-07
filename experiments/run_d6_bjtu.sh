@@ -33,7 +33,7 @@ RESULTS_DIR="${OUT_DIR}/protocols"
 echo "1/3  Build BJTU manifest"
 python -m exp1_baselines.datasets.bjtu_manifest \
     --root "${BJTU_ROOT}" --out "${OUT_DIR}" \
-    --seed "${SPLIT_SEED}" --K "${K}" --enroll-seed "${ENROLL_SEED}"
+    --seed "${SPLIT_SEED}" --K "${K}" --enroll_seed "${ENROLL_SEED}"
 
 echo "2/3  Extract embeddings"
 EXTRACT_ARGS=(

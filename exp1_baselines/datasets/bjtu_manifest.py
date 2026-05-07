@@ -396,7 +396,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--K", type=int, default=3)
-    p.add_argument("--enroll-seed", type=int, default=0)
+    p.add_argument("--enroll_seed", type=int, default=0)
     args = p.parse_args(argv)
 
     manifest_path = build_bjtu_manifest(

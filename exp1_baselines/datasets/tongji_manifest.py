@@ -33,7 +33,7 @@ so they always agree with the role and need no separate logic.
 Usage:
     python -m exp1_baselines.datasets.tongji_manifest \
         --root /path/to/Tongji_ROI --out experiments/generated/tongji \
-        --seed 42 --K 3 --enroll-seed 0
+        --seed 42 --K 3 --enroll_seed 0
 """
 from __future__ import annotations
 
@@ -412,9 +412,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                    help="Output directory for manifest.csv + metadata.json")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--K", type=int, default=3)
-    p.add_argument("--enroll-seed", type=int, default=0)
+    p.add_argument("--enroll_seed", type=int, default=0)
     p.add_argument(
-        "--skip-file-integrity", action="store_true",
+        "--skip_file_integrity", action="store_true",
         help="Skip IER-5 file existence checks (test mode only)",
     )
     args = p.parse_args(argv)

@@ -63,7 +63,7 @@ python -m exp1_baselines.datasets.tongji_manifest \
     --out  "${MANIFEST_DIR}" \
     --seed "${SPLIT_SEED}" \
     --K    "${K}" \
-    --enroll-seed "${ENROLL_SEED}"
+    --enroll_seed "${ENROLL_SEED}"
 
 echo
 echo "==========================================="
