@@ -48,3 +48,6 @@ exp1_baselines/logs/
 
 # Logs
 *.log
+
+# MediaPipe model file (downloaded on demand)
+ROI/hand_landmarker.task

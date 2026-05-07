@@ -1,16 +1,20 @@
-"""BMPD Palmprint ROI Extractor.
+"""Palmprint ROI Extractor (BMPD + WebPalm-compatible).
 
-V1V2 골짜기 기반 Zhang 표준 방식으로 BMPD 손바닥 이미지에서 정사각형 ROI를 추출한다.
-F타입(전체손)은 MediaPipe Hands로 랜드마크 검출 → V1V2 ROI.
-S타입(클로즈업)은 MediaPipe 우회하고 중앙 정사각형 크롭.
+V1V2 골짜기 기반 Zhang 표준 방식으로 손바닥 이미지에서 정사각형 ROI를 추출한다.
+MediaPipe Hands로 랜드마크 검출 → V1V2 ROI; 실패 시 skin segmentation fallback.
 
-사용 예시 (Colab):
-    !unzip -q /content/drive/MyDrive/데이터셋/archive.zip -d /content
-    !pip install -q mediapipe tqdm
-    !python ROI/roi_extractor.py \\
-        --input  /content/BMPD \\
-        --output /content/output \\
-        --vis
+Modes:
+  - bmpd (default): expects BMPD filename `<3digit>_[FS]_[LR]_<idx>`
+  - generic: any filename; user_id = filename stem; L/R inferred from
+             MediaPipe handedness when available (else "unknown")
+
+사용 예시:
+    # BMPD
+    python ROI/roi_extractor.py --input /path/to/BMPD --output /path/to/out
+
+    # WebPalm (generic mode, 1-shot per ID)
+    python ROI/roi_extractor.py --input /path/to/palm_images \\
+        --output /path/to/webpalm_roi --mode generic --sizes 224
 """
 
 from __future__ import annotations
@@ -85,6 +89,7 @@ def _get_detector(level: Literal["high", "low"]):
 _CSV_FIELDS = [
     "filename", "user_id", "type", "hand", "index",
     "method", "roi_size_px", "rotation_deg", "status", "note",
+    "mp_handedness",
     "v1v2_dist_px", "v1v2_norm_ratio", "p5_p17_dist_px",
     "landmarks_in_bounds", "wrist_perp_score",
     "collinearity_score", "thumb_palm_alignment",
@@ -94,27 +99,70 @@ _CSV_FIELDS = [
 ]
 
 
-def parse_filename(path: Path) -> dict | None:
-    m = _FILENAME_RE.match(path.stem)
-    if m is None:
-        return None
-    return {
-        "user_id": m.group(1),
-        "type": m.group(2),
-        "hand": m.group(3),
-        "index": m.group(4),
-        "stem": path.stem,
-    }
+def parse_filename(path: Path, mode: str = "bmpd") -> dict | None:
+    """Extract metadata from a palm image filename.
+
+    Modes:
+      - "bmpd":    require `^(\\d{3})_([FS])_([LR])_(\\d+)$`
+      - "generic": any filename; user_id = stem, hand/type unknown.
+                   Hand will be inferred from MediaPipe later if possible.
+    """
+    if mode == "bmpd":
+        m = _FILENAME_RE.match(path.stem)
+        if m is None:
+            return None
+        return {
+            "user_id": m.group(1),
+            "type": m.group(2),
+            "hand": m.group(3),
+            "index": m.group(4),
+            "stem": path.stem,
+        }
+    if mode == "generic":
+        # Sanitize stem for use as a directory name (filesystem-safe).
+        stem = path.stem
+        # Some web-collected images may have URL-encoded names; keep them
+        # as-is so the original file→ID mapping is preserved.
+        return {
+            "user_id": stem,
+            "type": "G",
+            "hand": "U",
+            "index": "1",
+            "stem": stem,
+        }
+    raise ValueError(f"unknown mode: {mode!r}")
 
 
 def detect_landmarks(image_bgr: np.ndarray, level: Literal["high", "low"]):
+    """Detect 21-landmark hand pose. Returns landmarks only (legacy API)."""
+    return _detect_landmarks_with_handedness(image_bgr, level)[0]
+
+
+def _detect_landmarks_with_handedness(
+    image_bgr: np.ndarray, level: Literal["high", "low"]
+):
+    """Detect landmarks AND handedness. Returns (landmarks, handedness_str|None).
+
+    handedness_str ∈ {"L", "R", None}. MediaPipe reports the detected hand as
+    Left or Right based on the input image's mirror convention (image-side, not
+    physical-side). For palmprint ROI we map directly: "Left" -> "L", "Right"
+    -> "R". When the detector returns nothing, both are None.
+    """
     rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     detector = _get_detector(level)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
     result = detector.detect(mp_image)
     if not result.hand_landmarks:
-        return None
-    return result.hand_landmarks[0]
+        return None, None
+    lm = result.hand_landmarks[0]
+    handedness_str: str | None = None
+    if result.handedness and result.handedness[0]:
+        cat = result.handedness[0][0].category_name
+        if cat == "Left":
+            handedness_str = "L"
+        elif cat == "Right":
+            handedness_str = "R"
+    return lm, handedness_str
 
 
 def compute_roi_from_landmarks(lm, img_h: int, img_w: int) -> tuple[float, float, float, float]:
@@ -484,11 +532,18 @@ def _print_summary(rows: list[dict]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="BMPD Palmprint ROI Extractor")
-    p.add_argument("--input", type=str, required=True, help="BMPD 루트 폴더 경로")
+    p = argparse.ArgumentParser(description="Palmprint ROI Extractor (BMPD + WebPalm)")
+    p.add_argument("--input", type=str, required=True,
+                   help="입력 루트 폴더 경로 (BMPD root or WebPalm palm_images)")
     p.add_argument("--output", type=str, required=True, help="출력 루트 폴더 경로")
-    p.add_argument("--sizes", type=int, nargs="+", default=[128, 256], help="출력 해상도 리스트")
+    p.add_argument("--mode", type=str, default="bmpd", choices=["bmpd", "generic"],
+                   help="bmpd: BMPD 파일명 regex 사용 / "
+                        "generic: 모든 이미지 처리 (WebPalm 등)")
+    p.add_argument("--sizes", type=int, nargs="+", default=[128, 256],
+                   help="출력 해상도 리스트")
     p.add_argument("--vis", action="store_true", help="디버그 시각화 저장")
+    p.add_argument("--limit", type=int, default=None,
+                   help="처리할 이미지 수 제한 (trial run용)")
     return p.parse_args()
 
 
@@ -497,16 +552,29 @@ def main() -> None:
     input_root = Path(args.input)
     output_root = Path(args.output)
     output_root.mkdir(parents=True, exist_ok=True)
+    mode = args.mode
 
-    images = sorted({*input_root.rglob("*.JPG"), *input_root.rglob("*.jpg")})
-    print(f"총 {len(images)}개 이미지 발견")
+    # Generic mode also accepts .png / .jpeg / .bmp (WebPalm contains mixed types)
+    if mode == "generic":
+        patterns = ("*.JPG", "*.jpg", "*.JPEG", "*.jpeg", "*.PNG", "*.png", "*.bmp", "*.BMP")
+        images = set()
+        for pat in patterns:
+            images.update(input_root.rglob(pat))
+        images = sorted(images)
+    else:
+        images = sorted({*input_root.rglob("*.JPG"), *input_root.rglob("*.jpg")})
+
+    if args.limit:
+        images = images[: int(args.limit)]
+        print(f"--limit {args.limit} 적용")
+    print(f"총 {len(images)}개 이미지 처리 (mode={mode})")
 
     log_rows: list[dict] = []
 
     for img_path in tqdm(images, desc="ROI 추출"):
         meta: dict | None = None
         try:
-            meta = parse_filename(img_path)
+            meta = parse_filename(img_path, mode=mode)
             if meta is None:
                 log_rows.append(_err_row(img_path, "invalid_filename"))
                 continue
@@ -519,11 +587,15 @@ def main() -> None:
             img_h, img_w = image.shape[:2]
             note = ""
 
-            lm = detect_landmarks(image, "high")
+            lm, mp_handed = _detect_landmarks_with_handedness(image, "high")
             if lm is None:
-                lm = detect_landmarks(image, "low")
+                lm, mp_handed = _detect_landmarks_with_handedness(image, "low")
                 if lm is not None:
                     note = "low_confidence"
+
+            # generic mode: infer hand from MediaPipe handedness if available
+            if mode == "generic" and mp_handed:
+                meta["hand"] = mp_handed
 
             diag: dict = {}
             if lm is not None:
@@ -548,17 +620,22 @@ def main() -> None:
                 debug_path = output_root / "debug" / meta["user_id"] / f"{meta['stem']}_debug.jpg"
                 save_debug_vis(image, lm, cx, cy, size, angle, method, debug_path, diag, skin_ratio)
 
+            try:
+                idx_val = int(meta["index"])
+            except (ValueError, TypeError):
+                idx_val = meta["index"]
             row = {
                 "filename": meta["stem"],
                 "user_id": meta["user_id"],
                 "type": meta["type"],
                 "hand": meta["hand"],
-                "index": int(meta["index"]),
+                "index": idx_val,
                 "method": method,
                 "roi_size_px": int(size),
                 "rotation_deg": round(float(angle), 2),
                 "status": status,
                 "note": note,
+                "mp_handedness": mp_handed if mp_handed else "",
                 "roi_skin_ratio": skin_ratio,
                 "img_w": img_w,
                 "img_h": img_h,
