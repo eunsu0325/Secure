@@ -1,0 +1,50 @@
+# macOS metadata
+.DS_Store
+**/.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Experiment artifacts (large; keep out of git)
+*.npz
+*.pt
+*.pth
+*.ckpt
+
+# Local-only generated outputs
+exp1_baselines/embeddings/
+exp1_baselines/checkpoints/
+exp1_baselines/results/
+exp1_baselines/figures/
+exp1_baselines/manifests/
+experiments/generated/
+exp1_baselines/logs/
+
+# Logs
+*.log
