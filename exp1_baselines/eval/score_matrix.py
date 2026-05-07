@@ -161,6 +161,42 @@ class ScoreMatrix:
 # Prototype + score matrix construction
 # ---------------------------------------------------------------------------
 
+def select_enroll_sample_ids_per_palm(
+    palm_ids: Sequence[int],
+    palm_to_pool_size: Dict[int, int],
+    K: int,
+    enroll_seed: int,
+) -> Dict[int, List[int]]:
+    """Pick K enroll sample_ids per palm for a non-sessioned dataset (IER-7).
+
+    enroll_seed=0 returns the deterministic floor [0..K-1] for every palm.
+    enroll_seed≥1 deterministically shuffles each palm's `[0..pool-1]` using
+    a (palm_id, enroll_seed) entropy mix and takes the first K (sorted).
+
+    Raises if any palm's pool < K (eligibility should have caught this).
+    """
+    if K <= 0:
+        raise ValueError(f"K must be > 0, got {K}")
+    out: Dict[int, List[int]] = {}
+    for pid in palm_ids:
+        pid_int = int(pid)
+        n = int(palm_to_pool_size.get(pid_int, 0))
+        if n < K:
+            raise ValueError(
+                f"palm {pid_int}: pool size {n} < K={K} (eligibility "
+                "filter in manifest builder should have rejected this palm)"
+            )
+        if enroll_seed == 0:
+            out[pid_int] = list(range(K))
+            continue
+        seed = (pid_int * 1_000_003) ^ (int(enroll_seed) * 2_654_435_761) & 0xFFFF_FFFF
+        rng = np.random.default_rng(seed)
+        arr = np.arange(n, dtype=np.int64)
+        rng.shuffle(arr)
+        out[pid_int] = sorted(int(x) for x in arr[:K])
+    return out
+
+
 def build_prototypes(
     store: EmbeddingStore,
     palm_ids: Sequence[int],
@@ -169,6 +205,7 @@ def build_prototypes(
     enroll_session_id: Optional[str] = None,
     enroll_phase_id: Optional[str] = None,
     enroll_sample_ids: Optional[Sequence[int]] = None,
+    enroll_sample_ids_per_palm: Optional[Dict[int, Sequence[int]]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Mean-pool enrollment-session embeddings per palm, then L2-normalize.
 
@@ -190,15 +227,25 @@ def build_prototypes(
         proto_palm_id: [P] int64, sorted ascending
         proto_split:   [P] object, all entries == proto_split_name
     """
+    if enroll_sample_ids is not None and enroll_sample_ids_per_palm is not None:
+        raise ValueError(
+            "pass either `enroll_sample_ids` (sessioned global) or "
+            "`enroll_sample_ids_per_palm` (non-sessioned), not both"
+        )
+
     palm_ids_sorted = sorted(int(x) for x in palm_ids)
     proto_list = []
     proto_labels = []
     for pid in palm_ids_sorted:
+        per_palm_ids = (
+            enroll_sample_ids_per_palm.get(pid)
+            if enroll_sample_ids_per_palm is not None else enroll_sample_ids
+        )
         idx = store.select_indices(
             palm_ids=[pid],
             session_id=enroll_session_id,
             phase_id=enroll_phase_id,
-            sample_ids=enroll_sample_ids,
+            sample_ids=per_palm_ids,
         )
         if idx.size == 0:
             # Skip palms with zero enrollment images; caller should treat
@@ -242,19 +289,28 @@ def build_score_matrix(
     enroll_session_id: Optional[str] = None,
     enroll_phase_id: Optional[str] = None,
     enroll_sample_ids: Optional[Sequence[int]] = None,
+    enroll_sample_ids_per_palm: Optional[Dict[int, Sequence[int]]] = None,
     query_session_id: Optional[str] = None,
     query_phase_id: Optional[str] = None,
+    non_sessioned_complement_query: bool = False,
 ) -> ScoreMatrix:
     """Build the shared cosine score matrix used by Protocols A/B/C.
 
     Prototypes (cols): base_anchor + future palms ONLY (Hard Rule 3).
-    Queries (rows): all session2/S-phase queries from base_anchor + future
-                    + external_dev + external_test, tagged with `query_split`
-                    so any protocol can slice by row.
+    Queries (rows): all queries from the four eval splits, tagged with
+                    `query_split` so any protocol can slice by row.
 
-    For sessioned datasets, `query_session_id` filters rows to the query
-    session (Tongji "session2", BJTU phase "S"); pass None for IITD-style
-    non-sessioned where queries cover all images of a palm.
+    Two modes (driven by which enroll-selection arg is passed):
+
+    Sessioned (Tongji, BJTU): pass `enroll_sample_ids` (global list) along
+        with `enroll_session_id` / `enroll_phase_id` and `query_session_id` /
+        `query_phase_id`. Query rows are filtered by sample_role="query".
+
+    Non-sessioned (IITD): pass `enroll_sample_ids_per_palm` (palm_id → list)
+        and set `non_sessioned_complement_query=True`. base_anchor / future
+        query rows are derived per palm as the COMPLEMENT of that palm's
+        enroll selection (sample_role="candidate" filter). external_dev /
+        external_test continue to use sample_role="query" rows.
     """
     # ---- Prototypes (NO external_dev / external_test) ----
     proto_groups: List[Tuple[Sequence[int], str]] = [
@@ -270,6 +326,7 @@ def build_score_matrix(
             enroll_session_id=enroll_session_id,
             enroll_phase_id=enroll_phase_id,
             enroll_sample_ids=enroll_sample_ids,
+            enroll_sample_ids_per_palm=enroll_sample_ids_per_palm,
         )
         if p.shape[0] > 0:
             proto_chunks.append(p)
@@ -287,14 +344,62 @@ def build_score_matrix(
         proto_split = np.zeros((0,), dtype=object)
 
     # ---- Queries (all four eval splits, tagged) ----
-    query_groups: List[Tuple[Sequence[int], str]] = [
+    query_chunks, qpalm, qsamp, qsplit, qsession = [], [], [], [], []
+
+    def _append_block(idx: np.ndarray, name: str) -> None:
+        if idx.size == 0:
+            return
+        query_chunks.append(store.embeddings[idx])
+        qpalm.append(store.palm_id[idx])
+        qsamp.append(store.sample_id[idx])
+        qsplit.append(np.array([name] * idx.size, dtype=object))
+        qsession.append(store.session_id[idx])
+
+    # base_anchor / future queries
+    for ids, name in (
         (base_anchor_ids, "base_anchor"),
         (future_ids, "future"),
+    ):
+        if not ids:
+            continue
+        if non_sessioned_complement_query:
+            if enroll_sample_ids_per_palm is None:
+                raise ValueError(
+                    "non_sessioned_complement_query=True requires "
+                    "enroll_sample_ids_per_palm to derive the per-palm "
+                    "query complement"
+                )
+            # Per palm: queries = candidate-role rows whose sample_id is
+            # NOT in the palm's enroll selection.
+            for pid in sorted(int(x) for x in ids):
+                enroll_set = set(int(x) for x in
+                                  enroll_sample_ids_per_palm.get(pid, []))
+                # All candidate sample_ids for this palm
+                all_idx = store.select_indices(
+                    palm_ids=[pid], sample_role="candidate",
+                )
+                # Filter to those NOT in enroll_set
+                if all_idx.size == 0:
+                    continue
+                query_idx = np.array([
+                    i for i in all_idx
+                    if int(store.sample_id[i]) not in enroll_set
+                ], dtype=np.int64)
+                _append_block(query_idx, name)
+        else:
+            idx = store.select_indices(
+                palm_ids=ids,
+                session_id=query_session_id,
+                phase_id=query_phase_id,
+                sample_role="query",
+            )
+            _append_block(idx, name)
+
+    # external_dev / external_test queries (always sample_role=query)
+    for ids, name in (
         (external_dev_ids, "external_dev"),
         (external_test_ids, "external_test"),
-    ]
-    query_chunks, qpalm, qsamp, qsplit, qsession = [], [], [], [], []
-    for ids, name in query_groups:
+    ):
         if not ids:
             continue
         idx = store.select_indices(
@@ -303,13 +408,7 @@ def build_score_matrix(
             phase_id=query_phase_id,
             sample_role="query",
         )
-        if idx.size == 0:
-            continue
-        query_chunks.append(store.embeddings[idx])
-        qpalm.append(store.palm_id[idx])
-        qsamp.append(store.sample_id[idx])
-        qsplit.append(np.array([name] * idx.size, dtype=object))
-        qsession.append(store.session_id[idx])
+        _append_block(idx, name)
 
     if not query_chunks:
         raise RuntimeError(

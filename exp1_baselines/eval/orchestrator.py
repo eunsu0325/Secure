@@ -48,7 +48,11 @@ from exp1_baselines.eval.protocols import (
     run_protocol_c_fixed,
     run_protocol_c_recal,
 )
-from exp1_baselines.eval.score_matrix import EmbeddingStore, build_score_matrix
+from exp1_baselines.eval.score_matrix import (
+    EmbeddingStore,
+    build_score_matrix,
+    select_enroll_sample_ids_per_palm,
+)
 
 
 def deterministic_future_order(
@@ -94,6 +98,17 @@ def _to_jsonable(obj):
     return obj
 
 
+def _palm_to_pool_size_from_store(
+    store: EmbeddingStore, palm_ids: Sequence[int],
+) -> Dict[int, int]:
+    """Count `sample_role=candidate` rows per palm (IITD enrollment pool)."""
+    out: Dict[int, int] = {}
+    for pid in palm_ids:
+        idx = store.select_indices(palm_ids=[int(pid)], sample_role="candidate")
+        out[int(pid)] = int(idx.size)
+    return out
+
+
 def run_orchestrator(
     *,
     embeddings_npz: Path,
@@ -109,8 +124,15 @@ def run_orchestrator(
     query_session_id: Optional[str] = "session2",
     query_phase_id: Optional[str] = None,
     sessioned_K_pool: int = 10,
+    non_sessioned: bool = False,
 ) -> Dict[str, object]:
-    """Run all four protocols + B==C-recal sanity. Returns a meta dict."""
+    """Run all four protocols + B==C-recal sanity. Returns a meta dict.
+
+    Set `non_sessioned=True` for IITD-style datasets: enroll selection becomes
+    per-palm (deterministic from `enroll_seed` + per-palm pool size), and
+    base/future query rows are derived as the per-palm complement of the
+    enroll selection. external_dev / external_test still use sample_role="query".
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -129,14 +151,27 @@ def run_orchestrator(
 
     future_order = deterministic_future_order(future_palm_ids, order_seed)
 
-    enroll_sample_ids = (
-        select_enroll_sample_ids_sessioned(K, enroll_seed, sessioned_K_pool)
-        if enroll_session_id is not None or enroll_phase_id is not None
-        else None
-    )
+    # ---- enroll selection (sessioned global vs non-sessioned per-palm) ----
+    store = EmbeddingStore.from_npz(embeddings_npz)
+    enroll_sample_ids: Optional[List[int]] = None
+    enroll_sample_ids_per_palm: Optional[Dict[int, List[int]]] = None
+    palm_to_pool_size: Dict[int, int] = {}
+
+    if non_sessioned:
+        all_eval_palms = list(set(base_anchor_ids) | set(future_palm_ids))
+        palm_to_pool_size = _palm_to_pool_size_from_store(store, all_eval_palms)
+        enroll_sample_ids_per_palm = select_enroll_sample_ids_per_palm(
+            palm_ids=all_eval_palms,
+            palm_to_pool_size=palm_to_pool_size,
+            K=K, enroll_seed=enroll_seed,
+        )
+    else:
+        if enroll_session_id is not None or enroll_phase_id is not None:
+            enroll_sample_ids = select_enroll_sample_ids_sessioned(
+                K, enroll_seed, sessioned_K_pool,
+            )
 
     # ---- score matrix ----
-    store = EmbeddingStore.from_npz(embeddings_npz)
     sm = build_score_matrix(
         store,
         base_anchor_ids=base_anchor_ids,
@@ -146,8 +181,10 @@ def run_orchestrator(
         enroll_session_id=enroll_session_id,
         enroll_phase_id=enroll_phase_id,
         enroll_sample_ids=enroll_sample_ids,
+        enroll_sample_ids_per_palm=enroll_sample_ids_per_palm,
         query_session_id=query_session_id,
         query_phase_id=query_phase_id,
+        non_sessioned_complement_query=non_sessioned,
     )
 
     t_max = len(future_order)
@@ -213,7 +250,10 @@ def run_orchestrator(
         "K": K,
         "order_seed": order_seed,
         "enroll_seed": enroll_seed,
+        "non_sessioned": non_sessioned,
         "enroll_sample_ids": enroll_sample_ids,
+        "enroll_sample_ids_per_palm": enroll_sample_ids_per_palm,
+        "palm_to_pool_size": palm_to_pool_size,
         "enroll_session_id": enroll_session_id,
         "enroll_phase_id": enroll_phase_id,
         "query_session_id": query_session_id,
@@ -252,6 +292,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--query_phase", type=str, default="")
     p.add_argument("--sessioned_K_pool", type=int, default=10,
                    help="Total imgs in enrollment session per palm (Tongji=10).")
+    p.add_argument("--non_sessioned", action="store_true",
+                   help="Use IITD-style per-palm enroll selection + complement queries.")
     args = p.parse_args(argv)
 
     def _opt(s: str) -> Optional[str]:
@@ -273,6 +315,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         query_session_id=_opt(args.query_session),
         query_phase_id=_opt(args.query_phase),
         sessioned_K_pool=args.sessioned_K_pool,
+        non_sessioned=args.non_sessioned,
     )
     print(json.dumps({
         "sanity": meta["b_vs_c_recal_endpoint_sanity"],
