@@ -1,0 +1,40 @@
+# MobileFaceNet + ArcFace, scratch training on Tongji ROI 112x112
+# Identity-disjoint baseline (Protocol A/B/C analysis)
+
+model:
+  name: mfn
+  architecture: mobilefacenet
+  embedding_dim: 512
+
+dataset:
+  name: tongji_roi_baselines
+  manifest_dir: exp1_baselines/manifests
+  image_size: 112
+  channels: 3
+  normalize_mean: [0.5, 0.5, 0.5]
+  normalize_std: [0.5, 0.5, 0.5]
+
+arcface:
+  margin: 0.5
+  scale: 48.0
+  eps: 1.0e-7
+
+train:
+  epochs: 50
+  batch_size: 128
+  P: 32        # identities per batch (P*K = batch_size)
+  K: 4         # samples per identity per batch
+  num_workers: 4
+  optimizer: sgd
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 1.0e-4
+  warmup_epochs: 1
+  scheduler: cosine
+  amp: false
+  seed: 42
+  log_interval: 10
+
+output:
+  checkpoint_path: exp1_baselines/checkpoints/mfn_arcface_tongji_scratch_112.pt
+  log_dir: exp1_baselines/checkpoints/mfn_logs
