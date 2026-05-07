@@ -33,6 +33,7 @@ from exp1_baselines.eval.metrics import (
     compute_known_metrics,
     min_observable_fpir,
     reliability_flag,
+    wilson_ci,
 )
 from exp1_baselines.eval.score_matrix import (
     ScoreMatrix,
@@ -295,7 +296,9 @@ def run_protocol_a(
                 "t": int(t),
                 "gallery_size": len(enrolled),
                 "rank1": float("nan"),
+                "rank1_correct": 0,
                 "rank1_total": 0,
+                "rank1_ci95": (float("nan"), float("nan")),
             })
             continue
         top1_palm, _ = argmax_with_tiebreak(sliced, g_palm)
@@ -307,6 +310,7 @@ def run_protocol_a(
             "rank1": correct / n,
             "rank1_correct": correct,
             "rank1_total": n,
+            "rank1_ci95": wilson_ci(correct, n),
         })
     return results
 
