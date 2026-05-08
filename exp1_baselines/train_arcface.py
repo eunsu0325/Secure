@@ -221,7 +221,14 @@ def main(argv=None) -> int:
     seed = int(cfg["train"]["seed"])
     set_all_seeds(seed)
 
-    device_str = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device:
+        device_str = args.device
+    elif torch.cuda.is_available():
+        device_str = "cuda"
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device_str = "mps"
+    else:
+        device_str = "cpu"
     device = torch.device(device_str)
     print(f"[device] {device}")
     print(f"[git_commit] {get_git_commit()}")
