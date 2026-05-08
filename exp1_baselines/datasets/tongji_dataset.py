@@ -1,11 +1,22 @@
 """Tongji ROI dataset for exp1_baselines.
 
-Image transform pipeline:
-  1. Load BMP (grayscale or RGB)
-  2. Convert to 3-channel RGB if needed
-  3. Resize to 112x112
-  4. ToTensor (uint8 → float in [0,1])
-  5. Normalize with mean=[0.5,0.5,0.5], std=[0.5,0.5,0.5] → final range [-1, 1]
+Image transform pipeline (per-backbone):
+  MFN-ArcFace / IR50:
+    1. Load BMP (grayscale or RGB)
+    2. Convert to 3-channel RGB
+    3. Resize to 112x112
+    4. ToTensor (uint8 -> float in [0,1])
+    5. Normalize with mean=[0.5,0.5,0.5], std=[0.5,0.5,0.5] -> [-1, 1]
+  CCNet-ArcFace:
+    1. Load BMP (grayscale or RGB)
+    2. Convert to 1-channel grayscale (PIL "L" mode, ITU-R 601-2 luma)
+    3. Resize to 128x128 (CCNet author native; FC layer is hardcoded for 128)
+    4. ToTensor
+    5. Normalize with mean=[0.5], std=[0.5] -> [-1, 1] (same dynamics as MFN)
+
+Both backbones see the same underlying grayscale palmprint information; MFN
+replicates gray to 3 channels (no info added) while CCNet keeps it as 1
+channel. The [-1,1] value range is shared.
 """
 from __future__ import annotations
 
@@ -20,20 +31,35 @@ from torch.utils.data import Dataset, Sampler
 from torchvision import transforms
 
 
-def build_baseline_transform(image_size: int = 112) -> transforms.Compose:
+def build_baseline_transform(
+    image_size: int = 112,
+    channels: int = 3,
+) -> transforms.Compose:
+    """Return the per-backbone preprocessing transform.
+
+    Args:
+        image_size: spatial size after Resize. 112 for MFN/IR50, 128 for CCNet.
+        channels: number of input channels (1 for CCNet, 3 for MFN/IR50).
+    """
+    if channels not in (1, 3):
+        raise ValueError(f"channels must be 1 or 3, got {channels}")
+    norm_mean = [0.5] * channels
+    norm_std = [0.5] * channels
     return transforms.Compose([
         transforms.Resize((image_size, image_size)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+        transforms.Normalize(mean=norm_mean, std=norm_std),
     ])
 
 
 class TongjiROIDataset(Dataset):
-    """Generic Tongji ROI dataset reading (image_path, label) pairs.
+    """Generic ROI dataset reading (image_path, label) pairs.
 
     Args:
         records: list of (absolute_path, label) tuples.
         transform: torchvision transform applied to each loaded image.
+        image_size: passed to default transform when transform is None.
+        channels: 1 (grayscale, for CCNet) or 3 (RGB, for MFN/IR50).
     """
 
     def __init__(
@@ -41,24 +67,29 @@ class TongjiROIDataset(Dataset):
         records: Sequence[Tuple[str, int]],
         transform: Optional[transforms.Compose] = None,
         image_size: int = 112,
+        channels: int = 3,
     ) -> None:
         self.records: List[Tuple[str, int]] = [
             (str(p), int(l)) for p, l in records
         ]
-        self.transform = transform if transform is not None else build_baseline_transform(image_size)
+        self.channels = int(channels)
+        if transform is None:
+            transform = build_baseline_transform(image_size, channels=self.channels)
+        self.transform = transform
 
     def __len__(self) -> int:
         return len(self.records)
 
-    def _load_rgb(self, path: str) -> Image.Image:
+    def _load(self, path: str) -> Image.Image:
         img = Image.open(path)
-        if img.mode != "RGB":
-            img = img.convert("RGB")
+        target_mode = "RGB" if self.channels == 3 else "L"
+        if img.mode != target_mode:
+            img = img.convert(target_mode)
         return img
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int, str]:
         path, label = self.records[idx]
-        img = self._load_rgb(path)
+        img = self._load(path)
         x = self.transform(img)
         return x, int(label), path
 

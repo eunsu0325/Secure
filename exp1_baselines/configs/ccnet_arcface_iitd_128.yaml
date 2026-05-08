@@ -1,0 +1,45 @@
+# CCNet (Yang et al. 2023) + ArcFace, scratch training on IITD Segmented ROI 128x128.
+#
+# Same recipe as ccnet_arcface_tongji_128.yaml; only manifest_dir + checkpoint
+# paths differ. See that file for the rationale + plan §IER-9 + fairness audit.
+
+model:
+  name: ccnet
+  architecture: ccnet
+  embedding_dim: 6144
+  backbone_kwargs:
+    weight: 0.8
+    use_dropout: false
+
+dataset:
+  name: iitd_roi_baselines
+  manifest_dir: experiments/generated/iitd_full
+  image_size: 128
+  channels: 1
+  normalize_mean: [0.5]
+  normalize_std: [0.5]
+
+arcface:
+  margin: 0.5
+  scale: 48.0
+  eps: 1.0e-7
+
+train:
+  epochs: 50
+  batch_size: 128
+  P: 32
+  K: 4
+  num_workers: 4
+  optimizer: sgd
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 1.0e-4
+  warmup_epochs: 1
+  scheduler: cosine
+  amp: false
+  seed: 42
+  log_interval: 10
+
+output:
+  checkpoint_path: experiments/generated/iitd_full/ccnet_arcface_iitd_scratch_128.pt
+  log_dir: experiments/generated/iitd_full/ccnet_logs

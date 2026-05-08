@@ -26,7 +26,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -40,6 +40,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from exp1_baselines.backbones.mobilefacenet import MobileFaceNet
 from exp1_baselines.backbones.iresnet import iresnet50
+from exp1_baselines.backbones.ccnet import ccnet
 from exp1_baselines.losses.arcface import ArcFaceHead
 from exp1_baselines.datasets.tongji_dataset import (
     TongjiROIDataset,
@@ -71,12 +72,38 @@ def get_git_commit() -> str:
         return "unknown"
 
 
-def build_backbone(architecture: str, embedding_dim: int) -> nn.Module:
+def build_backbone(
+    architecture: str,
+    embedding_dim: int,
+    backbone_kwargs: Optional[Dict] = None,
+) -> nn.Module:
+    """Construct a backbone module by architecture name.
+
+    Args:
+        architecture: one of {mobilefacenet, mfn, iresnet50, ir50, ccnet}.
+        embedding_dim: feature dim. For ccnet this is fixed at 6144 by the
+            architecture (verified internally; mismatch raises).
+        backbone_kwargs: optional architecture-specific overrides
+            (e.g., {"weight": 0.8, "use_dropout": false} for ccnet).
+    """
     arch = architecture.lower()
+    backbone_kwargs = backbone_kwargs or {}
     if arch in {"mobilefacenet", "mfn"}:
         return MobileFaceNet(embedding_dim=embedding_dim)
     elif arch in {"iresnet50", "ir50"}:
         return iresnet50(num_features=embedding_dim)
+    elif arch == "ccnet":
+        net = ccnet(
+            weight=float(backbone_kwargs.get("weight", 0.8)),
+            use_dropout=bool(backbone_kwargs.get("use_dropout", False)),
+        )
+        if int(net.embedding_dim) != int(embedding_dim):
+            raise ValueError(
+                f"ccnet embedding_dim is fixed at {net.embedding_dim} "
+                f"by the architecture; config requested {embedding_dim}. "
+                f"Set embedding_dim: {net.embedding_dim} in the config."
+            )
+        return net
     else:
         raise ValueError(f"unknown architecture: {architecture}")
 
@@ -213,8 +240,11 @@ def main(argv=None) -> int:
         print(f"[smoke] truncated to {len(records)} images")
 
     image_size = int(cfg["dataset"]["image_size"])
-    transform = build_baseline_transform(image_size=image_size)
-    dataset = TongjiROIDataset(records, transform=transform, image_size=image_size)
+    channels = int(cfg["dataset"].get("channels", 3))
+    transform = build_baseline_transform(image_size=image_size, channels=channels)
+    dataset = TongjiROIDataset(
+        records, transform=transform, image_size=image_size, channels=channels,
+    )
 
     P = int(cfg["train"]["P"])
     K = int(cfg["train"]["K"])
@@ -244,7 +274,10 @@ def main(argv=None) -> int:
     )
 
     embedding_dim = int(cfg["model"]["embedding_dim"])
-    backbone = build_backbone(cfg["model"]["architecture"], embedding_dim).to(device)
+    backbone_kwargs = cfg["model"].get("backbone_kwargs", {}) or {}
+    backbone = build_backbone(
+        cfg["model"]["architecture"], embedding_dim, backbone_kwargs,
+    ).to(device)
     arcface_head = ArcFaceHead(
         embedding_dim=embedding_dim,
         num_classes=num_classes,

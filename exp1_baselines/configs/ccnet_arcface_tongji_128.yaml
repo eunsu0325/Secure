@@ -1,0 +1,66 @@
+# CCNet (Yang et al. 2023) + ArcFace, scratch training on Tongji ROI 128x128.
+#
+# Plan §IER-9 + multi-backbone fairness lock (Option A):
+#   - Same ArcFace recipe as MFN-ArcFace (s=48, m=0.5)
+#   - Same optimizer (SGD lr=0.01 mom=0.9 wd=1e-4)
+#   - Same scheduler (cosine + 1-epoch warmup)
+#   - Same batch composition (PxK = 32x4 = 128)
+#   - Same epochs (50) and seed (42)
+#   - Same train_backbone identity split (split_seed=42)
+# Differences from MFN that are *architecturally required* (preserved verbatim):
+#   - Input resolution: 128x128 (CCNet FC layer is hardcoded for 128 input)
+#   - Input channels: 1 (CCNet author input)
+#   - Embedding dim: 6144 (CCNet author output: concat(fc->4096, fc1->2048))
+# Differences from CCNet author original (documented for paper):
+#   - CCNet original ALSO uses ArcFace, with s=30, m=0.5, head input = 2048-D fc1
+#     output (post-dropout). Our wrapper:
+#       (a) replaces the built-in ArcMarginProduct with our shared ArcFaceHead
+#       (b) uses ArcFace s=48 (vs original s=30) for MFN-ArcFace recipe parity
+#       (c) feeds the 6144-D fe (the released inference embedding) as the head
+#           input, unifying train and inference paths (original used 2048-D h2
+#           for training and 6144-D fe for inference)
+#       (d) disables the original Dropout(p=0.5) by default; the original
+#           dropout was on the 2048-D h2 head-path, which (c) replaces. The
+#           appendix sanity variant use_dropout=true applies dropout to h2
+#           BEFORE the concat-into-fe.
+
+model:
+  name: ccnet
+  architecture: ccnet
+  embedding_dim: 6144         # fixed by CCNet architecture; do NOT change
+  backbone_kwargs:
+    weight: 0.8               # CCNet author's competitive weight (released config)
+    use_dropout: false        # plan §IER-9 + reviewer-fairness audit: explicit
+
+dataset:
+  name: tongji_roi_baselines
+  manifest_dir: experiments/generated/tongji_full
+  image_size: 128             # CCNet architecture-native; cannot be 112
+  channels: 1                 # grayscale (CCNet author input)
+  normalize_mean: [0.5]
+  normalize_std: [0.5]
+
+arcface:
+  margin: 0.5                 # MFN-ArcFace parity
+  scale: 48.0                 # MFN-ArcFace parity (NOT CCNet original s=30; documented in paper)
+  eps: 1.0e-7
+
+train:
+  epochs: 50                  # MFN parity
+  batch_size: 128             # MFN parity
+  P: 32                       # identities per batch
+  K: 4                        # samples per identity per batch
+  num_workers: 4
+  optimizer: sgd
+  lr: 0.01                    # MFN parity
+  momentum: 0.9
+  weight_decay: 1.0e-4
+  warmup_epochs: 1
+  scheduler: cosine
+  amp: false
+  seed: 42
+  log_interval: 10
+
+output:
+  checkpoint_path: experiments/generated/tongji_full/ccnet_arcface_tongji_scratch_128.pt
+  log_dir: experiments/generated/tongji_full/ccnet_logs

@@ -47,6 +47,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from exp1_baselines.backbones.mobilefacenet import MobileFaceNet
 from exp1_baselines.backbones.iresnet import iresnet50
+from exp1_baselines.backbones.ccnet import ccnet
 from exp1_baselines.datasets.manifest_io import get_eval_records, load_manifest
 from exp1_baselines.datasets.tongji_dataset import (
     TongjiROIDataset,
@@ -54,12 +55,28 @@ from exp1_baselines.datasets.tongji_dataset import (
 )
 
 
-def build_backbone(architecture: str, embedding_dim: int) -> torch.nn.Module:
+def build_backbone(
+    architecture: str,
+    embedding_dim: int,
+    backbone_kwargs: dict | None = None,
+) -> torch.nn.Module:
     arch = architecture.lower()
+    backbone_kwargs = backbone_kwargs or {}
     if arch in {"mobilefacenet", "mfn"}:
         return MobileFaceNet(embedding_dim=embedding_dim)
     elif arch in {"iresnet50", "ir50"}:
         return iresnet50(num_features=embedding_dim)
+    elif arch == "ccnet":
+        net = ccnet(
+            weight=float(backbone_kwargs.get("weight", 0.8)),
+            use_dropout=bool(backbone_kwargs.get("use_dropout", False)),
+        )
+        if int(net.embedding_dim) != int(embedding_dim):
+            raise ValueError(
+                f"ccnet embedding_dim is fixed at {net.embedding_dim} "
+                f"by the architecture; checkpoint requested {embedding_dim}."
+            )
+        return net
     else:
         raise ValueError(f"unknown architecture: {architecture}")
 
@@ -104,14 +121,17 @@ def collect_eval_records(manifest_dir: Path) -> List[dict]:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Extract embeddings for exp1_baselines")
-    parser.add_argument("--model", required=True, choices=["mfn", "ir50"])
+    parser.add_argument("--model", required=True, choices=["mfn", "ir50", "ccnet"])
     parser.add_argument("--checkpoint", required=True, type=str)
     parser.add_argument("--manifest_dir", required=True, type=str)
     parser.add_argument("--output_npz", required=True, type=str)
     parser.add_argument("--batch_size", default=64, type=int)
     parser.add_argument("--num_workers", default=4, type=int)
     parser.add_argument("--device", default=None, type=str)
-    parser.add_argument("--image_size", default=112, type=int)
+    parser.add_argument("--image_size", default=None, type=int,
+                        help="If unset, auto-derive from checkpoint config.")
+    parser.add_argument("--channels", default=None, type=int,
+                        help="If unset, auto-derive from checkpoint config.")
     args = parser.parse_args(argv)
 
     device_str = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -124,10 +144,17 @@ def main(argv=None) -> int:
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     arch = ckpt["config"]["model"]["architecture"]
     embedding_dim = int(ckpt.get("embedding_dim", 512))
+    backbone_kwargs = ckpt["config"]["model"].get("backbone_kwargs", {}) or {}
+    cfg_dataset = ckpt["config"].get("dataset", {})
+    image_size = int(args.image_size) if args.image_size is not None \
+        else int(cfg_dataset.get("image_size", 112))
+    channels = int(args.channels) if args.channels is not None \
+        else int(cfg_dataset.get("channels", 3))
     print(f"[ckpt] arch={arch}, embedding_dim={embedding_dim}, "
+          f"image_size={image_size}, channels={channels}, "
           f"epochs_completed={ckpt.get('epochs_completed', '?')}")
 
-    backbone = build_backbone(arch, embedding_dim).to(device)
+    backbone = build_backbone(arch, embedding_dim, backbone_kwargs).to(device)
     backbone.load_state_dict(ckpt["backbone_state_dict"])
     backbone.eval()
 
@@ -139,12 +166,12 @@ def main(argv=None) -> int:
     print(f"[data] {n} evaluation images across "
           f"{len(set(r['subject_split'] for r in records))} subject_splits")
 
-    transform = build_baseline_transform(image_size=args.image_size)
+    transform = build_baseline_transform(image_size=image_size, channels=channels)
     # The dataset wrapper expects (path, label) pairs; we use palm_id as
     # the carried label (consumers don't rely on it — they read palm_id from NPZ).
     dataset = TongjiROIDataset(
         [(r["path"], r["palm_id"]) for r in records],
-        transform=transform, image_size=args.image_size,
+        transform=transform, image_size=image_size, channels=channels,
     )
     loader = DataLoader(
         dataset, batch_size=args.batch_size, shuffle=False,
