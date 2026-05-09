@@ -120,7 +120,7 @@ the enrollment-time adversary across three datasets.
   positive dependence (similar palms produce correlated scores). The IID case
   is a useful boundary; we will state both IID-strict and exchangeable results.
 
-### 4.2 Lemma 1 (Score monotonicity in gallery size)
+### 4.2 Lemma 1 (Score monotonicity in gallery size) — CENTRAL SECURITY THEOREM
 
 For every probe `x` and `m_2 ≥ m_1`,
 ```
@@ -133,7 +133,23 @@ greater than or equal to the maximum over the subset. ∎
 **Consequence.** The marginal CDF of `S_m` is monotone in `m`:
 `Pr[S_{m_2} ≤ τ] ≤ Pr[S_{m_1} ≤ τ]` for `m_2 ≥ m_1`.
 
-### 4.3 Lemma 2 (Limiting distribution under EVT)
+**Why this is the load-bearing result for our security claim.** Lemma 1 is
+**assumption-free** beyond the existence of a maximum (which holds for any
+finite gallery and any well-defined per-prototype score). It does NOT
+require:
+
+- a specific score distribution (Gaussian, sub-exponential, etc.),
+- independence or exchangeability across prototypes,
+- a particular tail behavior, or
+- convergence of any normalized statistic.
+
+Section 4.4 below uses Lemma 1 alone to prove that the realized FPIR under
+a static threshold strictly inflates as the gallery grows. The
+Extreme-Value-Theory (EVT) framework introduced in §4.3 is an **auxiliary
+modeling lens** that gives closed-form predictions of `τ_m` and inflation
+factors; it is NOT load-bearing for the security argument.
+
+### 4.3 Lemma 2 (Limiting distribution under EVT) — AUXILIARY MODELING LENS
 
 Suppose `{s(X, p_i)}_{i=1}^∞` is a stationary sequence with marginal CDF
 `F_s` and satisfies a long-range mixing condition `D(u_m)` of Leadbetter
@@ -160,92 +176,172 @@ This gives a closed-form approximation of the realized FPIR at threshold `τ`
 and gallery size `m`.
 
 **On exchangeability.** Strict IID is sufficient but not necessary; the EVT
-limit holds under weak mixing. Empirically, we verify in §4.5 that the
-fitted Gumbel parameters track observed `S_m` distributions on Tongji, IITD,
-and BJTU (KS-test `p > 0.05` at every step `t`).
+limit holds under weak mixing. The EVT family at the limit (Gumbel,
+Fréchet, or Weibull) is determined by the upper tail of `F_s`. Cosine
+similarity is bounded above by `1`, so `F_s` has a finite right endpoint;
+under sub-exponential decay this corresponds to the Gumbel domain, while
+polynomial decay near the endpoint can place the limit in the Weibull
+domain. We do **not** lock a single GEV family in this paper: §4.6 reports
+empirical fits per dataset.
+
+**Important framing**: this lemma serves only to support the closed-form
+modeling in §4.4-Aux and §4.5-Aux. The central security results in §4.4
+and §4.5 derive from Lemma 1 alone and do NOT depend on which GEV family
+applies, or even on whether the EVT limit holds.
 
 ### 4.4 Theorem 1 (Threshold drift is structural)
 
-Let `τ_m` denote the unique threshold satisfying `Pr[S_m ≥ τ_m] = α` (i.e.,
-the threshold that achieves the target FPIR at gallery size `m`). Then under
-the assumptions of Lemma 2:
+Let `τ_m` denote the threshold satisfying `Pr[S_m ≥ τ_m] = α` (i.e., the
+threshold that achieves the target FPIR at gallery size `m`).
 
-1. **Monotonicity.** For `m_2 > m_1`, `τ_{m_2} > τ_{m_1}` (strict).
-2. **Closed-form (Gumbel case).** Under the Gumbel limiting form,
-   ```
-   τ_m ≈ a_m - b_m · log(-log(1 - α))
-                ↑—— grows like F_s^{-1}(1 - 1/m), i.e., logarithmically in m
-   ```
+**Theorem 1a (load-bearing — uses only Lemma 1).** Assume `F_s` is continuous
+and strictly increasing on its support (no atoms at any candidate
+threshold). Then for `m_2 > m_1`,
+```
+τ_{m_2} > τ_{m_1}    (strict).
+```
 
-**Proof sketch.**
-1. Lemma 1 gives `Pr[S_{m_2} ≥ τ_{m_1}] ≥ Pr[S_{m_1} ≥ τ_{m_1}] = α`. Since
-   the CDF is continuous and strictly monotone on its support, the threshold
-   yielding exactly `α` at `m_2` must be strictly greater than `τ_{m_1}`.
-2. Solve `1 - G((τ - a_m) / b_m) = α` for `τ`, using the Gumbel CDF. ∎
+**Proof.** Lemma 1 gives `Pr[S_{m_2} ≥ τ_{m_1}] ≥ Pr[S_{m_1} ≥ τ_{m_1}] = α`.
+Since the CDF of `S_m` is continuous and strictly monotone on its support
+(inherited from `F_s` via the max), the threshold yielding exactly `α` at
+`m_2` must satisfy `τ_{m_2} > τ_{m_1}`. ∎
+
+**Note**: Theorem 1a uses no distributional assumption beyond continuity
+of `F_s`. It is the load-bearing result for the security argument in §4.5
+(Corollary 1a). Threshold drift is therefore a **structural property of any
+sequential-enrollment system with a continuous, non-degenerate score
+distribution** — independent of which EVT family applies, whether the EVT
+limit holds at all, or whether the prototypes are independent.
+
+**Theorem 1b (auxiliary closed form — uses Lemma 2 + Gumbel domain).** When
+`F_s` lies in the Gumbel domain of attraction with normalizing sequences
+`(a_m, b_m)`,
+```
+τ_m ≈ a_m - b_m · log(-log(1 - α))
+             ↑—— grows like F_s^{-1}(1 - 1/m), i.e., logarithmically in m.
+```
+
+**Proof.** Solve `1 - G((τ - a_m) / b_m) = α` for `τ`, using the Gumbel CDF
+`G(y) = exp(-exp(-y))`. ∎
+
+**Note**: Theorem 1b is a **closed-form approximation** that gives a
+quantitative growth rate when the Gumbel limit applies. If the score tail
+puts `F_s` in the Weibull or Fréchet domain, the closed form changes (still
+monotone, still increasing in `m`, but different growth rate). The Gumbel
+formula is reported here for the dataset-specific empirical fits in §4.6
+and the mitigation predictor in §7; it is not a load-bearing component of
+the central security claim.
 
 ### 4.5 Corollary 1 (Static-τ FPIR violation under enrollment growth)
 
 Suppose the system is calibrated at time `t = 0` with gallery size `m_0` and
-threshold `τ_0` chosen so that `Pr[S_{m_0} ≥ τ_0] = α`. If the gallery grows
-to `m_t > m_0` and the threshold is **not** updated, then the realized FPIR
-satisfies:
-```
-α(t) := Pr[S_{m_t} ≥ τ_0] > α.
-```
+threshold `τ_0` chosen so that `Pr[S_{m_0} ≥ τ_0] = α`.
 
-Under the Gumbel limit, the inflation factor is approximately
+**Corollary 1a (load-bearing — uses only Lemma 1).** If the gallery grows
+to `m_t > m_0` and the threshold is **not** updated, then for any `F_s` that
+is non-degenerate (i.e., assigns positive probability to scores at or above
+`τ_0`):
+```
+α(t) := Pr[S_{m_t} ≥ τ_0]  ≥  Pr[S_{m_0} ≥ τ_0]  =  α,
+```
+with strict inequality whenever `m_t > m_0` and `Pr[s(X, p) ≥ τ_0] > 0` for
+the new prototypes (i.e., the new prototypes contribute non-zero
+above-threshold mass).
+
+**Proof.** From Lemma 1, `S_{m_t} \geq S_{m_0}` pointwise, so
+`Pr[S_{m_t} ≥ τ_0] \geq Pr[S_{m_0} ≥ τ_0] = α`. Strict inequality follows
+when at least one of the added prototypes can attain a score above `τ_0`
+with positive probability. ∎
+
+**This is the central security claim**: any sequential-enrollment system
+with a continuous, non-degenerate score distribution suffers **at least
+weak FPIR inflation under static-τ deployment**, and **strict inflation**
+under any non-pathological score distribution. No distributional assumption,
+EVT limit, or independence assumption is required.
+
+**Corollary 1b (auxiliary quantitative inflation — uses Lemma 2 + Gumbel
+domain).** When `F_s` lies in the Gumbel domain, the inflation factor is
+approximately
 ```
 α(t) / α  ≈  exp((a_{m_t} - a_{m_0}) / b_{m_0})
-            = exp((F_s^{-1}(1 - 1/m_t) - F_s^{-1}(1 - 1/m_0)) / b_{m_0})
+            = exp((F_s^{-1}(1 - 1/m_t) - F_s^{-1}(1 - 1/m_0)) / b_{m_0}).
 ```
-which grows monotonically with `m_t / m_0`.
 
 **Numerical example (Gumbel with `b = 0.05`, base `m_0 = 30`).**
 - `m_t = 30   → α(t) / α = 1.0`
 - `m_t = 100  → α(t) / α ≈ 3.4`
 - `m_t = 1000 → α(t) / α ≈ 11`
 
-**Operational interpretation.** A deployment that certifies `α = 10⁻³` at
-`m_0 = 30` and lets the gallery grow to `m_t = 1000` will see realized FPIR
-on the order of `10⁻²`, an order-of-magnitude security regression that is
-invisible to the static endpoint protocol.
+**Operational interpretation.** Under the Gumbel approximation, a
+deployment that certifies `α = 10⁻³` at `m_0 = 30` and lets the gallery
+grow to `m_t = 1000` will see realized FPIR on the order of `10⁻²` — an
+order-of-magnitude security regression that is invisible to the static
+endpoint protocol. If `F_s` is in the Weibull domain, the multiplicative
+inflation factor grows more slowly with `m_t / m_0`; if in the Fréchet
+domain, more aggressively. Corollary 1a guarantees inflation in **all
+three** EVT regimes; Corollary 1b quantifies it specifically for the
+Gumbel case.
 
-### 4.6 Empirical validation (to be filled by experiments)
+### 4.6 Empirical analysis (descriptive — no pass/fail gates)
 
-Three checks demonstrate that the IID/exchangeable EVT framework captures
-the observed protocol effect on real data:
+Two empirical exercises support the theoretical results above. Per V14a,
+**no goodness-of-fit pass/fail gate is used**: KS or Anderson-Darling
+p-values are reported descriptively, not as decision criteria. The
+load-bearing security claims (Theorem 1a, Corollary 1a) do not depend on
+any GEV fit.
 
-1. **Goodness-of-fit.** For each (dataset, gallery_size_t), collect the
-   `external_dev` top-1 scores `{S_{m(t)}(x_j)}_j`. Fit a Gumbel distribution
-   by maximum likelihood; report KS / Anderson-Darling statistics. Hypothesis:
-   GoF accepted at α = 0.05 for every `(dataset, t)`.
+1. **GEV fit (Gumbel and Weibull) per dataset.** For each
+   `(dataset, gallery_size_t)`, collect `external_dev` top-1 scores
+   `{S_{m(t)}(x_j)}_j`. Fit Gumbel and Weibull distributions by maximum
+   likelihood; report log-likelihood, AIC, KS statistic, and AD statistic
+   for both fits side-by-side. Per V14a, we do not declare one fit
+   "accepted" and the other "rejected"; we report the better-fitting GEV
+   family per dataset and continue with closed-form predictions in §4.7
+   only when the better fit is reasonable.
 
-2. **Predicted vs observed `τ_m`.** Use the Gumbel parameters fitted at
-   `m_0` (small base anchor) to predict `τ̂_m` for `m > m_0` via Theorem 1.
-   Compare to `τ_m` observed by running C-recal directly. Hypothesis:
-   predicted falls within the Wilson 95% CI of the observed at every `t`.
+2. **Predicted vs observed `τ_m` and inflation factor (Gumbel-domain
+   datasets only).** For datasets where Gumbel is the better-fitting family,
+   use Gumbel parameters fitted at `m_0` to predict `τ̂_m` for `m > m_0`
+   via Theorem 1b, and predict `α̂(t) / α` via Corollary 1b. Compare to
+   C-recal observed `τ_m` and C-fixed observed `α(t) / α` respectively.
+   Report median absolute error and 95% Wilson CI agreement rate. **No
+   pass/fail gate**; the predictor is offered as one modeling tool, with
+   explicit caveats when fit quality is marginal.
 
-3. **Predicted vs observed inflation factor.** Use Corollary 1 to predict
-   `α(t) / α` under stale `τ_0` and compare to the C-fixed protocol's
-   observed realized FPIR ratio. Hypothesis: predicted matches observed
-   within multiplicative factor 2 across all `t` and all three datasets.
+The structural claim of Theorem 1a / Corollary 1a is independent of
+whether either prediction matches well: even if the closed-form formula is
+inaccurate, the fact that `τ_m` is strictly increasing and `α(t)` strictly
+inflates remains true and can be observed directly from C-recal trajectory
+data.
 
 ### 4.7 Why this matters for evaluation methodology
 
-Theorem 1 and Corollary 1 are not merely empirical observations; they show
-that under standard regularity conditions (continuous score distribution,
-mild dependence), threshold drift in sequential open-set identification is
-**structurally inevitable**. Any evaluation protocol that reports a single
-`(τ, FPIR)` pair at one gallery size therefore cannot certify the security
-of a deployment whose gallery size differs from the evaluation point. The
-trajectory-based protocol (Protocol C-recal in §5) exposes this structural
-behavior; the static endpoint protocol (Protocol B) hides it.
+The load-bearing results (Theorem 1a, Corollary 1a) require only:
+
+- a continuous, non-degenerate per-prototype score distribution `F_s`, and
+- the trivial monotonicity property `S_m = max_{i ≤ m} s(·, p_i)`.
+
+Under these minimal conditions, threshold drift in sequential open-set
+identification is **structurally inevitable**. Any evaluation protocol
+that reports a single `(τ, FPIR)` pair at one gallery size therefore
+cannot certify the security of a deployment whose gallery size differs
+from the evaluation point. The trajectory-based protocol (Protocol
+C-recal in §5) exposes this structural behavior; the static endpoint
+protocol (Protocol B) hides it.
 
 This argument elevates the gap between B and C from "an interesting
 empirical observation" to "a measurement-theoretic necessity": the static
 endpoint protocol *cannot* certify an operating point that requires
-threshold-stable behavior across gallery sizes, because no single threshold
-is stable in this sense.
+threshold-stable behavior across gallery sizes, because no single
+threshold is stable in this sense.
+
+**Robustness of the security claim**: because the load-bearing argument
+depends only on monotonicity and non-degeneracy, the result is **robust to
+the choice of GEV family** (Gumbel/Fréchet/Weibull) — and indeed robust
+to whether the EVT limit applies at all. A reviewer who challenges the
+specific Gumbel approximation in §4.4-Aux/§4.5-Aux does not undermine
+Theorem 1a/Corollary 1a; the closed-form approximation is auxiliary
+modeling, while the security claim itself is structural.
 
 ---
 
@@ -262,11 +358,21 @@ which we verify in §4.5.
 
 ### A2. Domain of attraction
 
-For cosine similarity bounded above by 1, the upper tail of `F_s` typically
-exhibits sub-exponential decay → Gumbel domain of attraction. Heavy-tailed
-score distributions (Fréchet) would imply a polynomial inflation factor
-rather than logarithmic; this is the more pessimistic regime, but does not
-arise in our experiments.
+For cosine similarity bounded above by `1`, the upper tail of `F_s` has a
+finite right endpoint. Within the EVT classification, this corresponds to:
+
+- **Gumbel domain** if the tail decays sub-exponentially toward the
+  endpoint (e.g., `1 - F_s(t) ∼ c · exp(-h(t))` with `h` slowly varying),
+- **Weibull domain** if the tail decays polynomially toward the endpoint
+  (e.g., `1 - F_s(t) ∼ c · (1 - t)^α` with `α > 0`),
+- **Fréchet domain** if the upper tail is heavy. Heavy-tailed cosine
+  scores are atypical in palmprint embeddings and do not arise in our
+  data; we mention this case for completeness.
+
+We do **not** lock the GEV family at the theory level. Per V14a, §4.6
+reports per-dataset empirical fit and continues with the better-fitting
+family. Crucially, Theorem 1a and Corollary 1a (the load-bearing
+security results) are independent of which GEV family is chosen.
 
 ### A3. Boundary degeneracy
 
@@ -287,13 +393,30 @@ drift. The two mechanisms can compound.
 
 ## To-do list before paper draft
 
-- [ ] Fill in §4.5 with actual KS p-values per (dataset, t)
-- [ ] Generate predicted-vs-observed `τ_m` figure (Tongji example)
-- [ ] Generate predicted-vs-observed inflation-factor figure
-- [ ] Cite Leadbetter 1983, Coles 2001 (EVT references)
+Per V14a (V17 authority chain), Phase 6 paper writing must:
+
+- [ ] Lead §4 with Lemma 1 + Theorem 1a + Corollary 1a as the load-bearing
+      security argument; the EVT/Gumbel apparatus is auxiliary modeling
+      lens for §4.6 and §7 mitigation only.
+- [ ] §4.6 empirical analysis: report Gumbel + Weibull GEV fits side-by-
+      side per dataset (log-likelihood, AIC, KS, AD). **Do NOT** include a
+      "KS p > 0.05" pass/fail gate.
+- [ ] Generate predicted-vs-observed `τ_m` figure for the better-fitting
+      GEV family on each dataset (Gumbel-domain only when fit is
+      reasonable).
+- [ ] Generate predicted-vs-observed inflation-factor figure with explicit
+      caveats about fit quality.
+- [ ] Add a robustness paragraph (§4.7) emphasizing that the central
+      security claim does not depend on the GEV family.
+- [ ] Cite Leadbetter 1983, Coles 2001 (EVT references).
 - [ ] Cite NIST FRTE longitudinal reports for the §A4 distinction
-- [ ] Cite RegPalm 2025 (TIFS) for low-FPIR palmprint context
-- [ ] Convert this draft to LaTeX during paper writing (Week 6)
+      (template aging vs. gallery-growth drift).
+- [ ] Cite RegPalm 2025 (TIFS) for low-FPIR palmprint context.
+- [ ] Cite Yang et al. 2023 (TIFS, "Comprehensive Competition Mechanism in
+      Palmprint Recognition") for CCNet, with explicit "stress-test under
+      our standardized open-set recipe; not a reproduction" framing per
+      plan §V17.8.
+- [ ] Convert this draft to LaTeX during paper writing (Week 6).
 
 ---
 
@@ -316,6 +439,8 @@ drift. The two mechanisms can compound.
 
 ---
 
-*Draft saved 2026-05-08. Pre-experimental; numerical examples are
-illustrative only. To be re-validated with §4.5 results and rewritten in
+*Draft saved 2026-05-08; revised 2026-05-09 per plan §V14a + §V17.4
+(monotonicity-first theory, EVT/GEV demoted to auxiliary modeling lens,
+KS pass/fail gate removed). Pre-experimental; numerical examples are
+illustrative only. To be re-validated with §4.6 results and rewritten in
 LaTeX before submission.*
