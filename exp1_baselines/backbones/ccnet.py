@@ -1,51 +1,63 @@
-"""CCNet backbone wrapper (Yang et al. 2023, IEEE Access).
+"""CCNet backbone wrapper (Yang et al. 2023, IEEE TIFS).
 
 Source attribution:
-    Original repo:  https://github.com/Zi-YuanYang/CCNet.git
-    Reference:      Y. Yang et al., "CCNet: a Cross-attention based Competition
-                    Network for Palmprint Recognition," IEEE Access (2023).
+    Original repo:   https://github.com/Zi-YuanYang/CCNet.git
+    Reference:       Z. Yang, H. Huangfu, L. Leng, B. Zhang, A. B. J. Teoh,
+                     and Y. Zhang, "Comprehensive Competition Mechanism in
+                     Palmprint Recognition," IEEE Transactions on
+                     Information Forensics and Security, vol. 18,
+                     pp. 5160-5170, 2023. DOI: 10.1109/TIFS.2023.3306104.
+    Acronym:         CCNet = Comprehensive Competition Network.
 
-Building blocks (`GaborConv2d`, `SELayer`, `CompetitiveBlock_Mul_Ord_Comp`) are
-vendored verbatim from the original repository to preserve the
+Building blocks (`GaborConv2d`, `SELayer`, `CompetitiveBlock_Mul_Ord_Comp`)
+are vendored verbatim from the original repository to preserve the
 receptive-field design exactly.
 
-CCNet author original training setup (clarified for TIFS reviewer audit):
-  - Training loss: ArcFace via the built-in `ArcMarginProduct` (Yang et al.
-    2023 import the head from ronghuaiyang/arcface-pytorch).
-  - Author original ArcFace hyperparameters: scale s=30, margin m=0.5.
-  - Author original train head input: the 2048-D `fc1` output, AFTER
-    `Dropout(p=0.5)`.
-  - Author original inference embedding: 6144-D `concat(fc, fc1)`, undropped,
-    then L2-normalized.
-  - Train-time and inference-time feature dimensions therefore differ in the
-    upstream code (2048 vs 6144). The `forward` returns BOTH the head logits
-    (used during training) AND the L2-normalized 6144-D fe (used at test).
+CCNet upstream training setup (verified by direct fetch of train.py and
+inspection of models/ccnet.py — plan §V16.1):
+  - Optimizer: Adam, lr=0.001 (no weight decay, no momentum specified;
+    PyTorch defaults betas=(0.9, 0.999), wd=0).
+  - LR scheduler: StepLR(step_size=500, gamma=0.8).
+  - Defaults: batch_size=1024, epoch_num=3000.
+  - Loss: 0.8 * CE + 0.2 * SupCon. CE is computed on `ArcMarginProduct`
+    logits (s=30, m=0.5). SupCon is computed on a 6144-D dual-view
+    `fe = concat(fc, fc1)` with temperature τ=0.07.
+  - Inference embedding (test/eval path): `getFeatureCode(x)` returns
+    a **2048-D L2-normalized** feature (the fc1 output L2-normalized).
+    This is what the upstream test loop uses for matching.
+  - Note: upstream `forward(x)` returns `(logits, F.normalize(6144D fe))`,
+    where the 6144-D fe is used inside the SupCon training loss only.
+    The 6144-D fe is NOT the upstream inference embedding.
 
-Wrapper deviations from upstream (documented in plan §IER-9):
-  D1. The built-in `ArcMarginProduct` head is removed. Training uses our
-      shared `exp1_baselines/losses/arcface.py:ArcFaceHead` so that
-      MFN-ArcFace and CCNet-ArcFace share the SAME loss-side recipe
-      (s=48, m=0.5; recipe parity per plan §IER-9), isolating the
-      protocol-effect comparison from loss-temperature differences.
-  D2. `forward(x)` returns a single tensor (the 6144-D L2-normalized feature
-      embedding) instead of an (logits, fe) tuple. This matches the
-      interface of `MobileFaceNet.forward(x)` and is the single embedding
-      used at BOTH train and inference time (resolving the upstream 2048/
-      6144 asymmetry). The classifier head is attached externally during
-      training, identically to MFN-ArcFace.
-  D3. The 6144-D embedding is the upstream `fe = cat(fc->4096, fc1->2048)`
-      preserved verbatim (the released inference embedding).
-  D4. Dropout(p=0.5): the original applied dropout only to the 2048-D
-      head-path, AFTER the fe was built. Since (D2) we use the 6144-D fe
-      as the head input, the upstream dropout location no longer applies.
-      Two configurations are exposed:
-        use_dropout=False (default, recipe-parity with MFN, no dropout in
-                           the embedding path)
-        use_dropout=True  (apply Dropout(p=0.5) to the 2048-D h2 BEFORE
-                           concatenating into fe; appendix sanity only)
+Wrapper deviations from upstream (V17.8 / V16.3 deviation list):
+  D1. The built-in `ArcMarginProduct(2048, num_classes, s=30, m=0.5)`
+      head is removed. Training uses our shared
+      `exp1_baselines/losses/arcface.py:ArcFaceHead` (s=48, m=0.5) so
+      that MFN-ArcFace and CCNet-ArcFace share the SAME loss-side recipe
+      (recipe parity per plan §IER-9 + §V17.8).
+  D2. `forward(x)` returns a single tensor: the **2048-D L2-normalized
+      inference embedding** (matching upstream `getFeatureCode`). This
+      eliminates the upstream 2048/6144 train/test asymmetry and matches
+      the interface of `MobileFaceNet.forward(x)`. The classifier head
+      is attached externally during training, identically to MFN-ArcFace.
+  D3. The 6144-D `fe` is NOT exposed by this wrapper. It was used in
+      upstream as the SupCon training target, but our recipe uses
+      ArcFace CE only (no SupCon), so the 6144-D space is not relevant.
+  D4. Dropout(p=0.5): upstream applied dropout only to the 2048-D
+      h2 head-path, AFTER fe was built. In `getFeatureCode` (the
+      inference path), dropout is NOT applied. Our wrapper matches this
+      inference-path behavior (no dropout in `forward`). The
+      `use_dropout` flag is retained for ablation/sanity (default False
+      per recipe parity with MFN-ArcFace which also has no dropout in
+      the embedding path).
+  D5. Optimizer / scheduler / batch / epochs / loss: trained under our
+      standardized ArcFace recipe (SGD lr=0.01 mom=0.9 wd=1e-4, batch
+      128, 50 epochs cosine + 1ep warmup, no SupCon). Total iteration
+      budget is ~8x fewer than upstream's ~18000 — see V17.10 TPIR
+      gate for the L1 50ep / L2 200ep escalation rule.
 
 Input contract:
-  - shape: [B, 1, 128, 128] (grayscale; the original CCNet author input)
+  - shape: [B, 1, 128, 128] (grayscale; CCNet author native, V17.2)
   - per-pixel value range: [-1, 1] (matches MFN-ArcFace normalization
     convention to keep optimizer dynamics comparable)
 
@@ -216,7 +228,14 @@ class CCNetBackbone(nn.Module):
     """Feature-only CCNet wrapped to match MobileFaceNet's interface.
 
     - Input  : [B, 1, 128, 128] (grayscale, value range [-1, 1])
-    - Output : [B, 6144] L2-normalized along dim=-1
+    - Output : [B, 2048] L2-normalized along dim=-1
+
+    The output is the **upstream getFeatureCode-style inference embedding**:
+    the fc1 output (2048-D) L2-normalized along dim=-1. This matches the
+    feature that Yang et al.'s released test loop uses for matching
+    (`net.getFeatureCode(data)` in upstream train.py). See plan §V16.2 /
+    §V17.8 for the rationale (matches upstream inference path; eliminates
+    the upstream 2048/6144 train/test asymmetry).
 
     Architecture trace at 128x128 input (verified against upstream forward):
       cb_i  produces  spatial[15x15]*16ch + spatial[7x7]*16ch  per competitive
@@ -225,16 +244,18 @@ class CCNetBackbone(nn.Module):
             the post-PPU output channel count (o1//2 = 16 in every case).
       flat per CB = 15*15*16 + 7*7*16 = 3600 + 784 = 4384
       total      = 3 * 4384 = 13152  -> matches Linear(13152, 4096)
-      fc1(4096)  = 2048
-      fe = cat(fc(13152)->4096, fc1(...)->2048) -> 6144 L2-normalized
-
-    Therefore embedding_dim = 6144 (matches Yang et al. 2023 release exactly).
+      fc1(4096)  -> 2048
+      output = F.normalize(fc1(fc(z)), dim=-1) -> 2048-D L2-normalized
 
     The 13152 spatial dim is hardcoded for 128x128 input; using 112x112 input
     would produce 9840 != 13152 and the forward would error. We deliberately
     keep CCNet at its author-specified 128 input rather than padding/resizing
-    to a unified 112 (avoids reviewer attack on input modification; see
-    plan TIFS-extension §C6 + §IER-9 + multi-backbone fairness audit).
+    to a unified 112 (V17.2 lock — architecturally required).
+
+    The upstream 6144-D `fe = concat(fc, fc1)` was used as the SupCon
+    training target. We remove SupCon (recipe parity with MFN), so the
+    6144-D space is not relevant; we expose only the 2048-D inference
+    embedding (V17.8 D2/D3).
     """
 
     def __init__(self, weight: float = 0.8, use_dropout: bool = False) -> None:
@@ -242,14 +263,13 @@ class CCNetBackbone(nn.Module):
         Args:
             weight: CCNet author's competitive weight (`weight_chan` parameter
                     in CompetitiveBlock); 0.8 matches the released config.
-            use_dropout: when True, apply the original Dropout(p=0.5) on h2
-                    BEFORE concatenating into fe. When False (default), the
-                    feature embedding fe is identical to the upstream
-                    undropped fe (which is what gets L2-normalized in the
-                    upstream forward(). The flag is provided so that the
-                    decision is **explicitly logged in config and reviewable
-                    in paper** rather than being a silent code-level deletion.
-                    See plan §IER-9 + multi-backbone fairness audit.
+            use_dropout: when True, apply Dropout(p=0.5) to the 2048-D h2
+                    BEFORE L2-normalization (matches the upstream training
+                    head-path dropout). When False (default), no dropout is
+                    applied — matches the upstream `getFeatureCode` inference
+                    path and MFN-ArcFace's no-dropout embedding path.
+                    Default False is required for V17.8 wrapper definition.
+                    The flag is exposed for ablation/sanity only.
         """
         super().__init__()
         self.weight = float(weight)
@@ -268,27 +288,50 @@ class CCNetBackbone(nn.Module):
         )
         self.fc = nn.Linear(13152, 4096)
         self.fc1 = nn.Linear(4096, 2048)
-        # Deviation D3: dropout location is configurable. With use_dropout=False
-        # (default), fe is identical to the upstream undropped fe. With
-        # use_dropout=True, h2 receives Dropout(p=0.5) before the concat;
-        # this mimics the original feature path *if the head were retained*.
+        # V17.8 D4: dropout is OFF in the inference path (matches upstream
+        # getFeatureCode). The use_dropout=True flag enables it during training
+        # only, for ablation/sanity. Default False per recipe parity with MFN.
         self.drop = nn.Dropout(p=0.5) if self.use_dropout else nn.Identity()
 
     @property
     def embedding_dim(self) -> int:
-        return 6144
+        return 2048
+
+    @staticmethod
+    def _assert_embedding_contract(
+        embedding: torch.Tensor, expected_dim: int = 2048,
+    ) -> None:
+        """V17.8 mandatory code-level asserts on the wrapper output."""
+        assert embedding.ndim == 2, (
+            f"expected 2D embedding tensor (B, D); got shape {tuple(embedding.shape)}"
+        )
+        assert embedding.shape[1] == expected_dim, (
+            f"expected embedding_dim {expected_dim}; got {embedding.shape[1]}. "
+            "If this changed, V17.8 lock is broken — verify wrapper edit."
+        )
+        assert torch.isfinite(embedding).all().item(), (
+            "embedding contains NaN or Inf; gradient blow-up or numerical "
+            "instability. Investigate before continuing."
+        )
+        norms = embedding.norm(dim=1)
+        unit = torch.ones_like(norms)
+        assert torch.allclose(norms, unit, atol=1e-4), (
+            f"embedding not L2-normalized; norm mean={norms.mean().item():.4f}, "
+            f"std={norms.std().item():.4f}. V17.8 requires unit-norm output."
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x1 = self.cb1(x)
         x2 = self.cb2(x)
         x3 = self.cb3(x)
         z = torch.cat((x1, x2, x3), dim=1)
-        h1 = self.fc(z)              # 4096
+        h1 = self.fc(z)              # 4096 (used internally; not exposed)
         h2 = self.fc1(h1)            # 2048
         if self.training:
             h2 = self.drop(h2)       # nn.Identity() if use_dropout=False
-        fe = torch.cat((h1, h2), dim=1)  # 6144
-        return F.normalize(fe, dim=-1)
+        out = F.normalize(h2, dim=-1)  # 2048D L2-normalized (matches getFeatureCode)
+        self._assert_embedding_contract(out, expected_dim=2048)
+        return out
 
 
 def ccnet(weight: float = 0.8, use_dropout: bool = False) -> CCNetBackbone:
@@ -302,7 +345,7 @@ if __name__ == "__main__":
     out = net(inp)
     print(f"input: {inp.shape}  output: {out.shape}  "
           f"embedding_dim={net.embedding_dim}  use_dropout={net.use_dropout}")
-    assert out.shape == (2, 6144), f"expected (2, 6144), got {tuple(out.shape)}"
+    assert out.shape == (2, 2048), f"expected (2, 2048), got {tuple(out.shape)}"
     norms = out.norm(dim=-1)
     assert torch.allclose(norms, torch.ones(2), atol=1e-5), \
         f"output not L2-normalized; norms={norms}"

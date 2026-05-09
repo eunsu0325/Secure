@@ -1,15 +1,16 @@
-# CCNet (Yang et al. 2023) + ArcFace, scratch training on IITD Segmented ROI 128x128.
+# CCNet (Yang et al. 2023, IEEE TIFS, "Comprehensive Competition Mechanism in
+# Palmprint Recognition") + ArcFace, scratch training on IITD Segmented ROI 128x128.
 #
-# Same recipe as ccnet_arcface_tongji_128.yaml; only manifest_dir + checkpoint
-# paths differ. See that file for the rationale + plan §IER-9 + fairness audit.
+# Same recipe as ccnet_arcface_tongji_128.yaml; only manifest_dir and checkpoint
+# paths differ. See that file for the full V17.8 deviation list and rationale.
 
 model:
   name: ccnet
   architecture: ccnet
-  embedding_dim: 6144
+  embedding_dim: 2048         # V17.8 lock: matches upstream getFeatureCode
   backbone_kwargs:
     weight: 0.8
-    use_dropout: false
+    use_dropout: false        # V17.8 D4: matches upstream getFeatureCode
 
 dataset:
   name: iitd_roi_baselines
@@ -29,7 +30,7 @@ train:
   batch_size: 128
   P: 32
   K: 4
-  num_workers: 4
+  num_workers: 0              # V17 mem-pressure fix (see tongji config)
   optimizer: sgd
   lr: 0.01
   momentum: 0.9

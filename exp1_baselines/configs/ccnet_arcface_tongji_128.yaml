@@ -1,36 +1,44 @@
-# CCNet (Yang et al. 2023) + ArcFace, scratch training on Tongji ROI 128x128.
+# CCNet (Yang et al. 2023, IEEE TIFS, "Comprehensive Competition Mechanism in
+# Palmprint Recognition") + ArcFace, scratch training on Tongji ROI 128x128.
 #
-# Plan §IER-9 + multi-backbone fairness lock (Option A):
-#   - Same ArcFace recipe as MFN-ArcFace (s=48, m=0.5)
-#   - Same optimizer (SGD lr=0.01 mom=0.9 wd=1e-4)
-#   - Same scheduler (cosine + 1-epoch warmup)
-#   - Same batch composition (PxK = 32x4 = 128)
-#   - Same epochs (50) and seed (42)
-#   - Same train_backbone identity split (split_seed=42)
-# Differences from MFN that are *architecturally required* (preserved verbatim):
-#   - Input resolution: 128x128 (CCNet FC layer is hardcoded for 128 input)
-#   - Input channels: 1 (CCNet author input)
-#   - Embedding dim: 6144 (CCNet author output: concat(fc->4096, fc1->2048))
-# Differences from CCNet author original (documented for paper):
-#   - CCNet original ALSO uses ArcFace, with s=30, m=0.5, head input = 2048-D fc1
-#     output (post-dropout). Our wrapper:
-#       (a) replaces the built-in ArcMarginProduct with our shared ArcFaceHead
-#       (b) uses ArcFace s=48 (vs original s=30) for MFN-ArcFace recipe parity
-#       (c) feeds the 6144-D fe (the released inference embedding) as the head
-#           input, unifying train and inference paths (original used 2048-D h2
-#           for training and 6144-D fe for inference)
-#       (d) disables the original Dropout(p=0.5) by default; the original
-#           dropout was on the 2048-D h2 head-path, which (c) replaces. The
-#           appendix sanity variant use_dropout=true applies dropout to h2
-#           BEFORE the concat-into-fe.
+# Plan §V17.8 multi-backbone fairness lock + §V16.3 deviation table:
+#
+# Architecture (preserved verbatim from upstream Zi-YuanYang/CCNet):
+#   - 3 parallel branches with learnable Gabor kernel sizes 7/17/35 + Comp Block
+#   - SE layer (reduction=1 = identity bottleneck), no BatchNorm
+#   - Comp weights w_c=0.8, w_s=0.1
+#
+# Architecturally-required input (V17.2):
+#   - Resolution 128x128 (Linear(13152, 4096) hardcoded for 128 input;
+#     112 input produces 9840 != 13152 and the forward errors)
+#   - Channels: 1 (grayscale, CCNet author input)
+#
+# Inference embedding (V17.8 D2 — matches upstream getFeatureCode):
+#   - 2048-D L2-normalized fc1 output (NOT the 6144-D training-time fe)
+#   - The upstream test loop uses net.getFeatureCode(data) for matching;
+#     our wrapper.forward(x) returns the same 2048-D embedding
+#
+# Training-recipe deviations from CCNet upstream (V17.8 D1, D5):
+#   Upstream (verified from train.py):
+#     Adam lr=0.001 (no wd) | StepLR(500, 0.8) | batch=1024 | epoch=3000
+#     Loss = 0.8 * CE(ArcMarginProduct(s=30, m=0.5)) + 0.2 * SupCon(6144D fe, τ=0.07)
+#   Ours (recipe parity with MFN-ArcFace):
+#     SGD lr=0.01 mom=0.9 wd=1e-4 | cosine + 1ep warmup | batch=128 (PK=32x4)
+#     epoch=50 (L1 first; L2 200ep fallback per V17.10 TPIR gate)
+#     Loss = ArcFaceHead(s=48, m=0.5) cross-entropy only (NO SupCon)
+#   Iteration ratio: ~8x fewer than upstream (~2,250 vs ~18,000)
+#
+# Author-pretrained ban (V17.8 + V16.5):
+#   - No author-pretrained Tongji checkpoint loaded
+#   - Trained from scratch on our train_backbone split
 
 model:
   name: ccnet
   architecture: ccnet
-  embedding_dim: 6144         # fixed by CCNet architecture; do NOT change
+  embedding_dim: 2048         # V17.8 lock: matches upstream getFeatureCode
   backbone_kwargs:
     weight: 0.8               # CCNet author's competitive weight (released config)
-    use_dropout: false        # plan §IER-9 + reviewer-fairness audit: explicit
+    use_dropout: false        # V17.8 D4: matches upstream getFeatureCode (no dropout in inference path)
 
 dataset:
   name: tongji_roi_baselines
@@ -50,7 +58,11 @@ train:
   batch_size: 128             # MFN parity
   P: 32                       # identities per batch
   K: 4                        # samples per identity per batch
-  num_workers: 4
+  num_workers: 0              # V17 mem-pressure fix: single-process data loading
+                              # (multi-worker forking each spawned a copy of the
+                              # CCNet model in MPS unified memory, triggering
+                              # heavy swap; ep 2 took 3 hours under swap pressure.
+                              # Single-process loading keeps MPS memory headroom.)
   optimizer: sgd
   lr: 0.01                    # MFN parity
   momentum: 0.9
