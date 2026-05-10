@@ -33,6 +33,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import List, Tuple
@@ -232,6 +233,33 @@ def main(argv=None) -> int:
     if not ((norms > 0.99).all() and (norms < 1.01).all()):
         raise RuntimeError("L2-norm sanity failed (embeddings not unit norm)")
 
+    # ----- Plan §V17.11 extract-time telemetry -----
+    import subprocess as _sp
+    try:
+        extraction_git_commit = _sp.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=str(PROJECT_ROOT),
+            stderr=_sp.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        extraction_git_commit = "unknown"
+    v17_11_extract_metadata = {
+        "embedding_norm_mean": float(norms.mean()),
+        "embedding_norm_std": float(norms.std()),
+        "embedding_min": float(all_emb.min()),
+        "embedding_max": float(all_emb.max()),
+        "extraction_device": str(device),
+        "torch_version": torch.__version__,
+        "n_samples_extracted": int(all_emb.shape[0]),
+        "embedding_dim": int(all_emb.shape[1]),
+        "extraction_git_commit": extraction_git_commit,
+        "ckpt_path": str(ckpt_path),
+        "ckpt_arch": str(arch),
+        "ckpt_image_size": int(image_size),
+        "ckpt_channels": int(channels),
+        "ckpt_v17_11_metadata_present": ("v17_11_metadata" in ckpt),
+        "spec_version": "V17.11",
+    }
+
     out_npz = Path(args.output_npz)
     if not out_npz.is_absolute():
         out_npz = PROJECT_ROOT / out_npz
@@ -248,8 +276,17 @@ def main(argv=None) -> int:
         subject_split=all_split,
         sample_role=all_role,
         path=all_paths,
+        v17_11_extract_metadata=np.array(
+            json.dumps(v17_11_extract_metadata), dtype=object,
+        ),
     )
     print(f"[save] {out_npz} ({all_emb.shape})")
+
+    # Sidecar JSON for human/script inspection
+    metadata_json_path = out_npz.with_suffix(".v17_extract_metadata.json")
+    with open(metadata_json_path, "w", encoding="utf-8") as f:
+        json.dump(v17_11_extract_metadata, f, indent=2)
+    print(f"[save] V17.11 extract-time metadata sidecar -> {metadata_json_path}")
 
     from collections import Counter
     print(f"[counts] subject_split: {dict(Counter(all_split.tolist()))}")

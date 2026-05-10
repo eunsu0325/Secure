@@ -390,6 +390,71 @@ def main(argv=None) -> int:
             f"time={epoch_time:.1f}s"
         )
 
+    # ----- Plan §V17.11 train-time telemetry -----
+    # Record explicit reviewer-audit fields so paper Section X can cite the
+    # standardized recipe without re-deriving from cfg. Some fields are
+    # backbone-specific (CCNet getFeatureCode-style 2048-D vs MFN 512-D).
+    arch_lower = cfg["model"]["architecture"].lower()
+    if arch_lower == "ccnet":
+        feature_source = "getFeatureCode-style inference path (V17.8)"
+        training_recipe = "standardized_open_set_arcface (V17.8 recipe parity with MFN; deviates from CCNet upstream Adam+CE+SupCon)"
+    elif arch_lower in {"mobilefacenet", "mfn"}:
+        feature_source = "MobileFaceNet GDC head (InsightFace-style)"
+        training_recipe = "standardized_open_set_arcface (MFN baseline, plan §IER-9)"
+    elif arch_lower in {"iresnet50", "ir50"}:
+        feature_source = "iResNet50 final pooled feature"
+        training_recipe = "standardized_open_set_arcface (IR50 appendix variant)"
+    else:
+        feature_source = f"unknown ({arch_lower})"
+        training_recipe = "standardized_open_set_arcface"
+
+    optimizer_str = (
+        f"{cfg['train'].get('optimizer', 'sgd').upper()} "
+        f"lr={cfg['train']['lr']} "
+        f"momentum={cfg['train']['momentum']} "
+        f"weight_decay={cfg['train']['weight_decay']}"
+    )
+    scheduler_str = f"{cfg['train'].get('scheduler', 'cosine')} + {cfg['train']['warmup_epochs']}ep warmup"
+    loss_str = (
+        f"ArcFace CE only (no SupCon); s={cfg['arcface']['scale']}, "
+        f"m={cfg['arcface']['margin']}"
+    )
+
+    # palm_id count = num_classes; image_count from manifest train rows
+    train_palm_count = int(num_classes)
+    train_image_count = int(len(records))
+    total_iterations = int(epochs * steps_per_epoch)
+
+    v17_11_metadata = {
+        # V17.11 train-time fields (plan-locked)
+        "backbone": arch_lower,
+        "feature_dim": int(embedding_dim),
+        "feature_source": feature_source,
+        "feature_l2_normalized": True,  # both MFN.forward and CCNet.forward L2-norm; ArcFaceHead also re-normalizes
+        "pretrained_used": False,
+        "author_pretrained_checkpoint_loaded": False,
+        "training_recipe": training_recipe,
+        "input_resolution": f"{image_size}x{image_size}",
+        "input_channels": int(channels),
+        "optimizer": optimizer_str,
+        "scheduler": scheduler_str,
+        "loss": loss_str,
+        "arcface_s": float(cfg["arcface"]["scale"]),
+        "arcface_m": float(cfg["arcface"]["margin"]),
+        "batch_size": int(P * K),
+        "P_K": f"{P}x{K}",
+        "epochs_planned": int(cfg["train"]["epochs"]),
+        "epochs_completed": int(epochs),
+        "total_iterations": total_iterations,
+        "train_palm_count": train_palm_count,
+        "train_image_count": train_image_count,
+        "checkpoint_selection": "epoch_final",  # current train script saves only final ep; not best-on-val
+        "device": str(device),
+        "torch_version": torch.__version__,
+        "git_commit": get_git_commit(),
+        "spec_version": "V17.11",
+    }
+
     # Save checkpoint: backbone state_dict + meta. ArcFace head is discarded
     # but we record its config for reproducibility.
     checkpoint = {
@@ -401,9 +466,16 @@ def main(argv=None) -> int:
         "seed": seed,
         "git_commit": get_git_commit(),
         "epochs_completed": epochs,
+        "v17_11_metadata": v17_11_metadata,
     }
     torch.save(checkpoint, out_ckpt)
     print(f"[save] checkpoint -> {out_ckpt}")
+
+    # Also save V17.11 metadata as a sidecar JSON for human/script inspection
+    metadata_path = out_ckpt.with_suffix(".v17_metadata.json")
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(v17_11_metadata, f, indent=2)
+    print(f"[save] V17.11 metadata sidecar -> {metadata_path}")
 
     with open(log_dir / "train_log.json", "w", encoding="utf-8") as f:
         json.dump(log_records, f, indent=2)
