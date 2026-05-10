@@ -294,12 +294,25 @@ def main(argv=None) -> int:
     ).to(device)
 
     params = list(backbone.parameters()) + list(arcface_head.parameters())
-    optimizer = torch.optim.SGD(
-        params,
-        lr=float(cfg["train"]["lr"]),
-        momentum=float(cfg["train"]["momentum"]),
-        weight_decay=float(cfg["train"]["weight_decay"]),
-    )
+    opt_name = str(cfg["train"].get("optimizer", "sgd")).lower()
+    if opt_name == "sgd":
+        optimizer = torch.optim.SGD(
+            params,
+            lr=float(cfg["train"]["lr"]),
+            momentum=float(cfg["train"]["momentum"]),
+            weight_decay=float(cfg["train"]["weight_decay"]),
+        )
+    elif opt_name == "adam":
+        # V18: Adam dispatch for CCNet (per-backbone author recipe).
+        # PyTorch defaults: betas=(0.9, 0.999), eps=1e-8.
+        optimizer = torch.optim.Adam(
+            params,
+            lr=float(cfg["train"]["lr"]),
+            weight_decay=float(cfg["train"].get("weight_decay", 0.0)),
+        )
+    else:
+        raise ValueError(f"unknown optimizer in cfg.train.optimizer: {opt_name!r}")
+    print(f"[optimizer] {opt_name} lr={cfg['train']['lr']} wd={cfg['train'].get('weight_decay', 0.0)}")
 
     epochs = int(cfg["train"]["epochs"])
     warmup_epochs = int(cfg["train"]["warmup_epochs"])
@@ -397,7 +410,19 @@ def main(argv=None) -> int:
     arch_lower = cfg["model"]["architecture"].lower()
     if arch_lower == "ccnet":
         feature_source = "getFeatureCode-style inference path (V17.8)"
-        training_recipe = "standardized_open_set_arcface (V17.8 recipe parity with MFN; deviates from CCNet upstream Adam+CE+SupCon)"
+        if opt_name == "adam":
+            training_recipe = (
+                "standardized_open_set_arcface (V18 optimizer-only deviation): "
+                "Adam matches CCNet upstream optimizer; loss/head/batch/epochs/scheduler"
+                " parity with MFN; no SupCon (V17.8 D1)"
+            )
+        else:
+            # SGD path archived as failed (V18.1/V18.2); kept here only for
+            # historical run reproducibility
+            training_recipe = (
+                "standardized_open_set_arcface (V17.8 SGD-parity attempt — "
+                "DEPRECATED by V18; archived for failure analysis only)"
+            )
     elif arch_lower in {"mobilefacenet", "mfn"}:
         feature_source = "MobileFaceNet GDC head (InsightFace-style)"
         training_recipe = "standardized_open_set_arcface (MFN baseline, plan §IER-9)"
@@ -408,12 +433,20 @@ def main(argv=None) -> int:
         feature_source = f"unknown ({arch_lower})"
         training_recipe = "standardized_open_set_arcface"
 
-    optimizer_str = (
-        f"{cfg['train'].get('optimizer', 'sgd').upper()} "
-        f"lr={cfg['train']['lr']} "
-        f"momentum={cfg['train']['momentum']} "
-        f"weight_decay={cfg['train']['weight_decay']}"
-    )
+    if opt_name == "sgd":
+        optimizer_str = (
+            f"SGD lr={cfg['train']['lr']} "
+            f"momentum={cfg['train']['momentum']} "
+            f"weight_decay={cfg['train']['weight_decay']}"
+        )
+    elif opt_name == "adam":
+        optimizer_str = (
+            f"Adam lr={cfg['train']['lr']} "
+            f"betas=(0.9, 0.999) "
+            f"weight_decay={cfg['train'].get('weight_decay', 0.0)}"
+        )
+    else:
+        optimizer_str = f"unknown ({opt_name})"
     scheduler_str = f"{cfg['train'].get('scheduler', 'cosine')} + {cfg['train']['warmup_epochs']}ep warmup"
     loss_str = (
         f"ArcFace CE only (no SupCon); s={cfg['arcface']['scale']}, "
