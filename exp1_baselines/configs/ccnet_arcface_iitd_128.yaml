@@ -31,10 +31,10 @@ train:
   P: 32
   K: 4
   num_workers: 0              # V17 mem-pressure fix (see tongji config)
-  optimizer: sgd
-  lr: 0.01
-  momentum: 0.9
-  weight_decay: 1.0e-4
+  optimizer: adam             # V18: Adam author recipe for CCNet stability
+  lr: 0.001                   # V18: matches upstream Yang et al. 2023
+  momentum: 0.9               # IGNORED by Adam; kept for SGD-fallback compat
+  weight_decay: 0.0           # V18: Adam upstream wd=0
   warmup_epochs: 1
   scheduler: cosine
   amp: false
