@@ -49,6 +49,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from exp1_baselines.backbones.mobilefacenet import MobileFaceNet
 from exp1_baselines.backbones.iresnet import iresnet50
 from exp1_baselines.backbones.ccnet import ccnet
+from exp1_baselines.backbones.ccm_mfn import ccm_mfn
 from exp1_baselines.datasets.manifest_io import get_eval_records, load_manifest
 from exp1_baselines.datasets.tongji_dataset import (
     TongjiROIDataset,
@@ -78,6 +79,16 @@ def build_backbone(
                 f"by the architecture; checkpoint requested {embedding_dim}."
             )
         return net
+    elif arch in {"ccm_mfn", "ccm-mfn"}:
+        # V19 Path 3b — see ccm_mfn.py docstring and plan §V19.
+        return ccm_mfn(
+            embedding_dim=embedding_dim,
+            ccm_n_competitor=int(backbone_kwargs.get("ccm_n_competitor", 9)),
+            ccm_ksize=int(backbone_kwargs.get("ccm_ksize", 7)),
+            ccm_init_ratio=float(backbone_kwargs.get("ccm_init_ratio", 1.0)),
+            ccm_weight=float(backbone_kwargs.get("ccm_weight", 0.8)),
+            alpha_init=float(backbone_kwargs.get("alpha_init", 0.05)),
+        )
     else:
         raise ValueError(f"unknown architecture: {architecture}")
 
@@ -122,7 +133,15 @@ def collect_eval_records(manifest_dir: Path) -> List[dict]:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Extract embeddings for exp1_baselines")
-    parser.add_argument("--model", required=True, choices=["mfn", "ir50", "ccnet"])
+    parser.add_argument(
+        "--model", required=True,
+        choices=["mfn", "ir50", "ccnet", "ccm_mfn"],
+        help=(
+            "Architecture name. 'ccm_mfn' is V19 Path 3b's CCNet-inspired "
+            "competitive-mechanism residual adapter on MFN; NOT a reproduction "
+            "of CCNet or RegPalm."
+        ),
+    )
     parser.add_argument("--checkpoint", required=True, type=str)
     parser.add_argument("--manifest_dir", required=True, type=str)
     parser.add_argument("--output_npz", required=True, type=str)

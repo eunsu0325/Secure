@@ -1,0 +1,49 @@
+# CCM-on-MFN + ArcFace, scratch training on IITD Segmented ROI 112x112.
+# V19 Path 3b: palmprint-specialized competitive-mechanism pipeline (IITD).
+# Same recipe as ccm_mfn_arcface_tongji_112.yaml; only manifest_dir and
+# checkpoint paths differ. See the Tongji file for the V19.3 design notes
+# and V19.5 forbidden-claims list.
+
+model:
+  name: ccm_mfn
+  architecture: ccm_mfn
+  embedding_dim: 512
+  backbone_kwargs:
+    ccm_n_competitor: 9
+    ccm_ksize: 7
+    ccm_init_ratio: 1.0
+    ccm_weight: 0.8
+    alpha_init: 0.05
+
+dataset:
+  name: iitd_roi_baselines
+  manifest_dir: experiments/generated/iitd_full
+  image_size: 112
+  channels: 3
+  normalize_mean: [0.5, 0.5, 0.5]
+  normalize_std: [0.5, 0.5, 0.5]
+
+arcface:
+  margin: 0.5
+  scale: 48.0
+  eps: 1.0e-7
+
+train:
+  epochs: 50
+  batch_size: 128
+  P: 32
+  K: 4
+  num_workers: 0              # V17 MPS mem-pressure fix
+  optimizer: sgd
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 1.0e-4
+  warmup_epochs: 1
+  scheduler: cosine
+  amp: false
+  seed: 42
+  log_interval: 10
+
+output:
+  checkpoint_path: experiments/generated/iitd_full/ccm_mfn_arcface_iitd_scratch_112.pt
+  log_dir: experiments/generated/iitd_full/ccm_mfn_logs

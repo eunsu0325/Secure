@@ -1,0 +1,66 @@
+# CCM-on-MFN + ArcFace, scratch training on Tongji ROI 112x112.
+# V19 Path 3b: palmprint-specialized competitive-mechanism pipeline.
+#
+# This is NOT a reproduction of CCNet (Yang et al., IEEE TIFS 2023) or
+# RegPalm (Zhong et al., IEEE TIFS 2025). It is an architecturally inspired
+# variant: MobileFaceNet augmented with a CCNet-inspired competitive
+# mechanism residual adapter at the early feature stage (after conv1,
+# before conv2_dw, at [B, 64, 56, 56]).
+#
+# The adapter integrates CCNet's learnable Gabor filtering and
+# channel/spatial softmax competition as a shape-preserving residual block.
+# A learnable scalar alpha gates the residual: y = x + alpha * CCM(x).
+# alpha_init=0.05 (per V19.3.3a rationale: non-zero initial gradient flow
+# for CCM internal parameters while keeping forward perturbation small).
+#
+# Recipe parity with MFN and IR-ResNet50 (V19.2 unified Family-A):
+#   SGD lr=0.01 mom=0.9 wd=1e-4, batch=128 (P=32, K=4), 50 epochs cosine + 1ep warmup,
+#   ArcFace m=0.5 s=48, 112×112 3-channel input, embedding_dim=512.
+#
+# Forbidden claims (V19.5): this config and any downstream paper text
+# must NOT describe ccm_mfn as reproducing CCNet/RegPalm, being equivalent
+# to full CCNet, being superior to MFN, or being the SOTA palmprint backbone.
+
+model:
+  name: ccm_mfn
+  architecture: ccm_mfn
+  embedding_dim: 512
+  backbone_kwargs:
+    ccm_n_competitor: 9       # CCNet cb1 channel_out = 9 orientations
+    ccm_ksize: 7              # padding=3 preserves 56×56; conservative vs CCNet 35/128
+    ccm_init_ratio: 1.0       # CCNet upstream Gabor σ=9.2, f=0.057 default
+    ccm_weight: 0.8           # CCNet author's weight_chan (weight_spa = 0.1)
+    alpha_init: 0.05          # V19.3.3a: non-zero for immediate gradient flow
+
+dataset:
+  name: tongji_roi_baselines
+  manifest_dir: experiments/generated/tongji_full
+  image_size: 112
+  channels: 3
+  normalize_mean: [0.5, 0.5, 0.5]
+  normalize_std: [0.5, 0.5, 0.5]
+
+arcface:
+  margin: 0.5
+  scale: 48.0
+  eps: 1.0e-7
+
+train:
+  epochs: 50
+  batch_size: 128
+  P: 32
+  K: 4
+  num_workers: 0              # V17 MPS mem-pressure fix
+  optimizer: sgd
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 1.0e-4
+  warmup_epochs: 1
+  scheduler: cosine
+  amp: false
+  seed: 42
+  log_interval: 10
+
+output:
+  checkpoint_path: experiments/generated/tongji_full/ccm_mfn_arcface_tongji_scratch_112.pt
+  log_dir: experiments/generated/tongji_full/ccm_mfn_logs

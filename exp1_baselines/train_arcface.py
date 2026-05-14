@@ -41,6 +41,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from exp1_baselines.backbones.mobilefacenet import MobileFaceNet
 from exp1_baselines.backbones.iresnet import iresnet50
 from exp1_baselines.backbones.ccnet import ccnet
+from exp1_baselines.backbones.ccm_mfn import ccm_mfn
 from exp1_baselines.losses.arcface import ArcFaceHead
 from exp1_baselines.datasets.tongji_dataset import (
     TongjiROIDataset,
@@ -104,6 +105,18 @@ def build_backbone(
                 f"Set embedding_dim: {net.embedding_dim} in the config."
             )
         return net
+    elif arch in {"ccm_mfn", "ccm-mfn"}:
+        # V19 Path 3b: CCNet-inspired competitive-mechanism residual adapter
+        # on MFN. NOT a reproduction of CCNet or RegPalm. See ccm_mfn.py
+        # docstring and plan §V19 for the inspired-variant framing.
+        return ccm_mfn(
+            embedding_dim=embedding_dim,
+            ccm_n_competitor=int(backbone_kwargs.get("ccm_n_competitor", 9)),
+            ccm_ksize=int(backbone_kwargs.get("ccm_ksize", 7)),
+            ccm_init_ratio=float(backbone_kwargs.get("ccm_init_ratio", 1.0)),
+            ccm_weight=float(backbone_kwargs.get("ccm_weight", 0.8)),
+            alpha_init=float(backbone_kwargs.get("alpha_init", 0.05)),
+        )
     else:
         raise ValueError(f"unknown architecture: {architecture}")
 
@@ -425,10 +438,13 @@ def main(argv=None) -> int:
             )
     elif arch_lower in {"mobilefacenet", "mfn"}:
         feature_source = "MobileFaceNet GDC head (InsightFace-style)"
-        training_recipe = "standardized_open_set_arcface (MFN baseline, plan §IER-9)"
+        training_recipe = "standardized_open_set_arcface (MFN baseline, V19 Path 3b generic CNN; plan §IER-9)"
     elif arch_lower in {"iresnet50", "ir50"}:
-        feature_source = "iResNet50 final pooled feature"
-        training_recipe = "standardized_open_set_arcface (IR50 appendix variant)"
+        feature_source = "iResNet50 final pooled feature (InsightFace-style)"
+        training_recipe = "standardized_open_set_arcface (IR-ResNet50, V19 Path 3b stronger generic CNN; UAA ICCV 2025-style backbone under our unified Family-A recipe; lr/batch/epochs deviation documented in config header)"
+    elif arch_lower in {"ccm_mfn", "ccm-mfn"}:
+        feature_source = "MobileFaceNet GDC head + CCNet-inspired CCM residual adapter at early feature stage (alpha-gated, alpha_init=0.05; not a reproduction of CCNet or RegPalm)"
+        training_recipe = "standardized_open_set_arcface (V19 Path 3b: palmprint-specialized competitive-mechanism pipeline; CCNet-inspired CCM residual adapter on MobileFaceNet; shape-preserving variant under unified Family-A recipe; NOT a reproduction of CCNet's full architecture/recipe nor of RegPalm's implementation)"
     else:
         feature_source = f"unknown ({arch_lower})"
         training_recipe = "standardized_open_set_arcface"
