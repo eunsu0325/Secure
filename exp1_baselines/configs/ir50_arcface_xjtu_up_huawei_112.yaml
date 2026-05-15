@@ -1,0 +1,42 @@
+# IR-ResNet50 + ArcFace, scratch training on XJTU-UP-Huawei ROI 112x112.
+# V19 Path 3b (V19.10 Scenario A) — stronger generic CNN baseline on the
+# unconstrained smartphone dataset. Same V19.2 unified Family-A recipe as
+# mfn_arcface_xjtu_up_huawei_112.yaml; only architecture differs.
+
+model:
+  name: ir50
+  architecture: iresnet50
+  embedding_dim: 512
+
+dataset:
+  name: xjtu_up_huawei_roi_baselines
+  manifest_dir: experiments/generated/xjtu_up_huawei_full
+  image_size: 112
+  channels: 3
+  normalize_mean: [0.5, 0.5, 0.5]
+  normalize_std: [0.5, 0.5, 0.5]
+
+arcface:
+  margin: 0.5
+  scale: 48.0
+  eps: 1.0e-7
+
+train:
+  epochs: 50
+  batch_size: 128
+  P: 32
+  K: 4
+  num_workers: 0
+  optimizer: sgd
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 1.0e-4
+  warmup_epochs: 1
+  scheduler: cosine
+  amp: false
+  seed: 42
+  log_interval: 10
+
+output:
+  checkpoint_path: experiments/generated/xjtu_up_huawei_full/ir50_arcface_xjtu_up_huawei_scratch_112.pt
+  log_dir: experiments/generated/xjtu_up_huawei_full/ir50_logs

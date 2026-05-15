@@ -23,10 +23,11 @@ DATASET="${1:-tongji}"
 WHICH="${2:-all}"
 
 case "$DATASET" in
-  tongji) FULL_DIR="experiments/generated/tongji_full"; SIZE=112 ;;
-  iitd)   FULL_DIR="experiments/generated/iitd_full"; SIZE=112 ;;
+  tongji)         FULL_DIR="experiments/generated/tongji_full"; SIZE=112 ;;
+  iitd)           FULL_DIR="experiments/generated/iitd_full"; SIZE=112 ;;
+  xjtu_up_huawei) FULL_DIR="experiments/generated/xjtu_up_huawei_full"; SIZE=112 ;;
   *)
-    echo "[FAIL] unknown dataset '$DATASET' (expected tongji|iitd)" >&2
+    echo "[FAIL] unknown dataset '$DATASET' (expected tongji|iitd|xjtu_up_huawei)" >&2
     exit 1 ;;
 esac
 

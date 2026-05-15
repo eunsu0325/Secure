@@ -1,0 +1,46 @@
+# MobileFaceNet + ArcFace, scratch training on XJTU-UP-Huawei ROI 112x112.
+# V19 Path 3b (V19.10 Scenario A): 3rd main dataset.
+#
+# XJTU-UP-Huawei: Huawei smartphone subset of XJTU-UP (Shao et al. 2020).
+# 100 subjects × 2 hands × 2 conditions (Flash, Nature) = ~4,000 images.
+# Identity-disjoint 5-way split per V19.10 quotas (5/25/7/8/55 subjects).
+# Recipe: V19.2 unified Family-A (SGD lr=0.01 mom=0.9 wd=1e-4, batch=128 P=32×K=4,
+# 50ep cosine + 1ep warmup, ArcFace m=0.5 s=48, 112×112 3-channel input).
+
+model:
+  name: mfn
+  architecture: mobilefacenet
+  embedding_dim: 512
+
+dataset:
+  name: xjtu_up_huawei_roi_baselines
+  manifest_dir: experiments/generated/xjtu_up_huawei_full
+  image_size: 112
+  channels: 3
+  normalize_mean: [0.5, 0.5, 0.5]
+  normalize_std: [0.5, 0.5, 0.5]
+
+arcface:
+  margin: 0.5
+  scale: 48.0
+  eps: 1.0e-7
+
+train:
+  epochs: 50
+  batch_size: 128
+  P: 32
+  K: 4
+  num_workers: 0              # V17 MPS mem-pressure fix (Colab CUDA may raise to 2)
+  optimizer: sgd
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 1.0e-4
+  warmup_epochs: 1
+  scheduler: cosine
+  amp: false
+  seed: 42
+  log_interval: 10
+
+output:
+  checkpoint_path: experiments/generated/xjtu_up_huawei_full/mfn_arcface_xjtu_up_huawei_scratch_112.pt
+  log_dir: experiments/generated/xjtu_up_huawei_full/mfn_logs

@@ -129,7 +129,7 @@ def subject_level_split(
     return SplitResult(assignments=assignments, counts=counts, seed=seed)
 
 
-# Per-dataset evaluation quotas (plan: Identity Split table).
+# Per-dataset evaluation quotas (plan: Identity Split table + V19.10 XJTU-UP).
 # train_backbone is residual and NOT included here.
 DATASET_QUOTAS: Dict[str, Dict[str, int]] = {
     "tongji": {
@@ -150,6 +150,15 @@ DATASET_QUOTAS: Dict[str, Dict[str, int]] = {
         "external_dev": 10,
         "external_test": 10,
     },
+    # V19.10 (2026-05-15) Scenario A: XJTU-UP-Huawei as 3rd main dataset.
+    # 100 subjects → 5+25+7+8 = 45 reserved + 55 train_backbone (= 110 palms).
+    # N_train_palm = 110 ≫ IER-6 threshold (50); safe.
+    "xjtu_up_huawei": {
+        "base_anchor": 5,
+        "future": 25,
+        "external_dev": 7,
+        "external_test": 8,
+    },
 }
 
 
@@ -159,4 +168,5 @@ DATASET_NOMINAL_TRAIN_BACKBONE: Dict[str, int] = {
     "tongji": 160,
     "iitd": 130,
     "bjtu_v2": 80,
+    "xjtu_up_huawei": 55,   # 100 subjects - 45 reserved = 55 train_backbone subjects (110 palms)
 }
