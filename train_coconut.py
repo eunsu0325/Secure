@@ -45,6 +45,21 @@ from coconut.openset import (
 )
 
 
+def _json_default(o):
+    """A6: numpy-aware JSON encoder.
+
+    stdlib json can't serialize numpy scalars (np.float32 from ForgettingTracker.get_report
+    via np.mean, etc.). Coerces to native Python types. Matches the encoder pattern
+    already used in trainer.py:1833 for diag_history.json.
+    """
+    if isinstance(o, np.integer):
+        return int(o)
+    if isinstance(o, np.floating):
+        return float(o)
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
 
 @torch.no_grad()
 def plot_tsne_from_memory(trainer,
@@ -592,13 +607,13 @@ def main(args):
     # 학습 기록 저장
     history_path = os.path.join(results_dir, 'training_history.json')
     with open(history_path, 'w') as f:
-        json.dump(training_history, f, indent=4)
+        json.dump(training_history, f, indent=4, default=_json_default)  # A6
 
     # FPIR drift 로그 저장 (JSON + CSV)
     if fpir_drift_log:
         drift_json_path = os.path.join(results_dir, 'fpir_drift_log.json')
         with open(drift_json_path, 'w') as f:
-            json.dump(fpir_drift_log, f, indent=2)
+            json.dump(fpir_drift_log, f, indent=2, default=_json_default)  # A6
 
         import csv as csv_mod
         drift_csv_path = os.path.join(results_dir, 'fpir_drift_log.csv')
@@ -730,7 +745,7 @@ def main(args):
 
     summary_path = os.path.join(results_dir, 'summary.json')
     with open(summary_path, 'w') as f:
-        json.dump(summary, f, indent=4)
+        json.dump(summary, f, indent=4, default=_json_default)  # A6
 
     if verbose:
         print(f"\nResults saved to: {results_dir}")

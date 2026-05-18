@@ -64,6 +64,13 @@ behavior changes A1 and A5, which only affect previously-broken code paths.
 - **Behavior impact**: None — both old import paths still resolve to the same
   class.
 
+### A6 — numpy-aware JSON encoder in train_coconut.py
+
+- **File**: `train_coconut.py:48-62` (new helper), `train_coconut.py:603, 609, 741` (3 json.dump call sites)
+- **Finding**: Smoke verification of T1+T2 run completed all 5 experiences cleanly but crashed at the finalization step `json.dump(training_history, f, indent=4)` with `TypeError: Object of type float32 is not JSON serializable`. `training_history['forgetting_reports']` contains numpy scalars from `ForgettingTracker.get_report()` (which calls `np.mean()`, `np.std()`, etc.). stdlib json can't serialize np.float32 / np.float64. Phase 0b never exposed this because the `num_experiences` break bug (A1) prevented the run from reaching finalization.
+- **Change**: Added `_json_default(o)` helper at the top of train_coconut.py (mirroring the pattern already used in trainer.py:1833 for `diag_history.json`). Applied `default=_json_default` to all 3 `json.dump` sites: training_history.json, fpir_drift_log.json, summary.json.
+- **Behavior impact**: training_history.json, fpir_drift_log.json, and summary.json now serialize successfully when they contain numpy scalars. Downstream files (`eval_curve.csv`, `det_curve.csv`, t-SNE / DET plots) are unblocked.
+
 ### A5 — visualization.py early-exit returns `fig` not `ax`
 
 - **File**: `coconut/evaluation/visualization.py:113–124`
