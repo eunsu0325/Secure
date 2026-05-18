@@ -1,0 +1,42 @@
+# MobileFaceNet + ArcFace, scratch training on IITD Segmented ROI 112x112.
+# V19 Path 3b: lightweight mobile baseline (IITD counterpart to
+# mfn_arcface_tongji_112.yaml and mfn_arcface_xjtu_up_huawei_112.yaml).
+# Recipe: V19.2 unified Family-A (same as ir50 / ccm_mfn sibling configs).
+
+model:
+  name: mfn
+  architecture: mobilefacenet
+  embedding_dim: 512
+
+dataset:
+  name: iitd_roi_baselines
+  manifest_dir: experiments/generated/iitd_full
+  image_size: 112
+  channels: 3
+  normalize_mean: [0.5, 0.5, 0.5]
+  normalize_std: [0.5, 0.5, 0.5]
+
+arcface:
+  margin: 0.5
+  scale: 48.0
+  eps: 1.0e-7
+
+train:
+  epochs: 50
+  batch_size: 128
+  P: 32
+  K: 4
+  num_workers: 4
+  optimizer: sgd
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 1.0e-4
+  warmup_epochs: 1
+  scheduler: cosine
+  amp: false
+  seed: 42
+  log_interval: 10
+
+output:
+  checkpoint_path: experiments/generated/iitd_full/mfn_arcface_iitd_scratch_112.pt
+  log_dir: experiments/generated/iitd_full/mfn_logs

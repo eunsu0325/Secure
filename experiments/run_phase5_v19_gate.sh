@@ -17,7 +17,9 @@
 #     5. Save gate_metadata.json with verdict (passed | marginal | failed)
 
 set -e
-cd "/Users/kimeunsu/Desktop/Research Notebook/secure/Secure"
+# Resolve repo root relative to this script (works on local macOS and Colab).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}/.."
 
 DATASET="${1:-tongji}"
 WHICH="${2:-all}"

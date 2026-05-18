@@ -118,7 +118,7 @@ class PKBatchSampler(Sampler[List[int]]):
         num_batches: Optional[int] = None,
         seed: int = 42,
     ) -> None:
-        super().__init__(data_source=None)
+        super().__init__()
         self.labels = np.asarray(labels, dtype=np.int64)
         self.P = int(P)
         self.K = int(K)
