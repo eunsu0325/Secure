@@ -68,17 +68,17 @@ Training:
   idl_min_gallery_classes: 2  # 최소 gallery 클래스 수
   idl_gallery_fraction: 0.7   # gallery로 사용할 클래스 비율
 
-  # DER++ (Dark Experience Replay) — 6144D feature distillation
+  # DER++ (Dark Experience Replay) — 2048D feature distillation (CCNet getFeatureCode output dim)
   der_alpha: 0.15             # 0.1→0.15 (QAR이 active rehab → DER 보존력 약간 강화)
   der_batch_size: 32          # DER loss 계산용 샘플 수/iteration
   der_warmup_users: 3         # Warmup 기간 (사용자 수)
 
   # QAR (Quality-Aware Replay) — tail user 선별 재학습
-  # 배치 ���성: current(16) + memory(160, balanced) + rehab(tail only, 추가)
-  # DER++(feature 보���)과 상호보완: QAR=active rehab, DER++=passive preservation
+  # 배치 구성: current(16) + memory(160, balanced) + rehab(tail only, 추가)
+  # DER++(feature 보존)과 상호보완: QAR=active rehab, DER++=passive preservation
   use_qar: true
-  rehab_margin: 0.05        # tau_cos + margin 이하를 tail로 판정 (0.0=임���치 정확히, 0.05=여유)
-  rehab_samples_per_user: 4 # tail user당 추가 replay 샘플 수 (memory_size/100��10, 40% 활용)
+  rehab_margin: 0.05        # tau_cos + margin 이하를 tail로 판정 (0.0=임계치 정확히, 0.05=여유)
+  rehab_samples_per_user: 4 # tail user당 추가 replay 샘플 수 (memory_size/100 ≈ 10, 40% 활용)
   qar_warmup_users: 10      # QAR 활성화 최소 등록 사용자 수 (= openset.warmup_users와 정합)
 
 # Open-set recognition settings
@@ -118,7 +118,9 @@ Openset:
   rejection_gate: 'top1_only'     # top-1 score ≥ τ 단일 게이트 (+ S-norm)
   use_snorm: true                 # per-class Z-score normalization (crowding 보정)
 
-  # GHOST (레거시, use_ghost: true + rejection_gate 미설정 시 사용)
-  use_ghost: false              # GHOST z-score rejection (비권장)
+  # GHOST — DEPRECATED, kept for state_dict compatibility with prior checkpoints.
+  # Not part of the paper-canonical method. Set use_ghost: false (default) and ignore.
+  # Will be physically removed post-paper (Phase 1.5 deferred item C-GHOST).
+  use_ghost: false
   ghost_n_augment: 10
   ghost_shrinkage_min_n: 10

@@ -13,12 +13,8 @@ import copy
 import os
 import random
 
-# COCONUT 모듈 import
 from coconut.losses import SupConLoss, ProxyAnchorLoss
-from coconut.data import MemoryDataset
-
-# 기존 모듈 import (점진적 마이그레이션 예정)
-from coconut.data import get_scr_transforms
+from coconut.data import MemoryDataset, get_scr_transforms
 from .average_meter import AverageMeter
 from coconut.models import PretrainedLoader
 from coconut.classifiers.threshold import ThresholdCalibrator
@@ -37,6 +33,16 @@ from coconut.openset import (
     set_seed,
     _open_with_channels
 )
+
+
+# B6: Diagnostic / calibration subsample caps — lifted from buried inline magic
+# numbers so reviewers can audit "no cherry-pick" without grep-ing for ints.
+# Full data is always used for the final paper metrics; these only cap how
+# many samples are drawn for τ calibration (paper text: §3.3) or for
+# diagnostic logging (PCA spectrum, xdomain FPIR).
+MAX_UNK_CALIB_SAMPLES = 3000   # unknown_dev cap for τ calibration
+MAX_NEGREF_EVAL_SAMPLES = 1000  # xdomain (negref) cap for FPIR_xdom diagnostic
+MAX_PCA_DIAG_SAMPLES = 2000    # memory buffer cap for PCA spectrum diagnostic
 
 
 def worker_init_fn(worker_id):
@@ -192,7 +198,7 @@ class COCONUTTrainer:
             self.idl_rtm_lambda = 0.0
             self.idl_rtm_warmup_users = 0
 
-        # DER++ (Dark Experience Replay) — 6144D feature distillation
+        # DER++ (Dark Experience Replay) — 2048D feature distillation (CCNet getFeatureCode output dim)
         self.der_alpha = getattr(config.training, 'der_alpha', 0.0)
         self.der_batch_size = getattr(config.training, 'der_batch_size', 32)
         self.der_warmup_users = getattr(config.training, 'der_warmup_users', 3)
@@ -784,7 +790,7 @@ class COCONUTTrainer:
             # 에포크 진행률과 평균 손실은 항상 표시해 학습 상황을 바로 확인 가능하게 함
             print(f"  [에포크 {epoch+1}/{self.config.training.epochs_per_experience}] 평균 손실: {avg_loss:.4f}")
 
-        # 메모리 버퍼 업데이트 (DER++: 6144D feature도 함께 저장)
+        # 메모리 버퍼 업데이트 (DER++: 2048D feature도 함께 저장)
         if self.der_alpha > 0:
             self.model.eval()
             stored_features = []
@@ -806,8 +812,10 @@ class COCONUTTrainer:
         # NCM 업데이트
         self._update_ncm()
 
-        # NCM 갱신 후 코사인 유사도 분포 분석 (현재 백본 + 현재 프로토타입 기준으로 정확한 측정)
-        self._analyze_cosine_distribution_epoch()
+        # NCM 갱신 후 코사인 유사도 분포 분석 — verbose 디버그 출력 전용.
+        # B2: verbose 가드 추가 (paper-canonical run은 verbose=false이므로 no-op).
+        if self.verbose:
+            self._analyze_cosine_distribution_epoch()
 
         # 디버깅: NCM과 버퍼 동기화 확인
         all_paths, all_labels, _ = self.memory_buffer.get_all_data()
@@ -1007,9 +1015,9 @@ class COCONUTTrainer:
             if unknown_dev_file and str(unknown_dev_file) != 'None':
                 from coconut.openset.utils import load_paths_labels_excluding
                 unk_paths, _ = load_paths_labels_excluding(str(unknown_dev_file), self.registered_users)
-                if len(unk_paths) > 3000:
+                if len(unk_paths) > MAX_UNK_CALIB_SAMPLES:
                     rng = np.random.RandomState(seed)
-                    idx = rng.choice(len(unk_paths), 3000, replace=False)
+                    idx = rng.choice(len(unk_paths), MAX_UNK_CALIB_SAMPLES, replace=False)
                     unk_paths = [unk_paths[i] for i in idx]
                 if unk_paths:
                     unk_feats = extract_features(
@@ -1112,9 +1120,9 @@ class COCONUTTrainer:
                 # GHOST: feature 추출 → ghost max score
                 from coconut.openset.utils import load_paths_labels_excluding
                 unk_paths, _ = load_paths_labels_excluding(str(unknown_dev_file), self.registered_users)
-                if len(unk_paths) > 3000:
+                if len(unk_paths) > MAX_UNK_CALIB_SAMPLES:
                     rng = np.random.RandomState(seed)
-                    idx = rng.choice(len(unk_paths), 3000, replace=False)
+                    idx = rng.choice(len(unk_paths), MAX_UNK_CALIB_SAMPLES, replace=False)
                     unk_paths = [unk_paths[i] for i in idx]
                 if unk_paths:
                     unk_feats = extract_features(
@@ -1128,9 +1136,9 @@ class COCONUTTrainer:
                 # S-norm: feature 직접 추출하여 per-class cohort 통계 계산
                 from coconut.openset.utils import load_paths_labels_excluding
                 unk_paths, _ = load_paths_labels_excluding(str(unknown_dev_file), self.registered_users)
-                if len(unk_paths) > 3000:
+                if len(unk_paths) > MAX_UNK_CALIB_SAMPLES:
                     rng = np.random.RandomState(seed)
-                    idx = rng.choice(len(unk_paths), 3000, replace=False)
+                    idx = rng.choice(len(unk_paths), MAX_UNK_CALIB_SAMPLES, replace=False)
                     unk_paths = [unk_paths[i] for i in idx]
                 if unk_paths:
                     unk_feats = extract_features(
@@ -1169,7 +1177,7 @@ class COCONUTTrainer:
                     str(unknown_dev_file),
                     self.registered_users,
                     self.test_transform, self.device,
-                    max_eval=3000,
+                    max_eval=MAX_UNK_CALIB_SAMPLES,
                     channels=channels
                 )
             if self.verbose:
@@ -1536,9 +1544,9 @@ class COCONUTTrainer:
         _negref_source = str(self.config.dataset.xdomain_file)
         negref_paths, _ = load_paths_labels_from_txt(_negref_source)
 
-        if len(negref_paths) > 1000:
+        if len(negref_paths) > MAX_NEGREF_EVAL_SAMPLES:
             rng = np.random.RandomState(eval_seed + 2000)
-            negref_paths = rng.choice(negref_paths, 1000, replace=False).tolist()
+            negref_paths = rng.choice(negref_paths, MAX_NEGREF_EVAL_SAMPLES, replace=False).tolist()
 
         if negref_paths:
             preds_neg = predict_batch(
@@ -1967,12 +1975,8 @@ class COCONUTTrainer:
         if TRR_n is not None:
             print(f"        FPIR_xdom = {FAR_n:.3f}")
 
-        # 하위 호환: 기존 키도 포함
-        results['FNIR'] = results.get('FNIR@1%FPIR', 0)
-        results['FPIR_in'] = results.get('achieved_FPIR@1%', 0)
-        results['FRR'] = results.get('det_fail@1%', 0)
-        results['MisID'] = results.get('id_fail@1%', 0)
-        results['TRR_unknown'] = 1.0 - results.get('achieved_FPIR@1%', 0)
+        # B3: legacy aliases removed; callers read canonical keys directly
+        # (FNIR@1%FPIR, achieved_FPIR@1%, det_fail@1%, id_fail@1%).
         results['mode'] = 'fnir_at_fpir'
         results['score_type'] = 'max'
 
@@ -2458,10 +2462,9 @@ class COCONUTTrainer:
         self.model.train()
 
     @torch.no_grad()
-    @torch.no_grad()
     def _diagnose_pca(self):
         """
-        6144D 임베딩의 실효 차원을 PCA로 진단.
+        2048D CCNet 임베딩의 실효 차원을 PCA로 진단.
         메모리 버퍼 + 등록 사용자 데이터에서 feature를 추출하고
         explained variance ratio의 누적합으로 실효 차원을 측정.
         """
@@ -2477,16 +2480,18 @@ class COCONUTTrainer:
         # data는 이미지 경로(str) 리스트
         all_paths, all_labels, _ = self.memory_buffer.get_all_data()
 
-        # 최대 2000개 샘플로 제한 (메모리/속도)
-        if len(all_paths) > 2000:
-            rng = np.random.RandomState(42)
-            idx = rng.choice(len(all_paths), 2000, replace=False)
+        # 최대 MAX_PCA_DIAG_SAMPLES 샘플로 제한 (메모리/속도)
+        # B5: hardcoded seed=42 -> config.training.seed + experience_count
+        if len(all_paths) > MAX_PCA_DIAG_SAMPLES:
+            pca_seed = getattr(self.config.training, 'seed', 42) + self.experience_count
+            rng = np.random.RandomState(pca_seed)
+            idx = rng.choice(len(all_paths), MAX_PCA_DIAG_SAMPLES, replace=False)
             all_paths = [all_paths[i] for i in idx]
             all_labels = [all_labels[i] for i in idx]
 
         channels = self.config.dataset.channels
 
-        # raw 6144D feature 추출
+        # raw 2048D feature 추출 (CCNet getFeatureCode)
         feats = extract_features(
             self.model, all_paths, self.test_transform, self.device,
             batch_size=64, channels=channels
@@ -2628,7 +2633,7 @@ class COCONUTTrainer:
                 img = _open_with_channels(path, self.config.dataset.channels)
                 img_tensor = self.test_transform(img).unsqueeze(0).to(self.device)
 
-                # NCM 점수 계산 (config에 따라 6144D 또는 512D 특징 사용)
+                # NCM 점수 계산 (CCNet getFeatureCode → 2048D)
                 feat = self.model.getFeatureCode(img_tensor)
                 ncm_scores = self.ncm.forward(feat)
 

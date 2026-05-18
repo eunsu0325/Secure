@@ -512,7 +512,7 @@ def main(args):
             if hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
                 last_eval = trainer.evaluation_history[-1]
                 metrics = last_eval.get('metrics', {})
-                fpir_in = metrics.get('FPIR_in', None)
+                fpir_in = metrics.get('achieved_FPIR@1%', None)  # B3: canonical key
 
             fpir_drift_log.append({
                 'experience': exp_id + 1,
@@ -578,6 +578,12 @@ def main(args):
             print(f"[Progress] {exp_id + 1}/{config_obj.training.num_experiences} "
                   f"({100 * (exp_id + 1) / config_obj.training.num_experiences:.1f}%) "
                   f"| Elapsed: {elapsed/60:.1f}m | ETA: {eta/60:.1f}m")
+
+        # A1: honor config.training.num_experiences as a hard limit on the loop.
+        # Previously the loop iterated all users yielded by ExperienceStream,
+        # silently ignoring this knob (verified Phase 0b: smoke with =5 ran 148).
+        if exp_id + 1 >= config_obj.training.num_experiences:
+            break
 
     # 9. 최종 결과 저장
     if verbose:
@@ -710,12 +716,13 @@ def main(args):
     if openset_enabled and hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
         last_eval = trainer.evaluation_history[-1]
         last_metrics = last_eval.get('metrics', {})
+        # B3: pull canonical keys directly from results dict (no legacy aliases)
         summary['final_openset'] = {
             'Rank1':       last_metrics.get('Rank1', 0),
-            'FNIR':        last_metrics.get('FNIR', 0),
-            'FRR':         last_metrics.get('FRR', 0),
-            'MisID':       last_metrics.get('MisID', 0),
-            'FPIR_in':     last_metrics.get('FPIR_in', 0),
+            'FNIR':        last_metrics.get('FNIR@1%FPIR', 0),
+            'FRR':         last_metrics.get('det_fail@1%', 0),
+            'MisID':       last_metrics.get('id_fail@1%', 0),
+            'FPIR_in':     last_metrics.get('achieved_FPIR@1%', 0),
             'FPIR_xdom':   last_metrics.get('FPIR_xdom', None),
             'tau_s':       last_eval.get('tau_s', 0),
             'num_users':   last_eval.get('num_users', 0),
