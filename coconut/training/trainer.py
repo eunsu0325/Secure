@@ -257,15 +257,6 @@ class COCONUTTrainer:
             if self.verbose:
                 print(f" Open-set mode: MAX")
 
-            # GHOST 초기화 (레거시)
-            self.use_ghost = getattr(config.openset, 'use_ghost', False)
-            self.ghost_n_augment = getattr(config.openset, 'ghost_n_augment', 10)
-            if self.use_ghost:
-                self.ncm.ghost_enabled = True
-                self.ncm.ghost_shrinkage_min_n = getattr(config.openset, 'ghost_shrinkage_min_n', 10)
-                if self.verbose:
-                    print(f" GHOST rejection enabled (n_augment={self.ghost_n_augment}, shrinkage_min_n={self.ncm.ghost_shrinkage_min_n})")
-
             # Rejection gate 모드 설정
             self.rejection_gate = getattr(config.openset, 'rejection_gate', 'top1_only')
             self.ncm.rejection_gate = self.rejection_gate
@@ -302,10 +293,8 @@ class COCONUTTrainer:
                 # 레거시 호환: 단일 calibrator도 cosine용으로 alias
                 self.threshold_calibrator = self.threshold_calibrator_cos
             else:
-                # 기존 단일 calibrator (top1_only 또는 GHOST)
+                # 기존 단일 calibrator (top1_only)
                 if score_mode == 'mahalanobis':
-                    cal_clip_range = None
-                elif self.use_ghost:
                     cal_clip_range = None
                 elif self.use_snorm:
                     cal_clip_range = None  # z-score는 [-1,1] 범위 초과 가능
@@ -344,8 +333,6 @@ class COCONUTTrainer:
             if self.rejection_gate == 'top1_margin':
                 self.ncm.set_thresholds(tau_cos=initial_tau, tau_margin=0.0)
                 self.ncm.tau_s = initial_tau  # 레거시 호환
-            elif self.use_ghost:
-                self.ncm.set_thresholds(tau_s=0.0)
             else:
                 # top1_only
                 self.ncm.set_thresholds(tau_s=initial_tau, tau_cos=initial_tau)
@@ -356,7 +343,6 @@ class COCONUTTrainer:
                 print(f"   Initial τ_s: {initial_tau}")
         else:
             self.registered_users = set()
-            self.use_ghost = False
             if self.verbose:
                 print(" Open-set mode disabled")
 
@@ -818,11 +804,6 @@ class COCONUTTrainer:
         # NCM 업데이트
         self._update_ncm()
 
-        # NCM 갱신 후 코사인 유사도 분포 분석 — verbose 디버그 출력 전용.
-        # B2: verbose 가드 추가 (paper-canonical run은 verbose=false이므로 no-op).
-        if self.verbose:
-            self._analyze_cosine_distribution_epoch()
-
         # 디버깅: NCM과 버퍼 동기화 확인
         all_paths, all_labels, _ = self.memory_buffer.get_all_data()
         buffer_classes = set(int(label) for label in all_labels)
@@ -1118,27 +1099,11 @@ class COCONUTTrainer:
 
             return  # 이중 게이트 캘리브레이션 완료
 
-        # === 기존 단일 threshold 캘리브레이션 (GHOST / top1_only) ===
+        # === 기존 단일 threshold 캘리브레이션 (top1_only) ===
         s_impostor = np.array([])
 
         if unknown_dev_file and str(unknown_dev_file) != 'None':
-            if getattr(self, 'use_ghost', False):
-                # GHOST: feature 추출 → ghost max score
-                from coconut.openset.utils import load_paths_labels_excluding
-                unk_paths, _ = load_paths_labels_excluding(str(unknown_dev_file), self.registered_users)
-                if len(unk_paths) > MAX_UNK_CALIB_SAMPLES:
-                    rng = np.random.RandomState(seed)
-                    idx = rng.choice(len(unk_paths), MAX_UNK_CALIB_SAMPLES, replace=False)
-                    unk_paths = [unk_paths[i] for i in idx]
-                if unk_paths:
-                    unk_feats = extract_features(
-                        self.model, unk_paths, self.test_transform, self.device,
-                        channels=channels
-                    )
-                    if len(unk_feats) > 0:
-                        unk_tensor = torch.from_numpy(unk_feats).to(self.device)
-                        s_impostor = self.ncm.compute_ghost_max_scores(unk_tensor).cpu().numpy()
-            elif self.use_snorm:
+            if self.use_snorm:
                 # S-norm: feature 직접 추출하여 per-class cohort 통계 계산
                 from coconut.openset.utils import load_paths_labels_excluding
                 unk_paths, _ = load_paths_labels_excluding(str(unknown_dev_file), self.registered_users)
@@ -1188,9 +1153,8 @@ class COCONUTTrainer:
                 )
             if self.verbose:
                 snorm_tag = " (S-norm)" if self.use_snorm else ""
-                ghost_tag = " (GHOST)" if getattr(self, 'use_ghost', False) else ""
                 print(f"   Unknown Dev: {len(s_impostor)} scores from {unknown_dev_file}"
-                      + ghost_tag + snorm_tag)
+                      + snorm_tag)
         else:
             print("  [WARN] unknown_dev_file not set. τ calibration skipped.")
 
@@ -1201,27 +1165,12 @@ class COCONUTTrainer:
             all_probe_paths.extend(paths)
             all_probe_labels.extend([uid] * len(paths))
 
-        if getattr(self, 'use_ghost', False):
-            # GHOST: feature 추출 → ghost max score
-            if all_probe_paths:
-                gen_feats = extract_features(
-                    self.model, all_probe_paths, self.test_transform, self.device,
-                    channels=channels
-                )
-                if len(gen_feats) > 0:
-                    gen_tensor = torch.from_numpy(gen_feats).to(self.device)
-                    s_genuine = self.ncm.compute_ghost_max_scores(gen_tensor).cpu().numpy()
-                else:
-                    s_genuine = np.array([])
-            else:
-                s_genuine = np.array([])
-        else:
-            s_genuine = extract_scores_genuine(
-                self.model, self.ncm,
-                all_probe_paths, all_probe_labels,
-                self.test_transform, self.device,
-                channels=channels
-            )
+        s_genuine = extract_scores_genuine(
+            self.model, self.ncm,
+            all_probe_paths, all_probe_labels,
+            self.test_transform, self.device,
+            channels=channels
+        )
 
         if self.verbose:
             print(f"   Genuine (probe, 참고용): {len(s_genuine)} scores")
@@ -1367,8 +1316,6 @@ class COCONUTTrainer:
                 nm_dual = self.ncm.compute_dual_gate_scores(nonmated_tensor)
                 nonmated_max_scores = nm_dual['cosine_max'].cpu().numpy()
                 nonmated_margins = nm_dual['margin'].cpu().numpy()
-            elif getattr(self, 'use_ghost', False):
-                nonmated_max_scores = self.ncm.compute_ghost_max_scores(nonmated_tensor).cpu().numpy()
             else:
                 nonmated_ncm_scores = self.ncm.forward(nonmated_tensor)
                 if nonmated_ncm_scores.numel() > 0:
@@ -1409,13 +1356,10 @@ class COCONUTTrainer:
                     mated_max_scores.append(max_score)
                     mated_rank1_correct.append(pred_id == true_id)
             else:
-                # 기존 로직 (GHOST / top1_only)
+                # 기존 로직 (top1_only)
                 mated_ncm_scores = self.ncm.forward(mated_tensor)
                 mated_registered_scores = mated_ncm_scores[:, registered_ids]
                 id_to_reg_idx = {cid: idx for idx, cid in enumerate(registered_ids)}
-
-                if getattr(self, 'use_ghost', False):
-                    mated_ghost_scores = self.ncm.compute_ghost_max_scores(mated_tensor).cpu().numpy()
 
                 for i in range(len(mated_labels)):
                     true_id = mated_labels[i]
@@ -1429,10 +1373,7 @@ class COCONUTTrainer:
                     pred_reg_idx = scores_reg.argmax().item()
                     pred_id = registered_ids[pred_reg_idx]
 
-                    if getattr(self, 'use_ghost', False):
-                        max_score = mated_ghost_scores[i]
-                    else:
-                        max_score = scores_reg.max().item()
+                    max_score = scores_reg.max().item()
 
                     mated_genuine_scores.append(genuine_score)
                     mated_max_scores.append(max_score)
@@ -1573,11 +1514,6 @@ class COCONUTTrainer:
             if self.rejection_gate == 'top1_margin':
                 _ms = mated_cosine_max  # 이미 cosine
                 _margins_diag = mated_margins_arr
-            elif getattr(self, 'use_ghost', False):
-                # GHOST 모드: mated_max_scores_arr가 gamma이므로 cosine을 별도 계산
-                _mt_cos = self.ncm.forward(torch.from_numpy(mated_feats).to(self.device), apply_snorm=False)
-                _ms = _mt_cos[:, registered_ids].max(dim=1).values.cpu().numpy()
-                _margins_diag = None
             elif self.use_snorm:
                 # S-norm 모드: 진단은 raw cosine으로 (시계열 비교용)
                 _mt_cos = self.ncm.forward(torch.from_numpy(mated_feats).to(self.device), apply_snorm=False)
@@ -1648,45 +1584,6 @@ class COCONUTTrainer:
                     print(f"  Worst: User {uid} -> mean_score={score:.4f} (n={len(_class_scores[uid])})")
                 for uid, score in _best5:
                     print(f"  Best:  User {uid} -> mean_score={score:.4f} (n={len(_class_scores[uid])})")
-
-            # --- 4. GHOST 진단 (verbose only) ---
-            _corr = None
-            _s_values = None
-            _gammas = None
-            if getattr(self, 'use_ghost', False) and hasattr(self.ncm, 'ghost_class_stds_raw') and self.ncm.ghost_class_stds_raw:
-                _cosines_g = []
-                _s_values_list = []
-                _gammas_list = []
-                _is_correct = []
-
-                _mt2 = torch.from_numpy(mated_feats).to(self.device)
-                _scores2 = self.ncm.forward(_mt2, apply_snorm=False)
-                _top1_vals = _scores2.max(dim=1).values.cpu().numpy()
-                _top1_ids = _scores2.argmax(dim=1).cpu().numpy()
-
-                for i in range(len(_labels)):
-                    k = int(_top1_ids[i])
-                    if k not in self.ncm.ghost_class_stds_raw:
-                        continue
-                    mu_k = self.ncm.ghost_class_means_raw[k].to(self.device)
-                    std_k = self.ncm.ghost_class_stds_raw[k].to(self.device)
-                    n_k = self.ncm.ghost_class_counts.get(k, 1)
-                    if self.ncm.ghost_global_std_raw is not None:
-                        lam = min(n_k / self.ncm.ghost_shrinkage_min_n, 1.0)
-                        g_std = self.ncm.ghost_global_std_raw.to(self.device)
-                        std_k = lam * std_k + (1 - lam) * g_std
-                    s = (torch.abs(_mt2[i] - mu_k) / (std_k + 1e-12)).mean().item()
-                    gamma = float(_top1_vals[i]) / (s + 1e-12)
-                    _cosines_g.append(float(_top1_vals[i]))
-                    _s_values_list.append(s)
-                    _gammas_list.append(gamma)
-                    _is_correct.append(int(_top1_ids[i]) == _labels[i])
-
-                if len(_cosines_g) >= 5:
-                    _cosines_g = np.array(_cosines_g)
-                    _s_values = np.array(_s_values_list)
-                    _gammas = np.array(_gammas_list)
-                    _corr = np.corrcoef(_cosines_g, _s_values)[0, 1]
 
             # --- 5. Impostor vs Genuine margin 비교 ---
             if len(nonmated_feats) > 0 and _margin is not None:
@@ -1789,15 +1686,6 @@ class COCONUTTrainer:
                     'tau_margin': float(self.ncm.tau_margin) if self.ncm.tau_margin is not None else None,
                 })
 
-            if _corr is not None:
-                _diag_entry.update({
-                    'ghost_s_mean': float(_s_values.mean()),
-                    'ghost_s_std': float(_s_values.std()),
-                    'ghost_gamma_mean': float(_gammas.mean()),
-                    'ghost_gamma_std': float(_gammas.std()),
-                    'ghost_corr_cos_s': float(_corr),
-                })
-
             if '_worst5' in dir():
                 _diag_entry['worst_users'] = [(int(uid), float(sc)) for uid, sc in _worst5]
                 _diag_entry['best_users'] = [(int(uid), float(sc)) for uid, sc in _best5]
@@ -1891,15 +1779,6 @@ class COCONUTTrainer:
                             f.write(f"{'N/A':>6} {'N/A':>6}")
                         f.write("\n")
 
-                    # GHOST 추이
-                    if any('ghost_corr_cos_s' in d for d in self._diag_history):
-                        f.write(f"\n\nGHOST corr(cosine, s) trend\n{'='*60}\n")
-                        for d in self._diag_history:
-                            if 'ghost_corr_cos_s' in d:
-                                f.write(f"  Exp {d['exp']:3d}: corr={d['ghost_corr_cos_s']:.3f}  "
-                                        f"s_u={d['ghost_s_mean']:.0f}  "
-                                        f"g_u={d['ghost_gamma_mean']:.6f}\n")
-
                     # Tail vs Normal 추이
                     if any('tail_cos_mean' in d for d in self._diag_history):
                         f.write(f"\n\nTail(bot20%) vs Normal(top50%) trend\n{'='*60}\n")
@@ -1940,12 +1819,6 @@ class COCONUTTrainer:
                             f.write(f"    -> margin is {diff:.1f}%p better\n")
                         else:
                             f.write(f"    -> cosine is better\n")
-                    if 'ghost_corr_cos_s' in latest:
-                        f.write(f"  GHOST corr(cos,s) = {latest['ghost_corr_cos_s']:.3f}\n")
-                        if abs(latest['ghost_corr_cos_s']) > 0.5:
-                            f.write(f"    -> High correlation: GHOST effect limited\n")
-                        else:
-                            f.write(f"    -> Low correlation: GHOST promising\n")
 
                 if self.verbose:
                     print(f"  [DIAG] Report saved: {_txt_path}")
@@ -2093,378 +1966,9 @@ class COCONUTTrainer:
                       f"min={pv_min:.3e}, max={pv_max:.3e}, max/min={ratio:.1f}"
                       + (" !!NaN/Inf!!" if has_bad else ""))
 
-        # Full PCA whitening (Step 2b) — supports 'full_whitened' and 'projection_only'
-        mahalanobis_variant = getattr(self.config.openset, 'mahalanobis_variant', 'diagonal')
-        if ncm_score_mode == 'mahalanobis' and mahalanobis_variant in ('full_whitened', 'projection_only'):
-            centered_all = []
-            num_classes_cov = 0
-            for features_list in class_features.values():
-                n = len(features_list)
-                if n < 2:
-                    continue
-                feat_tensor = torch.stack(features_list)
-                feat_norm = F.normalize(feat_tensor, p=2, dim=1, eps=1e-12)
-                class_mean = feat_norm.mean(dim=0, keepdim=True)
-                centered_all.append(feat_norm - class_mean)
-                num_classes_cov += 1
-
-            if centered_all:
-                X = torch.cat(centered_all, dim=0)
-                dof_pca = X.shape[0] - num_classes_cov
-                D = X.shape[1]
-
-                cov = (X.T @ X) / max(dof_pca, 1)
-                tr_mean = torch.diagonal(cov).mean()
-
-                # ── Shrinkage mode 분기 (Phase A) ──────────────────────────
-                shrink_mode = getattr(self.config.openset, 'pca_shrinkage_mode', 'auto')
-                if shrink_mode == 'auto':
-                    lam_pca = min(1.0, float(D) / (D + dof_pca))
-                elif shrink_mode == 'fixed':
-                    lam_pca = float(getattr(self.config.openset, 'pca_shrinkage_lambda', 0.1))
-                    lam_pca = max(0.0, min(1.0, lam_pca))
-                else:  # 'none'
-                    lam_pca = 0.0
-
-                eye_D = torch.eye(D, device=cov.device, dtype=cov.dtype)
-                if lam_pca > 0:
-                    cov_shrunk = (1 - lam_pca) * cov + lam_pca * tr_mean * eye_D
-                else:
-                    jitter = 1e-6 * tr_mean
-                    cov_shrunk = cov + jitter * eye_D
-
-                # ── Raw spectrum 진단 (shrinkage 기여 분리용) ─────────────
-                try:
-                    eigvals_raw = torch.linalg.eigvalsh(cov)
-                    tot_raw = eigvals_raw.sum().clamp(min=1e-12)
-                    cumvar_raw = torch.cumsum(eigvals_raw.flip(0), dim=0) / tot_raw
-                    cv90_raw = int((cumvar_raw >= 0.90).float().argmax().item()) + 1
-                    cv99_raw = int((cumvar_raw >= 0.99).float().argmax().item()) + 1
-                    top5_raw = eigvals_raw[-5:].flip(0)
-                    ratio_raw = (eigvals_raw[-1] / eigvals_raw[-min(32, D)].clamp(min=1e-12)).item()
-                    print(f"   [PCA-W][raw]   top5={[f'{v:.2e}' for v in top5_raw.tolist()]}, "
-                          f"cv90→{cv90_raw}D, cv99→{cv99_raw}D, top1/top32={ratio_raw:.2f}")
-                except Exception as _e:
-                    print(f"   [PCA-W][raw]   eigvalsh failed: {_e}")
-
-                eigvals, eigvecs = torch.linalg.eigh(cov_shrunk)
-
-                pca_explained_var = getattr(self.config.openset, 'pca_explained_var', 0.99)
-                pca_max_k = getattr(self.config.openset, 'pca_max_k', 256)
-                total_var = eigvals.sum()
-                cumvar = torch.cumsum(eigvals.flip(0), dim=0) / total_var
-
-                # ── k mode 분기 (Phase A) ───────────────────────────────
-                k_mode = getattr(self.config.openset, 'pca_k_mode', 'adaptive')
-                if k_mode == 'fixed':
-                    k = int(getattr(self.config.openset, 'pca_fixed_k', 32))
-                    k = min(k, D)
-                else:
-                    k = int((cumvar >= pca_explained_var).float().argmax().item()) + 1
-                    k = min(k, pca_max_k, D)
-                k = max(k, 2)  # 최소 안전장치 (num_classes_cov 강제 제거)
-
-                top_vals = eigvals[-k:]
-                top_vecs = eigvecs[:, -k:]
-                reg = getattr(self.config.openset, 'var_reg_alpha', 1e-4)
-                # ── Variant 분기: full_whitened vs projection_only ──────
-                if mahalanobis_variant == 'projection_only':
-                    W = top_vecs  # (D, k) — orthonormal projection only
-                    inv_sqrt = None
-                else:  # full_whitened
-                    inv_sqrt = 1.0 / torch.sqrt(top_vals + reg)
-                    W = top_vecs * inv_sqrt.unsqueeze(0)  # (D, k)
-
-                class_ids_sorted = sorted(class_features.keys())
-                max_id = max(class_ids_sorted)
-                M_white = torch.zeros(max_id + 1, k, device=W.device, dtype=W.dtype)
-                for cid in class_ids_sorted:
-                    raw_mean = torch.stack(class_features[cid]).mean(0)
-                    norm_mean = F.normalize(raw_mean.unsqueeze(0), p=2, dim=1, eps=1e-12).squeeze(0)
-                    M_white[cid] = norm_mean.to(W.device, dtype=W.dtype) @ W
-
-                self.ncm.set_whitening(W.cpu(), M_white.cpu())
-
-                # ============ PCA Whitening 종합 진단 로그 ============
-                eigval_ratio = eigvals[-1].item() / max(eigvals[-k].item(), 1e-12)
-
-                # 1) 기본 정보
-                print(f"   [PCA-W] variant={mahalanobis_variant}, k={k} "
-                      f"(mode={k_mode}, explain={cumvar[k-1].item():.3f}), "
-                      f"C={num_classes_cov}, dof={dof_pca}, "
-                      f"λ_shrink={lam_pca:.3f} (mode={shrink_mode})")
-
-                # 2) Eigenvalue spectrum 상세
-                #    ratio>>1이면 차원별 차별화 작동, ≈1이면 diagonal과 동일
-                #    90%/95% 도달 차원 → 신호 집중도
-                cumvar_90 = int((cumvar >= 0.90).float().argmax().item()) + 1
-                cumvar_95 = int((cumvar >= 0.95).float().argmax().item()) + 1
-                cumvar_99 = int((cumvar >= 0.99).float().argmax().item()) + 1
-                print(f"   [PCA-W] eigval: top1={eigvals[-1].item():.3e}, "
-                      f"topk={eigvals[-k].item():.3e}, ratio={eigval_ratio:.1f}, "
-                      f"bottom={eigvals[0].item():.3e}")
-                print(f"   [PCA-W] cumvar: 90%→{cumvar_90}D, 95%→{cumvar_95}D, "
-                      f"99%→{cumvar_99}D (선택 k={k})")
-
-                # 3) Eigenvalue 분포 구간별 (whitening이 어떤 방향을 얼마나 증폭하는지)
-                #    inv_sqrt가 곧 가중치 → top eigval은 덜 증폭, bottom은 크게 증폭
-                top5_vals = eigvals[-5:].flip(0)
-                bot5_vals = eigvals[-k:][:5] if k >= 5 else eigvals[-k:]
-                print(f"   [PCA-W] eigval_top5={[f'{v:.2e}' for v in top5_vals.tolist()]}")
-                print(f"   [PCA-W] eigval_botk5={[f'{v:.2e}' for v in bot5_vals.tolist()]}")
-
-                # 4) Whitened class mean 간 거리 (분리도)
-                active_ids = [cid for cid in class_ids_sorted if M_white[cid].abs().sum() > 0]
-                if len(active_ids) >= 2:
-                    active_means = M_white[active_ids]
-                    dists = torch.cdist(active_means.unsqueeze(0), active_means.unsqueeze(0)).squeeze(0)
-                    mask = torch.triu(torch.ones_like(dists, dtype=torch.bool), diagonal=1)
-                    pair_dists = dists[mask]
-                    print(f"   [PCA-W] wh_mean_dist: mean={pair_dists.mean().item():.2f}, "
-                          f"min={pair_dists.min().item():.2f}, max={pair_dists.max().item():.2f}, "
-                          f"std={pair_dists.std().item():.2f}")
-                    # 가장 가까운 클래스 쌍 (crowding 위험)
-                    min_idx = pair_dists.argmin().item()
-                    # upper triangle indices → (i,j) 복원
-                    n_active = len(active_ids)
-                    row, col = 0, 0
-                    cnt = 0
-                    for r in range(n_active):
-                        for c_ in range(r+1, n_active):
-                            if cnt == min_idx:
-                                row, col = r, c_
-                            cnt += 1
-                    print(f"   [PCA-W] closest_pair: class {active_ids[row]} ↔ {active_ids[col]} "
-                          f"(dist={pair_dists.min().item():.2f})")
-
-                # 5) 원본 cosine 공간 vs whitened 공간 비교
-                if len(active_ids) >= 2:
-                    raw_means_norm = []
-                    for cid in active_ids:
-                        rm = torch.stack(class_features[cid]).mean(0)
-                        raw_means_norm.append(F.normalize(rm.unsqueeze(0), p=2, dim=1, eps=1e-12).squeeze(0))
-                    raw_means_t = torch.stack(raw_means_norm)
-                    raw_cos = raw_means_t @ raw_means_t.T
-                    raw_mask = torch.triu(torch.ones_like(raw_cos, dtype=torch.bool), diagonal=1)
-                    raw_cos_pairs = raw_cos[raw_mask]
-                    print(f"   [PCA-W] raw_cos: mean={raw_cos_pairs.mean().item():.4f}, "
-                          f"max={raw_cos_pairs.max().item():.4f}, "
-                          f"min={raw_cos_pairs.min().item():.4f} (높을수록 crowding)")
-
-                # 6) 전체 클래스 genuine/impostor score 분포 (모든 sample 사용)
-                if len(active_ids) >= 2:
-                    all_genuine_scores = []
-                    all_impostor_scores = []
-                    per_class_genuine = {}
-
-                    for cid in active_ids:
-                        feats_list = class_features[cid]
-                        for feat in feats_list:
-                            feat_norm = F.normalize(feat.unsqueeze(0), p=2, dim=1, eps=1e-12)
-                            feat_w = (feat_norm.to(W.device, dtype=W.dtype) @ W).squeeze(0)
-                            # genuine score (자기 클래스)
-                            gen_score = -((feat_w - M_white[cid]) ** 2).sum().item()
-                            all_genuine_scores.append(gen_score)
-                            if cid not in per_class_genuine:
-                                per_class_genuine[cid] = []
-                            per_class_genuine[cid].append(gen_score)
-                            # impostor score (가장 가까운 타 클래스)
-                            best_imp = float('-inf')
-                            for oid in active_ids:
-                                if oid == cid:
-                                    continue
-                                imp_score = -((feat_w - M_white[oid]) ** 2).sum().item()
-                                if imp_score > best_imp:
-                                    best_imp = imp_score
-                            all_impostor_scores.append(best_imp)
-
-                    import numpy as np
-                    gen_arr = np.array(all_genuine_scores)
-                    imp_arr = np.array(all_impostor_scores)
-                    gen_p5 = np.percentile(gen_arr, 5)
-                    imp_p95 = np.percentile(imp_arr, 95)
-                    overlap = (gen_p5 < imp_p95)
-
-                    print(f"   [PCA-W] genuine(n={len(gen_arr)}): "
-                          f"μ={gen_arr.mean():.1f}, σ={gen_arr.std():.1f}, "
-                          f"p5={gen_p5:.1f}, min={gen_arr.min():.1f}")
-                    print(f"   [PCA-W] impostor(n={len(imp_arr)}): "
-                          f"μ={imp_arr.mean():.1f}, σ={imp_arr.std():.1f}, "
-                          f"p95={imp_p95:.1f}, max={imp_arr.max():.1f}")
-                    print(f"   [PCA-W] separation: gap_μ={gen_arr.mean() - imp_arr.mean():.1f}, "
-                          f"gap_p5_p95={gen_p5 - imp_p95:.1f} "
-                          f"({'⚠ OVERLAP' if overlap else '✓ separated'})")
-
-                    # 7) Per-class genuine score 분포 (tail user 식별)
-                    #    mean genuine이 가장 낮은 클래스 = detection fail 위험
-                    class_gen_means = {cid: np.mean(scores) for cid, scores in per_class_genuine.items()}
-                    sorted_by_gen = sorted(class_gen_means.items(), key=lambda x: x[1])
-                    n_show = min(5, len(sorted_by_gen))
-                    worst = sorted_by_gen[:n_show]
-                    best = sorted_by_gen[-n_show:]
-                    print(f"   [PCA-W] worst_classes(genuine): "
-                          f"{[(cid, f'{sc:.1f}') for cid, sc in worst]}")
-                    print(f"   [PCA-W] best_classes(genuine): "
-                          f"{[(cid, f'{sc:.1f}') for cid, sc in best]}")
-
-                    # 8) Whitening 효과 정량화: diagonal 대비 separation 비교
-                    #    diagonal은 uniform scaling이므로 cosine ordering과 같음
-                    #    여기서 cosine genuine/impostor도 계산하여 비교
-                    cos_genuine = []
-                    cos_impostor = []
-                    for cid in active_ids:
-                        feats_list = class_features[cid]
-                        for feat in feats_list:
-                            feat_norm = F.normalize(feat.unsqueeze(0), p=2, dim=1, eps=1e-12).squeeze(0)
-                            # cosine genuine
-                            cos_gen = (feat_norm @ raw_means_t[active_ids.index(cid)]).item()
-                            cos_genuine.append(cos_gen)
-                            # cosine impostor (best)
-                            best_cos_imp = float('-inf')
-                            for j, oid in enumerate(active_ids):
-                                if oid == cid:
-                                    continue
-                                cs = (feat_norm @ raw_means_t[j]).item()
-                                if cs > best_cos_imp:
-                                    best_cos_imp = cs
-                            cos_impostor.append(best_cos_imp)
-                    cos_gen_arr = np.array(cos_genuine)
-                    cos_imp_arr = np.array(cos_impostor)
-                    cos_sep = cos_gen_arr.mean() - cos_imp_arr.mean()
-                    wh_sep = gen_arr.mean() - imp_arr.mean()
-                    print(f"   [PCA-W] vs_cosine: cos_sep={cos_sep:.4f}, wh_sep={wh_sep:.1f}")
-                    print(f"   [PCA-W] vs_cosine: cos_gen_p5={np.percentile(cos_gen_arr,5):.4f}, "
-                          f"cos_imp_p95={np.percentile(cos_imp_arr,95):.4f}, "
-                          f"cos_gap_p5_p95={np.percentile(cos_gen_arr,5)-np.percentile(cos_imp_arr,95):.4f}")
-
-                    # 9) Tail-specific 지표: tail user 수 (FRR 위험 클래스)
-                    #    genuine mean이 impostor p95 아래면 그 클래스는 detection 실패 위험
-                    tail_classes = []
-                    for cid, scores in per_class_genuine.items():
-                        cls_gen_mean = np.mean(scores)
-                        if cls_gen_mean < imp_p95:
-                            tail_classes.append((cid, cls_gen_mean))
-                    print(f"   [PCA-W] tail_risk: {len(tail_classes)}/{len(active_ids)} classes "
-                          f"(genuine_μ < impostor_p95={imp_p95:.1f})")
-                    if tail_classes:
-                        tail_classes.sort(key=lambda x: x[1])
-                        print(f"   [PCA-W] tail_top3={[(c,f'{s:.1f}') for c,s in tail_classes[:3]]}")
-
-                    # 10) Subspace 안정성 (orthonormal top_vecs 기반 principal angles)
-                    #     이전 subspace와의 일치도 — 1에 가까울수록 같은 subspace, 0=orthogonal
-                    cur_U = top_vecs.detach().cpu()  # orthonormal (D, k)
-                    if hasattr(self, '_prev_U_pca'):
-                        prev_U = self._prev_U_pca
-                        if prev_U.shape == cur_U.shape:
-                            overlap_mat = prev_U.T @ cur_U  # (k, k)
-                            u_svd = torch.linalg.svdvals(overlap_mat)
-                            u_svd = u_svd.clamp(0.0, 1.0)  # numerical safety
-                            mean_cos_angle = u_svd.mean().item()
-                            min_cos_angle = u_svd.min().item()
-                            print(f"   [PCA-W] U_stability: mean_cos_angle={mean_cos_angle:.3f}, "
-                                  f"min_cos_angle={min_cos_angle:.3f} "
-                                  f"(1.0=identical subspace, 0=orthogonal)")
-                        else:
-                            print(f"   [PCA-W] U_stability: k changed {prev_U.shape[1]}→{cur_U.shape[1]} "
-                                  f"(rank shift due to new classes)")
-                    self._prev_U_pca = cur_U.clone()
-
-                    # 11) Dimension utilization in whitened space
-                    #     각 whitened dim의 std across samples — 사용 안 되는 dim 탐지
-                    all_feat_w = []
-                    for cid in active_ids:
-                        for feat in class_features[cid]:
-                            fn = F.normalize(feat.unsqueeze(0), p=2, dim=1, eps=1e-12)
-                            fw = (fn.to(W.device, dtype=W.dtype) @ W).squeeze(0)
-                            all_feat_w.append(fw.cpu())
-                    all_feat_w = torch.stack(all_feat_w)  # (N, k)
-                    dim_stds = all_feat_w.std(dim=0)  # (k,)
-                    dim_means_abs = all_feat_w.abs().mean(dim=0)
-                    # 활성 dim: std > 10% of max std
-                    active_dim_thresh = dim_stds.max().item() * 0.1
-                    n_active_dims = (dim_stds > active_dim_thresh).sum().item()
-                    print(f"   [PCA-W] wh_dim_util: active={n_active_dims}/{k} "
-                          f"(std>10%max), std_range=[{dim_stds.min().item():.3f}, "
-                          f"{dim_stds.max().item():.3f}]")
-
-                    # 12) Between-class vs Within-class variance in whitened space (Fisher ratio proxy)
-                    #     Fisher's criterion: 좋은 discriminative subspace일수록 값이 큼
-                    class_wh_means = {}
-                    class_wh_vars = []
-                    for cid in active_ids:
-                        feats_w = []
-                        for feat in class_features[cid]:
-                            fn = F.normalize(feat.unsqueeze(0), p=2, dim=1, eps=1e-12)
-                            feats_w.append((fn.to(W.device, dtype=W.dtype) @ W).squeeze(0).cpu())
-                        if len(feats_w) > 1:
-                            feats_w_t = torch.stack(feats_w)
-                            class_wh_means[cid] = feats_w_t.mean(dim=0)
-                            class_wh_vars.append(feats_w_t.var(dim=0, unbiased=True).sum().item())
-                    if len(class_wh_means) >= 2:
-                        all_class_wh_means = torch.stack(list(class_wh_means.values()))
-                        global_wh_mean = all_class_wh_means.mean(dim=0)
-                        between_var = ((all_class_wh_means - global_wh_mean) ** 2).sum(dim=1).mean().item()
-                        within_var = sum(class_wh_vars) / len(class_wh_vars)
-                        fisher_ratio = between_var / max(within_var, 1e-12)
-                        print(f"   [PCA-W] fisher_ratio: between/within={fisher_ratio:.2f} "
-                              f"(between={between_var:.2f}, within={within_var:.4f}) "
-                              f"— 클수록 discriminative")
-
-        # GHOST: augmented raw features로 per-class μ_raw, σ_raw 계산
-        if getattr(self, 'use_ghost', False):
-            channels = self.config.dataset.channels
-
-            # class별 경로 그룹핑
-            from collections import defaultdict
-            class_paths_dict = defaultdict(list)
-            for path, label in zip(real_paths, real_labels):
-                lbl = int(label) if not isinstance(label, int) else label
-                class_paths_dict[lbl].append(path)
-
-            ghost_means_raw = {}
-            ghost_stds_raw = {}
-            ghost_counts = {}
-            all_raw_feats_for_global = []
-
-            for label, paths_for_class in class_paths_dict.items():
-                raw_feats = []
-                for path in paths_for_class:
-                    img = _open_with_channels(path, channels)
-                    for _ in range(self.ghost_n_augment):
-                        aug_tensor = self.train_transform(img).unsqueeze(0).to(self.device)
-                        feat = self.model.getFeatureCode(aug_tensor)
-                        # raw feature (L2 norm 안 함!)
-                        raw_feats.append(feat.squeeze(0).cpu())
-
-                ghost_counts[label] = len(raw_feats)
-
-                if len(raw_feats) >= 2:
-                    feat_tensor = torch.stack(raw_feats)
-                    ghost_means_raw[label] = feat_tensor.mean(dim=0)
-                    ghost_stds_raw[label] = feat_tensor.std(dim=0).clamp_min(1e-6)
-                else:
-                    ghost_means_raw[label] = raw_feats[0] if raw_feats else torch.zeros(1)
-                    ghost_stds_raw[label] = torch.ones_like(ghost_means_raw[label])
-
-                all_raw_feats_for_global.extend(raw_feats)
-
-            # Global std (shrinkage target)
-            ghost_global_std = None
-            if len(all_raw_feats_for_global) >= 2:
-                all_tensor = torch.stack(all_raw_feats_for_global)
-                ghost_global_std = all_tensor.std(dim=0).clamp_min(1e-6)
-
-            self.ncm.set_ghost_stats(ghost_means_raw, ghost_stds_raw, ghost_global_std, ghost_counts)
-
-            if self.verbose:
-                avg_n = np.mean(list(ghost_counts.values())) if ghost_counts else 0
-                print(f" GHOST stats updated: {len(ghost_stds_raw)} classes, "
-                      f"avg {avg_n:.0f} augmented features/class")
-
         if self.verbose:
             print(f" Updated NCM with {len(class_means)} classes"
-                  + (f" (score_mode={ncm_score_mode})" if ncm_score_mode != 'cosine' else "")
-                  + (f" + GHOST" if getattr(self, 'use_ghost', False) else ""))
+                  + (f" (score_mode={ncm_score_mode})" if ncm_score_mode != 'cosine' else ""))
 
         self.model.train()
 
@@ -2588,139 +2092,6 @@ class COCONUTTrainer:
 
         if was_training:
             self.model.train()
-
-    def _analyze_cosine_distribution_epoch(self):
-        """ 에포크마다 코사인 유사도 분포 분석"""
-        if len(self.memory_buffer) < 20:  # 최소 샘플 수 확인
-            return
-
-        # 현재 모델 모드 저장
-        was_training = self.model.training
-        self.model.eval()
-
-        # 메모리 버퍼에서 모든 데이터 가져오기
-        all_paths, all_labels, _ = self.memory_buffer.get_all_data()
-        real_paths = all_paths
-        real_labels = [int(l) if not isinstance(l, int) else l for l in all_labels]
-
-        if len(real_paths) < 10:
-            # 모드 복원 후 리턴
-            if was_training:
-                self.model.train()
-            return
-
-        # 샘플링 (너무 많으면 일부만) — seed 고정으로 재현성 보장
-        if len(real_paths) > 200:
-            monitor_seed = getattr(self.config.training, 'seed', 42) + self.experience_count
-            rng = np.random.RandomState(monitor_seed)
-            indices = rng.choice(len(real_paths), 200, replace=False)
-            real_paths = [real_paths[i] for i in indices]
-            real_labels = [real_labels[i] for i in indices]
-
-        # [TARGET] 기존 방식과 동일한 NCM 기반 스코어 계산
-        genuine_scores = []
-        impostor_scores = []
-
-        # 클래스별로 데이터 분류
-        from collections import defaultdict
-        by_class = defaultdict(list)
-        for path, label in zip(real_paths, real_labels):
-            by_class[int(label)].append(path)
-
-        # Genuine 스코어 계산 (같은 클래스 내)
-        for cls_id, cls_paths in by_class.items():
-            if len(cls_paths) < 2:
-                continue
-
-            # 클래스 내에서 샘플링
-            sample_paths = cls_paths[:min(5, len(cls_paths))]
-
-            for path in sample_paths:
-                # 특징 추출
-                img = _open_with_channels(path, self.config.dataset.channels)
-                img_tensor = self.test_transform(img).unsqueeze(0).to(self.device)
-
-                # NCM 점수 계산 (CCNet getFeatureCode → 2048D)
-                feat = self.model.getFeatureCode(img_tensor)
-                ncm_scores = self.ncm.forward(feat)
-
-                if ncm_scores.numel() > 0:
-                    #  수정: 클래스 ID를 직접 인덱스로 사용
-                    if cls_id in self.ncm.class_means_dict and cls_id < ncm_scores.shape[1]:
-                        genuine_score = ncm_scores[0, cls_id].item()
-                        genuine_scores.append(genuine_score)
-
-        # Impostor 스코어 계산 (다른 클래스들)
-        max_impostor_samples = 50
-        impostor_count = 0
-
-        for cls_id, cls_paths in by_class.items():
-            if impostor_count >= max_impostor_samples:
-                break
-
-            # 클래스당 최대 3개 샘플
-            sample_paths = cls_paths[:min(3, len(cls_paths))]
-
-            for path in sample_paths:
-                if impostor_count >= max_impostor_samples:
-                    break
-
-                # 특징 추출
-                img = _open_with_channels(path, self.config.dataset.channels)
-                img_tensor = self.test_transform(img).unsqueeze(0).to(self.device)
-
-                # NCM 점수 계산
-                feat = self.model.getFeatureCode(img_tensor)
-                ncm_scores = self.ncm.forward(feat)
-
-                if ncm_scores.numel() > 0:
-                    # 유효한 클래스만으로 Impostor 점수 계산
-                    valid_ids = sorted(self.ncm.class_means_dict.keys())
-                    if len(valid_ids) > 1:  # 최소 2개 클래스 필요
-                        scores_valid = ncm_scores[:, valid_ids].clone()
-                        own_col = valid_ids.index(cls_id) if cls_id in valid_ids else None
-                        if own_col is not None:
-                            scores_valid[0, own_col] = -1e9
-
-                        max_score = scores_valid.max(dim=1).values.item()
-                        if max_score > -1e9:
-                            impostor_scores.append(max_score)
-                            impostor_count += 1
-
-        if self.verbose:
-            #  디버깅: NCM과 메모리 버퍼 동기화 확인
-            print(f"\n NCM Classes: {sorted(list(self.ncm.class_means_dict.keys()))}")
-            print(f" Memory Classes: {sorted(list(set(real_labels)))}")
-            print(f" Sample count - Genuine: {len(genuine_scores)}, Impostor: {len(impostor_scores)}")
-
-        # 통계 계산 및 출력
-        if genuine_scores and impostor_scores:
-            genuine_mean = np.mean(genuine_scores)
-            genuine_std = np.std(genuine_scores)
-            impostor_mean = np.mean(impostor_scores)
-            impostor_std = np.std(impostor_scores)
-            separation = genuine_mean - impostor_mean
-
-            if self.verbose:
-                print(f"     NCM Score Distribution (like EER Calculation):")
-                print(f"       Genuine:  {genuine_mean:.3f} ± {genuine_std:.3f} (n={len(genuine_scores)})")
-                print(f"       Impostor: {impostor_mean:.3f} ± {impostor_std:.3f} (n={len(impostor_scores)})")
-                print(f"       Separation: {separation:.3f}")
-
-                if separation > 0.3:
-                    print(f"       Status:  Excellent separation")
-                elif separation > 0.2:
-                    print(f"       Status:  Good separation")
-                elif separation > 0.1:
-                    print(f"       Status:  Moderate separation")
-                else:
-                    print(f"       Status:  Poor separation")
-
-        # 원래 모델 모드 복원
-        if was_training:
-            self.model.train()
-        else:
-            self.model.eval()
 
     def evaluate(self, test_dataset: Dataset) -> float:
         """NCM을 사용하여 정확도를 평가합니다."""

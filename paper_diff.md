@@ -169,6 +169,41 @@ behavior changes A1 and A5, which only affect previously-broken code paths.
 
 ---
 
+### B9 — Aggressive dead-code removal (post-A8, before Phase 2 second-half)
+
+User directive (2026-05-20): "논문화하기에 필요없고 불필요한것들 다 지워버려" — physically remove all paper-irrelevant code that was previously gated by config flags or deferred.
+
+- **Files**: `coconut/training/trainer.py` (3103 → 2486 LoC, **-617**), `coconut/classifiers/ncm.py` (464 → 335 LoC, **-129**), `config/config.yaml` (124 → 111 LoC, **-13**).
+- **Total source lines deleted**: **~759 LoC** across 3 files.
+
+**Removed components**:
+
+1. **GHOST legacy** (z-score rejection branch, ~270 LoC):
+   - All `getattr(self, 'use_ghost', False)` branches in `_calibrate_threshold`, `_evaluate_openset`, `_update_ncm`.
+   - `_compute_ghost_scores`, `compute_ghost_max_scores`, `set_ghost_stats` methods in `NCMClassifier`.
+   - `ghost_enabled / ghost_class_means_raw / ghost_class_stds_raw / ghost_global_std_raw / ghost_class_counts / ghost_shrinkage_min_n` attributes.
+   - `_custom_ghost_*` state_dict serialization keys.
+   - Config knobs `use_ghost`, `ghost_n_augment`, `ghost_shrinkage_min_n`.
+   - Per-step GHOST diagnostic block in `_evaluate_openset` (cos/s correlation, gamma statistics).
+   - GHOST trend block in `diag_report_expNNN.txt`.
+
+2. **`_analyze_cosine_distribution_epoch`** orphan diagnostic (~133 LoC): verbose-only debug routine duplicated logic from `_evaluate_openset`. Call site at `train_experience` removed; function body deleted.
+
+3. **PCA-W extensive diagnostic block** (`_update_ncm` `mahalanobis_variant in ('full_whitened', 'projection_only')`, ~317 LoC): full PCA whitening compute + 12 verbose `[PCA-W]` print statements. Phase 2 always uses `mahalanobis_variant='diagonal'` so the block is dead. Related setter `NCMClassifier.set_whitening` + `whitening_matrix / whitened_means` attributes + state_dict keys + forward-pass branch all removed.
+
+4. **Config dead knobs**: `mahalanobis_variant`, `pca_explained_var`, `pca_max_k`, `pca_shrinkage_mode`, `pca_shrinkage_lambda`, `pca_k_mode`, `pca_fixed_k`.
+
+**Verification**:
+- All source files: syntax ✓, imports ✓
+- `grep -rc -i 'ghost' coconut/` on source files: **0 matches**
+- `dir(NCMClassifier())` no longer contains any `ghost*` or `whitening*` attributes
+- Existing L_naive/L_replay/L_full checkpoints from Phase 2 first-half load fine (their `_custom_ghost_*` keys gracefully ignored by `state_dict.pop()` in `load_state_dict` — strict=False compatible)
+
+**Behavior impact for Phase 2 second-half**:
+- L_full default behavior bit-exact to pre-B9 (all removed code was dormant under `use_ghost: false` + `mahalanobis_variant: diagonal` defaults).
+- Compute speedup: marginal (removed code never ran in default config).
+- **Readability speedup**: significant (~25% LoC reduction in `trainer.py`). Reviewer can now read the paper-canonical flow without scrolling past dormant branches.
+
 ## Tier 3 — deferred (post-paper or post-Phase 4)
 
 ### C-GHOST (downgraded from B1) — Physical removal of GHOST legacy code

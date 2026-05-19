@@ -102,25 +102,10 @@ Openset:
 
   # Score mode: 'cosine' | 'mahalanobis'
   # Mahalanobis: pooled within-class diagonal variance + OAS shrinkage (trainer.py::_update_ncm)
-  # S-norm과 compose 가능 (ncm.py::forward의 early return 제거됨)
+  # S-norm과 compose 가능 (ncm.py::forward)
   score_mode: 'mahalanobis'
-  mahalanobis_variant: 'diagonal'  # 'diagonal' | 'full_whitened' | 'projection_only'  [A0: diagonal baseline]
-  pca_explained_var: 0.99               # adaptive k threshold
-  pca_max_k: 256                        # k upper bound
-  # Phase A ablation knobs
-  pca_shrinkage_mode: 'auto'     # 'auto' | 'fixed' | 'none'
-  pca_shrinkage_lambda: 0.1      # fixed λ (pca_shrinkage_mode='fixed'일 때)
-  pca_k_mode: 'adaptive'         # 'adaptive' | 'fixed'
-  pca_fixed_k: 32                # fixed k (pca_k_mode='fixed'일 때)
   var_reg_alpha: 0.0001
 
-  # Rejection gate mode: 'top1_only' | 'top1_margin' (score_mode와 독립 — cosine/mahalanobis 모두 사용 가능)
+  # Rejection gate mode: 'top1_only' | 'top1_margin' (score_mode와 독립)
   rejection_gate: 'top1_only'     # top-1 score ≥ τ 단일 게이트 (+ S-norm)
   use_snorm: true                 # per-class Z-score normalization (crowding 보정)
-
-  # GHOST — DEPRECATED, kept for state_dict compatibility with prior checkpoints.
-  # Not part of the paper-canonical method. Set use_ghost: false (default) and ignore.
-  # Will be physically removed post-paper (Phase 1.5 deferred item C-GHOST).
-  use_ghost: false
-  ghost_n_augment: 10
-  ghost_shrinkage_min_n: 10

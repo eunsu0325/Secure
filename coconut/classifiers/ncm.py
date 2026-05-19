@@ -38,18 +38,6 @@ class NCMClassifier(nn.Module):
         self.var_reg_alpha = var_reg_alpha
         self.global_var = None                # Tensor(D,) — shared diagonal variance
 
-        # Full PCA whitening (Step 2b)
-        self.whitening_matrix = None       # Tensor(D, k) — PCA whitening projection
-        self.whitened_means = None         # Tensor(max_class+1, k) — whitened class means
-
-        # GHOST 관련 (z-score 기반 rejection, 레거시)
-        self.ghost_enabled = False
-        self.ghost_class_means_raw = {}       # {class_id: Tensor(D,)} raw feature mean
-        self.ghost_class_stds_raw = {}        # {class_id: Tensor(D,)} raw feature std
-        self.ghost_global_std_raw = None      # Tensor(D,) shrinkage target
-        self.ghost_class_counts = {}          # {class_id: int} augmented sample count
-        self.ghost_shrinkage_min_n = 10       # shrinkage 기준 샘플 수
-
         # S-norm (per-class Z-score on raw cosine)
         # cohort = unknown_dev features. cohort_mu/sigma는 _vectorize_means_dict와
         # 같은 (max_class+1,) 1D 텐서로 저장되어 forward에서 broadcast됨.
@@ -64,19 +52,10 @@ class NCMClassifier(nn.Module):
         # Mahalanobis
         sd['_custom_score_mode'] = self.score_mode
         sd['_custom_global_var'] = self.global_var
-        sd['_custom_whitening_matrix'] = self.whitening_matrix
-        sd['_custom_whitened_means'] = self.whitened_means
         # S-norm
         sd['_custom_snorm_enabled'] = self.snorm_enabled
         sd['_custom_cohort_mu'] = self.cohort_mu
         sd['_custom_cohort_sigma'] = self.cohort_sigma
-        # GHOST
-        sd['_custom_ghost_enabled'] = self.ghost_enabled
-        sd['_custom_ghost_class_means_raw'] = self.ghost_class_means_raw
-        sd['_custom_ghost_class_stds_raw'] = self.ghost_class_stds_raw
-        sd['_custom_ghost_global_std_raw'] = self.ghost_global_std_raw
-        sd['_custom_ghost_class_counts'] = self.ghost_class_counts
-        sd['_custom_ghost_shrinkage_min_n'] = self.ghost_shrinkage_min_n
         return sd
 
     def load_state_dict(self, state_dict, strict: bool = True):
@@ -96,17 +75,9 @@ class NCMClassifier(nn.Module):
         if custom_keys:
             self.score_mode = custom_keys.get('_custom_score_mode', self.score_mode)
             self.global_var = custom_keys.get('_custom_global_var', None)
-            self.whitening_matrix = custom_keys.get('_custom_whitening_matrix', None)
-            self.whitened_means = custom_keys.get('_custom_whitened_means', None)
             self.snorm_enabled = custom_keys.get('_custom_snorm_enabled', False)
             self.cohort_mu = custom_keys.get('_custom_cohort_mu', None)
             self.cohort_sigma = custom_keys.get('_custom_cohort_sigma', None)
-            self.ghost_enabled = custom_keys.get('_custom_ghost_enabled', False)
-            self.ghost_class_means_raw = custom_keys.get('_custom_ghost_class_means_raw', {})
-            self.ghost_class_stds_raw = custom_keys.get('_custom_ghost_class_stds_raw', {})
-            self.ghost_global_std_raw = custom_keys.get('_custom_ghost_global_std_raw', None)
-            self.ghost_class_counts = custom_keys.get('_custom_ghost_class_counts', {})
-            self.ghost_shrinkage_min_n = custom_keys.get('_custom_ghost_shrinkage_min_n', 10)
 
     def _vectorize_means_dict(self):
         """딕셔너리를 텐서로 변환합니다."""
@@ -147,26 +118,8 @@ class NCMClassifier(nn.Module):
         if self.score_mode == 'mahalanobis':
             scores = None
 
-            # --- Full PCA whitened branch ---
-            if self.whitening_matrix is not None and self.whitened_means is not None:
-                x = F.normalize(x, p=2, dim=1, eps=1e-12)
-                W = self.whitening_matrix.to(device=x.device, dtype=x.dtype)
-                M_w = self.whitened_means.to(device=x.device, dtype=x.dtype)
-                x_w = x @ W
-                C_w = M_w.shape[0]
-                C_m = M.shape[0]
-                if C_w < C_m:
-                    extra = F.normalize(M[C_w:], p=2, dim=1, eps=1e-12) @ W
-                    M_w = torch.cat([M_w, extra], dim=0)
-                elif C_w > C_m:
-                    M_w = M_w[:C_m]
-                x2 = (x_w * x_w).sum(dim=1, keepdim=True)
-                m2 = (M_w * M_w).sum(dim=1, keepdim=False)
-                xm = x_w @ M_w.T
-                scores = -(x2 + m2.unsqueeze(0) - 2 * xm)
-
-            # --- Diagonal fallback ---
-            elif self.global_var is not None:
+            # --- Diagonal Mahalanobis ---
+            if self.global_var is not None:
                 x = F.normalize(x, p=2, dim=1, eps=1e-12)
                 inv_std = 1.0 / torch.sqrt(
                     self.global_var.to(device=x.device, dtype=x.dtype) + self.var_reg_alpha
@@ -266,11 +219,6 @@ class NCMClassifier(nn.Module):
         """Global shared diagonal variance 설정 (Mahalanobis용)"""
         self.global_var = global_var.clone()
 
-    def set_whitening(self, W: Tensor, M_white: Tensor):
-        """Full PCA whitening matrix와 whitened class means 설정"""
-        self.whitening_matrix = W.clone()
-        self.whitened_means = M_white.clone()
-
     def set_cohort_stats(self, cohort_mu_dict: Dict[int, float], cohort_sigma_dict: Dict[int, float]):
         """S-norm용 per-class cohort 평균/표준편차 설정.
         class_means와 같은 (max_class+1,) 텐서로 vectorize."""
@@ -296,13 +244,6 @@ class NCMClassifier(nn.Module):
               f"C={C}, nz_classes={nz}, "
               f"mu[mean={mu.mean().item():.3e}, std={mu.std().item():.3e}], "
               f"sigma[mean={sigma.mean().item():.3e}, min={sigma.min().item():.3e}]")
-
-    def set_ghost_stats(self, class_means_raw, class_stds_raw, global_std_raw, class_counts):
-        """GHOST용 per-class raw feature 통계 설정"""
-        self.ghost_class_means_raw = {k: v.clone() for k, v in class_means_raw.items()}
-        self.ghost_class_stds_raw = {k: v.clone() for k, v in class_stds_raw.items()}
-        self.ghost_global_std_raw = global_std_raw.clone() if global_std_raw is not None else None
-        self.ghost_class_counts = dict(class_counts)
 
     @torch.no_grad()
     def compute_dual_gate_scores(self, x):
@@ -336,65 +277,9 @@ class NCMClassifier(nn.Module):
             'pred_ids': pred_ids,
         }
 
-    def _compute_ghost_scores(self, x_raw, pred_ids, cosine_scores):
-        """
-        GHOST score 계산: γ = z_k̂ / s  (AAAI 2025, Eq. 3-4)
-
-        Args:
-            x_raw: (B, D) raw features (L2 norm 전)
-            pred_ids: (B,) predicted class indices
-            cosine_scores: (B,) z_k̂ (cosine max score)
-        Returns:
-            (B,) GHOST scores
-        """
-        ghost_scores = torch.zeros(x_raw.shape[0], device=x_raw.device, dtype=x_raw.dtype)
-
-        for i in range(x_raw.shape[0]):
-            k = pred_ids[i].item()
-
-            if k not in self.ghost_class_stds_raw:
-                ghost_scores[i] = cosine_scores[i]
-                continue
-
-            mu_k = self.ghost_class_means_raw[k].to(device=x_raw.device, dtype=x_raw.dtype)
-            std_k = self.ghost_class_stds_raw[k].to(device=x_raw.device, dtype=x_raw.dtype)
-
-            # Shrinkage: 샘플 적으면 global std와 혼합
-            n_k = self.ghost_class_counts.get(k, 1)
-            if self.ghost_global_std_raw is not None:
-                lam = min(n_k / self.ghost_shrinkage_min_n, 1.0)
-                global_std = self.ghost_global_std_raw.to(device=x_raw.device, dtype=x_raw.dtype)
-                std_k = lam * std_k + (1 - lam) * global_std
-
-            # Eq. 3: s = mean_d |φ_d - μ_{k̂,d}| / σ_{k̂,d}  (차원 정규화)
-            s = (torch.abs(x_raw[i] - mu_k) / (std_k + 1e-12)).mean()
-
-            # Eq. 4: γ = z_k̂ / s
-            ghost_scores[i] = cosine_scores[i] / (s + 1e-12)
-
-        return ghost_scores
-
-    @torch.no_grad()
-    def compute_ghost_max_scores(self, x_raw):
-        """
-        캘리브레이션/평가용: GHOST score 배열 반환.
-        x_raw: (B, D) raw features
-        """
-        if len(self.class_means_dict) == 0:
-            return torch.zeros(x_raw.shape[0], device=x_raw.device)
-
-        scores = self.forward(x_raw, apply_snorm=False)  # raw cosine — GHOST는 자체 정규화
-        top1 = scores.topk(1, dim=1)
-        max_score = top1.values[:, 0]
-        pred = top1.indices[:, 0]
-
-        if self.ghost_enabled and self.ghost_class_stds_raw:
-            return self._compute_ghost_scores(x_raw, pred, max_score)
-        return max_score
-
     @torch.no_grad()
     def predict_openset(self, x):
-        """오픈셋 예측 (모드별 분기: top1_margin / GHOST 레거시 / top1_only)"""
+        """오픈셋 예측 (모드별 분기: top1_margin / top1_only)"""
         if len(self.class_means_dict) == 0:
             return torch.full((x.shape[0],), -1, dtype=torch.long, device=x.device)
 
@@ -409,20 +294,6 @@ class NCMClassifier(nn.Module):
             if self.tau_margin is not None:
                 accept &= result['margin'] >= self.tau_margin
 
-            pred[~accept] = self.unknown_id
-            return pred
-
-        # --- 기존 GHOST 모드 (레거시) ---
-        if self.ghost_enabled and self.ghost_class_stds_raw:
-            scores = self.forward(x, apply_snorm=False)  # GHOST는 자체 정규화
-            top1 = scores.topk(1, dim=1)
-            max_score = top1.values[:, 0]
-            pred = top1.indices[:, 0]
-            ghost_scores = self._compute_ghost_scores(x, pred, max_score)
-            if self.tau_s is not None:
-                accept = ghost_scores >= self.tau_s
-            else:
-                accept = torch.ones_like(ghost_scores, dtype=torch.bool)
             pred[~accept] = self.unknown_id
             return pred
 
