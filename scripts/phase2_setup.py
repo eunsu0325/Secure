@@ -123,6 +123,96 @@ VARIANTS = {
             ("Openset", "threshold_max_delta"): 1.0,
         },
     },
+    # ===== LOI (Leave-One-In) variants =====
+    # L_replay (replay only) + each method component added in isolation.
+    # Used in combination with LOO to detect component redundancy:
+    #   LOO≈0 + LOI big   → redundant with another component (drop one)
+    #   LOO big + LOI big → uniquely necessary (keep)
+    #   LOO≈0 + LOI≈0     → useless in any context (drop)
+    "only_proxy": {
+        "desc": "L_replay + ProxyAnchor (isolated)",
+        "overrides": {
+            ("Training", "use_idl_rtm"): False,
+            ("Training", "der_alpha"): 0.0,
+            ("Training", "use_qar"): False,
+            ("Openset", "use_snorm"): False,
+            ("Openset", "score_mode"): "cosine",
+            ("Openset", "threshold_alpha"): 1.0,
+            ("Openset", "threshold_max_delta"): 1.0,
+        },
+    },
+    "only_idl": {
+        "desc": "L_replay + IDL-RTM (isolated)",
+        "overrides": {
+            ("Training", "use_proxy_anchor"): False,
+            ("Training", "der_alpha"): 0.0,
+            ("Training", "use_qar"): False,
+            ("Openset", "use_snorm"): False,
+            ("Openset", "score_mode"): "cosine",
+            ("Openset", "threshold_alpha"): 1.0,
+            ("Openset", "threshold_max_delta"): 1.0,
+        },
+    },
+    "only_der": {
+        "desc": "L_replay + DER++ (isolated)",
+        "overrides": {
+            ("Training", "use_proxy_anchor"): False,
+            ("Training", "use_idl_rtm"): False,
+            ("Training", "use_qar"): False,
+            ("Openset", "use_snorm"): False,
+            ("Openset", "score_mode"): "cosine",
+            ("Openset", "threshold_alpha"): 1.0,
+            ("Openset", "threshold_max_delta"): 1.0,
+        },
+    },
+    "only_qar": {
+        "desc": "L_replay + QAR (isolated)",
+        "overrides": {
+            ("Training", "use_proxy_anchor"): False,
+            ("Training", "use_idl_rtm"): False,
+            ("Training", "der_alpha"): 0.0,
+            ("Openset", "use_snorm"): False,
+            ("Openset", "score_mode"): "cosine",
+            ("Openset", "threshold_alpha"): 1.0,
+            ("Openset", "threshold_max_delta"): 1.0,
+        },
+    },
+    "only_snorm": {
+        "desc": "L_replay + S-norm (isolated)",
+        "overrides": {
+            ("Training", "use_proxy_anchor"): False,
+            ("Training", "use_idl_rtm"): False,
+            ("Training", "der_alpha"): 0.0,
+            ("Training", "use_qar"): False,
+            ("Openset", "score_mode"): "cosine",
+            ("Openset", "threshold_alpha"): 1.0,
+            ("Openset", "threshold_max_delta"): 1.0,
+        },
+    },
+    "only_maha": {
+        "desc": "L_replay + Mahalanobis NCM (isolated)",
+        "overrides": {
+            ("Training", "use_proxy_anchor"): False,
+            ("Training", "use_idl_rtm"): False,
+            ("Training", "der_alpha"): 0.0,
+            ("Training", "use_qar"): False,
+            ("Openset", "use_snorm"): False,
+            ("Openset", "threshold_alpha"): 1.0,
+            ("Openset", "threshold_max_delta"): 1.0,
+        },
+    },
+    "only_recal": {
+        "desc": "L_replay + τ recalibration EMA (isolated)",
+        "overrides": {
+            ("Training", "use_proxy_anchor"): False,
+            ("Training", "use_idl_rtm"): False,
+            ("Training", "der_alpha"): 0.0,
+            ("Training", "use_qar"): False,
+            ("Openset", "use_snorm"): False,
+            ("Openset", "score_mode"): "cosine",
+            # threshold_alpha/max_delta keep L_full's default (0.2 / 0.05)
+        },
+    },
 }
 
 
