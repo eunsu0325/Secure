@@ -1829,9 +1829,10 @@ class COCONUTTrainer:
 
             self._diag_history.append(_diag_entry)
 
-            # === 10 경험마다 리포트 파일 저장 ===
+            # === 10 경험마다 리포트 파일 저장 (paper_minimal_outputs=True 면 skip) ===
             _exp_num = _diag_entry['exp']
-            if (_exp_num + 1) % 10 == 0 or _exp_num == 0:
+            _paper_minimal = bool(getattr(self.config.training, 'paper_minimal_outputs', False))
+            if not _paper_minimal and ((_exp_num + 1) % 10 == 0 or _exp_num == 0):
                 import json, os
                 _save_dir = str(self.config.training.results_path)
                 os.makedirs(_save_dir, exist_ok=True)

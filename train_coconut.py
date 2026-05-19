@@ -470,6 +470,12 @@ def main(args):
 
     start_time = time.time()
 
+    # paper_minimal_outputs (P-Min flag): diagnostic Phase 2 용 — per-step PNG/CSV plot 저장,
+    # per-10 t-SNE, per-10 checkpoint 모두 skip. 진단에 필요한 final CSV/JSON 만 저장.
+    paper_minimal = bool(getattr(config_obj.training, 'paper_minimal_outputs', False))
+    if paper_minimal:
+        print('[P-Min] paper_minimal_outputs=True — skipping per-step PNGs, t-SNE, per-10 checkpoints')
+
     for exp_id, (user_id, image_paths, labels) in enumerate(data_stream):
 
         # Register user in evaluator
@@ -486,8 +492,11 @@ def main(args):
             if verbose:
                 print(f"\n=== Evaluation at Experience {exp_id + 1} ===")
 
-            # t-SNE 시각화 (디버깅용)
-            if (exp_id + 1) % 10 == 0 or exp_id == config_obj.training.num_experiences - 1:
+            # t-SNE 시각화 (디버깅용) — paper_minimal 모드에선 final 만
+            is_final_exp = (exp_id == config_obj.training.num_experiences - 1)
+            do_tsne = (((exp_id + 1) % 10 == 0 or is_final_exp)
+                       and (not paper_minimal or is_final_exp))
+            if do_tsne:
                 tsne_dir = os.path.join(results_dir, "tsne")
                 os.makedirs(tsne_dir, exist_ok=True)
 
@@ -503,12 +512,12 @@ def main(args):
                     verbose=verbose
                 )
 
-            # 모든 사용자 개별 평가
+            # 모든 사용자 개별 평가 — paper_minimal 면 PNG/CSV 저장 skip (in-memory 계산만)
             curves_dir = os.path.join(results_dir, "evaluation_curves", f"exp_{exp_id+1:03d}")
             report = evaluator.evaluate_all_users(
                 trainer=trainer,
                 experience_id=exp_id + 1,
-                save_curves=True,
+                save_curves=(not paper_minimal),
                 curves_dir=curves_dir
             )
 
@@ -578,8 +587,10 @@ def main(args):
             if hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
                 training_history['trainer_openset_history'] = trainer.evaluation_history
 
-            # 체크포인트 저장 (10 experience마다 + 마지막)
-            if (exp_id + 1) % 10 == 0 or (exp_id + 1) == config_obj.training.num_experiences:
+            # 체크포인트 저장 — paper_minimal 면 최종만 (per-10 skip)
+            save_ckpt = ((exp_id + 1) == config_obj.training.num_experiences
+                         or (not paper_minimal and (exp_id + 1) % 10 == 0))
+            if save_ckpt:
                 checkpoint_path = os.path.join(
                     results_dir,
                     f'checkpoint_exp_{exp_id + 1}.pth'

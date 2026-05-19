@@ -64,6 +64,18 @@ behavior changes A1 and A5, which only affect previously-broken code paths.
 - **Behavior impact**: None — both old import paths still resolve to the same
   class.
 
+### A8 — `paper_minimal_outputs` flag for diagnostic Phase 2 speedup
+
+- **Files**: `config/config.yaml` (new flag), `train_coconut.py:474-606` (3 guard sites), `coconut/training/trainer.py:1834` (per-10 diag report guard), `scripts/phase2_setup.py` (CLI flag).
+- **Finding**: Phase 2 ablation diagnostic was bottlenecked by per-step I/O to Google Drive: `evaluation_curves/exp_NNN/` (4 PNG/CSV per step), per-10 t-SNE plots, per-10 checkpoints (~750 MB Drive uploads), per-10 `diag_report_expNNN.txt`. ~27-30% of per-experience time was disk I/O for outputs not used by the diagnostic ablation (only `eval_curve.csv` + `summary.json` + `fpir_drift_log.csv` are essential).
+- **Change**: New config flag `Training.paper_minimal_outputs` (default `False` for backward compat). When `True`:
+  - `evaluator.evaluate_all_users(save_curves=False)` — skip per-step PNG/CSV plots
+  - Skip per-10 t-SNE; only save final t-SNE
+  - Skip per-10 checkpoint saves; only save final checkpoint
+  - Skip per-10 `diag_history.json` + `diag_report_expNNN.txt` writes
+- **Behavior impact**: When `True`, runs ~27-30% faster on Drive-backed runs. Final outputs (`eval_curve.csv`, `summary.json`, `fpir_drift_log.csv`, `performance_matrix.csv`, final checkpoint) are bit-exact to non-minimal mode at the same seed.
+- **Phase 2 use**: enabled via `scripts/phase2_setup.py --paper_minimal_outputs` for all 10 variants together with `--num_experiences 50` (diagnostic-tier).
+
 ### A7 — Grad-connected zero loss_supcon fallback (backward graph fix)
 
 - **File**: `coconut/training/trainer.py:678-686` (loss_supcon fallback), `coconut/training/trainer.py:658-665` (idl_rtm_loss_val fallback, consistency fix)

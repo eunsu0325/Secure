@@ -142,6 +142,10 @@ def main() -> int:
     ap.add_argument("--out_dir", required=True, help="output dir for variant configs")
     ap.add_argument("--results_root", required=True,
                     help="root dir for per-variant results (Drive path on Colab)")
+    ap.add_argument("--num_experiences", type=int, default=None,
+                    help="override num_experiences for all variants (diagnostic速度↑)")
+    ap.add_argument("--paper_minimal_outputs", action="store_true",
+                    help="skip per-step PNG/CSV plots, per-10 t-SNE + checkpoint")
     args = ap.parse_args()
 
     base_path = Path(args.base)
@@ -166,6 +170,11 @@ def main() -> int:
         # Per-variant results path so runs do not clobber each other.
         cfg["Training"]["results_path"] = f"{args.results_root}/{vname}"
         cfg["Training"]["checkpoint_path"] = f"{args.results_root}/{vname}"
+        # Optional diagnostic-mode overrides (smaller N + minimal disk I/O)
+        if args.num_experiences is not None:
+            cfg["Training"]["num_experiences"] = int(args.num_experiences)
+        if args.paper_minimal_outputs:
+            cfg["Training"]["paper_minimal_outputs"] = True
 
         out_path = out_dir / f"{vname}.yaml"
         with out_path.open("w") as f:
