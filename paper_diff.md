@@ -75,6 +75,7 @@ behavior changes A1 and A5, which only affect previously-broken code paths.
   - Skip per-10 `diag_history.json` + `diag_report_expNNN.txt` writes
 - **Behavior impact**: When `True`, runs ~27-30% faster on Drive-backed runs. Final outputs (`eval_curve.csv`, `summary.json`, `fpir_drift_log.csv`, `performance_matrix.csv`, final checkpoint) are bit-exact to non-minimal mode at the same seed.
 - **Phase 2 use**: enabled via `scripts/phase2_setup.py --paper_minimal_outputs` for all 10 variants together with `--num_experiences 50` (diagnostic-tier).
+- **Follow-up tightening (2026-05-20)**: also skip `evaluator.save_results()` per-step (only at final exp) and skip final t-SNE entirely when `paper_minimal=True`. After these, per-step disk I/O is effectively zero in paper_minimal mode — all artifacts written once at end-of-run.
 
 ### A7 — Grad-connected zero loss_supcon fallback (backward graph fix)
 

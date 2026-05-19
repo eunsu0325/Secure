@@ -492,10 +492,10 @@ def main(args):
             if verbose:
                 print(f"\n=== Evaluation at Experience {exp_id + 1} ===")
 
-            # t-SNE 시각화 (디버깅용) — paper_minimal 모드에선 final 만
+            # t-SNE 시각화 (디버깅용) — paper_minimal 모드에선 완전 skip
             is_final_exp = (exp_id == config_obj.training.num_experiences - 1)
             do_tsne = (((exp_id + 1) % 10 == 0 or is_final_exp)
-                       and (not paper_minimal or is_final_exp))
+                       and not paper_minimal)
             if do_tsne:
                 tsne_dir = os.path.join(results_dir, "tsne")
                 os.makedirs(tsne_dir, exist_ok=True)
@@ -579,9 +579,11 @@ def main(args):
                       f"BWT={bwt:.4f} (음수=망각, 양수=전이) | "
                       f"Buf={len(memory_buffer)}")
 
-            # Save evaluation results
-            eval_results_dir = os.path.join(results_dir, "forgetting_analysis")
-            evaluator.save_results(eval_results_dir)
+            # Save evaluation results — paper_minimal 이면 최종 step 만 저장
+            do_save_results = (not paper_minimal) or is_final_exp
+            if do_save_results:
+                eval_results_dir = os.path.join(results_dir, "forgetting_analysis")
+                evaluator.save_results(eval_results_dir)
 
             # Trainer의 오픈셋 평가 히스토리도 저장
             if hasattr(trainer, 'evaluation_history') and trainer.evaluation_history:
