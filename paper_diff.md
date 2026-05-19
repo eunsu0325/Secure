@@ -64,6 +64,13 @@ behavior changes A1 and A5, which only affect previously-broken code paths.
 - **Behavior impact**: None — both old import paths still resolve to the same
   class.
 
+### A7 — Grad-connected zero loss_supcon fallback (backward graph fix)
+
+- **File**: `coconut/training/trainer.py:678-686` (loss_supcon fallback), `coconut/training/trainer.py:658-665` (idl_rtm_loss_val fallback, consistency fix)
+- **Finding**: Phase 2 L_naive / L_replay / no_proxy attempt at exp 1 crashed with `RuntimeError: element 0 of tensors does not require grad and does not have a grad_fn` at `loss.backward()`. Root cause: trainer batch-gates SupCon when `unique_in_batch < 2` (single class in batch — happens at experience 1 with only user 0 in buffer) by setting `loss_supcon = torch.tensor(0.0, device=...)`. This is a **leaf zero with no grad_fn**. In L_full, ProxyAnchor still contributes a differentiable term so `loss.backward()` works. With ProxyAnchor off (L_naive, L_replay, no_proxy), the entire `loss` becomes a leaf zero.
+- **Change**: Replace `torch.tensor(0.0, device=self.device)` with `features_paired.sum() * 0.0` — same numeric value but maintains the autograd graph so `loss.backward()` is a safe no-op for parameter gradients. Applied to both loss_supcon (684) and idl_rtm_loss_val (663) for consistency.
+- **Behavior impact**: All variants with ProxyAnchor off now train cleanly from exp 1 onward. L_full's bit-exact behavior is preserved (it never hit the leaf-zero path).
+
 ### A6 — numpy-aware JSON encoder in train_coconut.py
 
 - **File**: `train_coconut.py:48-62` (new helper), `train_coconut.py:603, 609, 741` (3 json.dump call sites)

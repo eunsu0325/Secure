@@ -4,9 +4,10 @@ Phase 2 — Generate 9 variant configs for COCONUT diagnostic tear-down on BJTU.
 Reads `config/config.yaml` as the L_full baseline, applies one-line overrides
 per variant, and writes each as `config/phase2/<variant>.yaml`.
 
-Variants (per plan §B.4.2-3):
-    L0          — Naive: all CL/openset extras off (cosine NCM, static τ)
-    L_full      — current config unchanged (reference)
+Variants (per plan §B.4.1, DER++-convention 3-tier structure):
+    L_naive     — DER++'s "SGD": NO memory replay, NO CL/openset extras (lower bound)
+    L_replay    — DER++'s "ER":  memory replay ON, but all method extras OFF
+    L_full      — current config unchanged (proposed method, reference)
     no_proxy    — L_full minus ProxyAnchor
     no_idl      — L_full minus IDL-RTM
     no_der      — L_full minus DER++
@@ -45,17 +46,34 @@ import yaml
 # A nested key like ("Training", "use_proxy_anchor") means
 # cfg["Training"]["use_proxy_anchor"] = value.
 VARIANTS = {
-    "L0": {
-        "desc": "Naive sequential — no CL extras, cosine NCM, static τ",
+    "L_naive": {
+        "desc": "DER++'s SGD lower bound — no memory replay, no CL/openset extras",
         "overrides": {
+            # Disable memory replay (the defining difference vs L_replay)
+            ("Training", "memory_batch_size"): 0,
+            # Disable all method components (same as L_replay below)
             ("Training", "use_proxy_anchor"): False,
             ("Training", "use_idl_rtm"): False,
             ("Training", "der_alpha"): 0.0,
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
             ("Openset", "score_mode"): "cosine",
-            ("Openset", "threshold_alpha"): 1.0,    # no EMA smoothing
-            ("Openset", "threshold_max_delta"): 1.0,  # no clamp
+            ("Openset", "threshold_alpha"): 1.0,
+            ("Openset", "threshold_max_delta"): 1.0,
+        },
+    },
+    "L_replay": {
+        "desc": "DER++'s ER baseline — memory replay only, no CL/openset extras",
+        "overrides": {
+            # Memory replay stays ON (default memory_batch_size=160)
+            ("Training", "use_proxy_anchor"): False,
+            ("Training", "use_idl_rtm"): False,
+            ("Training", "der_alpha"): 0.0,
+            ("Training", "use_qar"): False,
+            ("Openset", "use_snorm"): False,
+            ("Openset", "score_mode"): "cosine",
+            ("Openset", "threshold_alpha"): 1.0,
+            ("Openset", "threshold_max_delta"): 1.0,
         },
     },
     "L_full": {

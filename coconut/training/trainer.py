@@ -660,7 +660,9 @@ class COCONUTTrainer:
                         idl_features = f1 if random.random() < 0.5 else f2
                         idl_rtm_loss_val, idl_rtm_info = self.idl_rtm_loss(idl_features, batch_labels)
                     else:
-                        idl_rtm_loss_val = torch.tensor(0.0, device=self.device)
+                        # A7: grad-connected zero (consistency with loss_supcon path; harmless
+                        # in default case since idl_rtm_weight=0 zeros this out anyway).
+                        idl_rtm_loss_val = features_paired.sum() * 0.0
                         idl_rtm_info = {}
 
                     # Curriculum Loss Schedule + Batch Gating
@@ -678,7 +680,11 @@ class COCONUTTrainer:
                     if w_supcon > 0:
                         loss_supcon = self.criterion(features_paired, batch_labels)
                     else:
-                        loss_supcon = torch.tensor(0.0, device=self.device)
+                        # A7: grad-connected zero so loss.backward() works when all auxiliary
+                        # losses (ProxyAnchor / IDL-RTM / DER++) are off (e.g. L_naive, L_replay,
+                        # no_proxy variants). Pre-fix this returned a leaf zero with no grad_fn
+                        # and broke training at exp 1 when buffer has only 1 class.
+                        loss_supcon = features_paired.sum() * 0.0
 
                     # ProxyAnchorLoss
                     if self.use_proxy_anchor and self.proxy_anchor_loss.proxies is not None:
