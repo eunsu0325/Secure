@@ -87,6 +87,9 @@ class Training:
     rehab_samples_per_user: int = 4   # tail user당 추가 replay 샘플 수
     qar_warmup_users: int = 10        # QAR 활성화 최소 등록 사용자 수
 
+    # A8: diagnostic Phase 2 용 minimal-output 모드 (Drive I/O 비용 절감)
+    paper_minimal_outputs: bool = False  # True 면 per-step PNG/CSV/체크포인트 저장 skip
+
 @dataclasses.dataclass
 class Openset:
     enabled: bool = True
