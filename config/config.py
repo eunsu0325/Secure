@@ -90,6 +90,10 @@ class Training:
     # A8: diagnostic Phase 2 용 minimal-output 모드 (Drive I/O 비용 절감)
     paper_minimal_outputs: bool = False  # True 면 per-step PNG/CSV/체크포인트 저장 skip
 
+    # SupCon ablation (paper-extra): False 면 SupCon 가중치 강제 0
+    # 평소엔 항상 True (SupCon 이 base loss). "ProxyAnchor 가 SupCon 없이도 동작하나?" 실험용.
+    use_supcon: bool = True
+
 @dataclasses.dataclass
 class Openset:
     enabled: bool = True

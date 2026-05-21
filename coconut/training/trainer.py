@@ -663,6 +663,13 @@ class COCONUTTrainer:
                         w_supcon = 0.0
                         w_proxy = 1.0
 
+                    # Paper-extra ablation: use_supcon=False 면 SupCon 강제 비활성화
+                    if not getattr(self.config.training, 'use_supcon', True):
+                        w_supcon = 0.0
+                        # ProxyAnchor 가 켜져 있으면 그 weight 를 1.0 으로 키워서 학습 신호 유지
+                        if self.use_proxy_anchor and self.proxy_anchor_loss.proxies is not None:
+                            w_proxy = 1.0
+
                     if w_supcon > 0:
                         loss_supcon = self.criterion(features_paired, batch_labels)
                     else:
