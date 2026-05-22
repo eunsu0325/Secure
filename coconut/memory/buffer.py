@@ -32,7 +32,7 @@ class ReservoirSamplingBuffer:
 
         :param new_data: 새로운 데이터 리스트 (이미지 경로 또는 텐서)
         :param new_labels: 새로운 레이블 리스트
-        :param new_logits: 새로운 logit 리스트 (DER++ feature distillation용, Optional)
+        :param new_logits: 선택적 보조 슬롯 (Optional, 현재 사용 안 함 — 향후 확장용 보존)
         """
         # 새 데이터에 random weight 할당 (0~1 사이의 값)
         new_weights = torch.rand(len(new_data))
@@ -167,7 +167,7 @@ class ClassBalancedBuffer:
 
         :param new_data: 새로운 데이터 리스트
         :param new_labels: 새로운 레이블 리스트
-        :param new_logits: 새로운 logit 리스트 (DER++ feature distillation용, Optional)
+        :param new_logits: 선택적 보조 슬롯 (Optional, 현재 사용 안 함 — 향후 확장용 보존)
         """
         if len(new_data) == 0:
             return

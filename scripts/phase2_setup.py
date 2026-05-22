@@ -4,12 +4,11 @@ Phase 2 — Generate 9 variant configs for COCONUT diagnostic tear-down on BJTU.
 Reads `config/config.yaml` as the L_full baseline, applies one-line overrides
 per variant, and writes each as `config/phase2/<variant>.yaml`.
 
-Variants (per plan §B.4.1, DER++-convention 3-tier structure):
-    L_naive     — DER++'s "SGD": NO memory replay, NO CL/openset extras (lower bound)
-    L_replay    — DER++'s "ER":  memory replay ON, but all method extras OFF
+Variants (3-tier structure for necessity ablation):
+    L_naive     — lower bound: NO memory replay, NO CL/openset extras
+    L_replay    — baseline:    memory replay ON, but all method extras OFF
     L_full      — current config unchanged (proposed method, reference)
     no_proxy    — L_full minus ProxyAnchor
-    no_der      — L_full minus DER++
     no_qar      — L_full minus QAR
     no_snorm    — L_full minus S-norm
     no_maha     — L_full minus Mahalanobis (cosine score)
@@ -46,13 +45,12 @@ import yaml
 # cfg["Training"]["use_proxy_anchor"] = value.
 VARIANTS = {
     "L_naive": {
-        "desc": "DER++'s SGD lower bound — no memory replay, no CL/openset extras",
+        "desc": "Lower bound — no memory replay, no CL/openset extras",
         "overrides": {
             # Disable memory replay (the defining difference vs L_replay)
             ("Training", "memory_batch_size"): 0,
             # Disable all method components (same as L_replay below)
             ("Training", "use_proxy_anchor"): False,
-            ("Training", "der_alpha"): 0.0,
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
             ("Openset", "score_mode"): "cosine",
@@ -61,11 +59,10 @@ VARIANTS = {
         },
     },
     "L_replay": {
-        "desc": "DER++'s ER baseline — memory replay only, no CL/openset extras",
+        "desc": "Replay-only baseline — memory replay ON, no CL/openset extras",
         "overrides": {
             # Memory replay stays ON (default memory_batch_size=160)
             ("Training", "use_proxy_anchor"): False,
-            ("Training", "der_alpha"): 0.0,
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
             ("Openset", "score_mode"): "cosine",
@@ -81,12 +78,6 @@ VARIANTS = {
         "desc": "L_full minus ProxyAnchor",
         "overrides": {
             ("Training", "use_proxy_anchor"): False,
-        },
-    },
-    "no_der": {
-        "desc": "L_full minus DER++ feature distillation",
-        "overrides": {
-            ("Training", "der_alpha"): 0.0,
         },
     },
     "no_qar": {
@@ -123,18 +114,6 @@ VARIANTS = {
     "only_proxy": {
         "desc": "L_replay + ProxyAnchor (isolated)",
         "overrides": {
-            ("Training", "der_alpha"): 0.0,
-            ("Training", "use_qar"): False,
-            ("Openset", "use_snorm"): False,
-            ("Openset", "score_mode"): "cosine",
-            ("Openset", "threshold_alpha"): 1.0,
-            ("Openset", "threshold_max_delta"): 1.0,
-        },
-    },
-    "only_der": {
-        "desc": "L_replay + DER++ (isolated)",
-        "overrides": {
-            ("Training", "use_proxy_anchor"): False,
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
             ("Openset", "score_mode"): "cosine",
@@ -146,7 +125,6 @@ VARIANTS = {
         "desc": "L_replay + QAR (isolated)",
         "overrides": {
             ("Training", "use_proxy_anchor"): False,
-            ("Training", "der_alpha"): 0.0,
             ("Openset", "use_snorm"): False,
             ("Openset", "score_mode"): "cosine",
             ("Openset", "threshold_alpha"): 1.0,
@@ -157,7 +135,6 @@ VARIANTS = {
         "desc": "L_replay + S-norm (isolated)",
         "overrides": {
             ("Training", "use_proxy_anchor"): False,
-            ("Training", "der_alpha"): 0.0,
             ("Training", "use_qar"): False,
             ("Openset", "score_mode"): "cosine",
             ("Openset", "threshold_alpha"): 1.0,
@@ -168,7 +145,6 @@ VARIANTS = {
         "desc": "L_replay + Mahalanobis NCM (isolated)",
         "overrides": {
             ("Training", "use_proxy_anchor"): False,
-            ("Training", "der_alpha"): 0.0,
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
             ("Openset", "threshold_alpha"): 1.0,
@@ -179,7 +155,6 @@ VARIANTS = {
         "desc": "L_replay + τ recalibration EMA (isolated)",
         "overrides": {
             ("Training", "use_proxy_anchor"): False,
-            ("Training", "der_alpha"): 0.0,
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
             ("Openset", "score_mode"): "cosine",
@@ -246,7 +221,6 @@ def main() -> int:
         # Snapshot the effective flags for manifest (helps Phase 4 reading).
         effective = {
             "use_proxy_anchor": cfg["Training"].get("use_proxy_anchor"),
-            "der_alpha": cfg["Training"].get("der_alpha"),
             "use_qar": cfg["Training"].get("use_qar"),
             "use_snorm": cfg["Openset"].get("use_snorm"),
             "score_mode": cfg["Openset"].get("score_mode"),

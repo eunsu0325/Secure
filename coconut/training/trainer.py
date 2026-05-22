@@ -175,14 +175,6 @@ class COCONUTTrainer:
             self.proxy_anchor_loss = None
             self.proxy_lambda = 0.0
 
-        # DER++ (Dark Experience Replay) — 2048D feature distillation (CCNet getFeatureCode output dim)
-        self.der_alpha = getattr(config.training, 'der_alpha', 0.0)
-        self.der_batch_size = getattr(config.training, 'der_batch_size', 32)
-        self.der_warmup_users = getattr(config.training, 'der_warmup_users', 3)
-        if self.der_alpha > 0 and self.verbose:
-            print(f"[COCONUT] DER++ enabled: α={self.der_alpha}, "
-                  f"batch_size={self.der_batch_size}, warmup={self.der_warmup_users}")
-
         # QAR (Quality-Aware Replay) — tail user 선별 재학습
         self.use_qar = getattr(config.training, 'use_qar', False)
         self.rehab_margin = getattr(config.training, 'rehab_margin', 0.05)
@@ -639,10 +631,10 @@ class COCONUTTrainer:
                     if w_supcon > 0:
                         loss_supcon = self.criterion(features_paired, batch_labels)
                     else:
-                        # A7: grad-connected zero so loss.backward() works when all auxiliary
-                        # losses (ProxyAnchor / DER++) are off (e.g. L_naive, L_replay,
-                        # no_proxy variants). Pre-fix this returned a leaf zero with no grad_fn
-                        # and broke training at exp 1 when buffer has only 1 class.
+                        # A7: grad-connected zero so loss.backward() works when ProxyAnchor is
+                        # off (e.g. L_naive, L_replay, no_proxy variants). Pre-fix this returned
+                        # a leaf zero with no grad_fn and broke training at exp 1 when buffer
+                        # has only 1 class.
                         loss_supcon = features_paired.sum() * 0.0
 
                     # ProxyAnchorLoss
@@ -669,55 +661,6 @@ class COCONUTTrainer:
                     else:
                         loss = loss_supcon
 
-                    # === DER++ Feature Distillation ===
-                    if self.der_alpha > 0 and len(self.memory_buffer) > 0:
-                        num_users_der = len(self.registered_users)
-                        if num_users_der >= self.der_warmup_users:
-                            # 재현성: DER 샘플링을 위한 결정적 시드 (메인 학습 RNG에 영향 주지 않음)
-                            _rng_state = torch.random.get_rng_state()
-                            der_seed = self.seed + self.experience_count * 10000 + epoch * 100 + iteration
-                            torch.manual_seed(der_seed)
-
-                            der_sample_size = min(self.der_batch_size, len(self.memory_buffer))
-                            der_paths, _, der_stored_feats = self.memory_buffer.sample(der_sample_size)
-                            torch.random.set_rng_state(_rng_state)  # RNG 복원
-
-                            # None이 아닌 유효한 feature만 필터링
-                            valid = [(p, f) for p, f in zip(der_paths, der_stored_feats)
-                                     if f is not None]
-
-                            if valid:
-                                der_images = []
-                                stored_tensors = []
-                                for path, feat in valid:
-                                    img = _open_with_channels(path, self.config.dataset.channels)
-                                    der_images.append(self.test_transform(img).unsqueeze(0))
-                                    stored_tensors.append(feat)
-
-                                der_batch = torch.cat(der_images, dim=0).to(self.device)
-                                stored_batch = torch.stack(stored_tensors).to(self.device)
-
-                                # eval mode: 저장 시점과 동일한 BatchNorm (running stats)
-                                # gradient는 여전히 흐름
-                                self.model.eval()
-                                current_feats = self.model.getFeatureCode(der_batch)
-                                current_feats = F.normalize(current_feats, dim=-1)
-                                self.model.train()
-
-                                der_loss = F.mse_loss(current_feats, stored_batch.detach())
-                                effective_alpha = self.der_alpha * min(
-                                    1.0, num_users_der / max(1, self.der_warmup_users)
-                                )
-                                loss = loss + effective_alpha * der_loss
-
-                                # 로깅용 저장
-                                if iteration == 0 and epoch == 0:
-                                    self._last_der_info = {
-                                        'loss': der_loss.item(),
-                                        'alpha_eff': effective_alpha,
-                                        'n_valid': len(valid)
-                                    }
-
                     loss_avg.update(loss.item(), batch_size)
 
                     loss.backward()
@@ -737,22 +680,8 @@ class COCONUTTrainer:
             # 에포크 진행률과 평균 손실은 항상 표시해 학습 상황을 바로 확인 가능하게 함
             print(f"  [에포크 {epoch+1}/{self.config.training.epochs_per_experience}] 평균 손실: {avg_loss:.4f}")
 
-        # 메모리 버퍼 업데이트 (DER++: 2048D feature도 함께 저장)
-        if self.der_alpha > 0:
-            self.model.eval()
-            stored_features = []
-            with torch.no_grad():
-                for path in train_paths:
-                    img = _open_with_channels(path, self.config.dataset.channels)
-                    img_tensor = self.test_transform(img).unsqueeze(0).to(self.device)
-                    feat = self.model.getFeatureCode(img_tensor)
-                    feat = F.normalize(feat, dim=-1)
-                    stored_features.append(feat.squeeze(0).cpu())
-            self.model.train()
-        else:
-            stored_features = None
-
-        self.memory_buffer.update_from_dataset(train_paths, train_labels, stored_features)
+        # 메모리 버퍼 업데이트
+        self.memory_buffer.update_from_dataset(train_paths, train_labels)
         if self.verbose:
             print(f"Memory buffer size after update: {len(self.memory_buffer)}")
 
@@ -823,9 +752,6 @@ class COCONUTTrainer:
                     last_loss = getattr(self, '_last_epoch_loss', 0)
                     epochs = self.config.training.epochs_per_experience
                     loss_line = f"  Loss: {first_loss:.4f} -> {last_loss:.4f} ({epochs}ep) | w_proxy={w_proxy:.2f}, w_supcon={w_supcon:.2f}"
-                    der_info = getattr(self, '_last_der_info', {})
-                    if der_info:
-                        loss_line += f", DER={der_info['loss']:.4f}(α={der_info['alpha_eff']:.2f})"
                     print(loss_line)
 
                     # (Step 8 출력에서 FNIR@1/5/10%를 CI와 함께 이미 찍음 — 중복 제거)

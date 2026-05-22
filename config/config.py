@@ -65,11 +65,6 @@ class Training:
     # 로그 출력 설정
     verbose: bool = False  # True: 전체 출력, False: compact 출력 (논문 지표 중심)
 
-    # DER++ (Dark Experience Replay) settings — feature distillation
-    der_alpha: float = 0.0       # 0.0 = 비활성화. 권장 범위: 0.1~0.3
-    der_batch_size: int = 32     # DER loss 계산용 버퍼 샘플 수
-    der_warmup_users: int = 3    # DER 활성화 전 warmup 기간
-
     # QAR (Quality-Aware Replay) — tail user 선별 재학습
     use_qar: bool = False
     rehab_margin: float = 0.05        # tau_cos + margin 이하를 tail로 판정

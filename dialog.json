@@ -63,7 +63,7 @@
       "checks": [
         "PR이 클래스 수와 함께 비례 증가하는가 (이전: 1D/class) — 여전하면 collapse 미해결",
         "FNIR이 forgetting으로 후반에 악화되는가",
-        "QAR/DER++ replay가 안정성 유지하는가"
+        "QAR replay가 안정성 유지하는가"
       ]
     }
   },

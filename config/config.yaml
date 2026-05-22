@@ -57,14 +57,8 @@ Training:
   proxy_lr_ratio: 50         # 100→50 (proxy 진동 방지, 논문 권장 10~100 범위 내)
   proxy_lambda: 0.5          # 0.7→0.5 (SupCon과 균형, 최종 weight: 0.5×0.5=0.25)
 
-  # DER++ (Dark Experience Replay) — 2048D feature distillation (CCNet getFeatureCode output dim)
-  der_alpha: 0.15             # 0.1→0.15 (QAR이 active rehab → DER 보존력 약간 강화)
-  der_batch_size: 32          # DER loss 계산용 샘플 수/iteration
-  der_warmup_users: 3         # Warmup 기간 (사용자 수)
-
   # QAR (Quality-Aware Replay) — tail user 선별 재학습
   # 배치 구성: current(16) + memory(160, balanced) + rehab(tail only, 추가)
-  # DER++(feature 보존)과 상호보완: QAR=active rehab, DER++=passive preservation
   use_qar: true
   rehab_margin: 0.05        # tau_cos + margin 이하를 tail로 판정 (0.0=임계치 정확히, 0.05=여유)
   rehab_samples_per_user: 4 # tail user당 추가 replay 샘플 수 (memory_size/100 ≈ 10, 40% 활용)
