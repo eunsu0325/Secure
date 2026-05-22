@@ -77,22 +77,6 @@ class ConfigParser:
             if 'verbose' not in training_dict:
                 training_dict['verbose'] = False
 
-            # IDL+RTM Loss 기본값 (Su et al., "Open-Set Biometrics")
-            idl_rtm_defaults = {
-                'use_idl_rtm': False,
-                'idl_alpha_det': 6.0,         # α: Detection sigmoid steepness
-                'idl_beta_id': 0.2,           # β: Identification sigmoid steepness
-                'idl_gamma_rank': 6.0,        # γ: Rank sigmoid steepness
-                'idl_rtm_weight': 4.0,        # λ: L^RTM weight (Eq. 13)
-                'idl_rtm_lambda': 0.3,        # COCONUT 외부 가중치
-                'idl_rtm_warmup_users': 5,
-                'idl_min_gallery_classes': 2,
-                'idl_gallery_fraction': 0.7,
-            }
-            for key, default in idl_rtm_defaults.items():
-                if key not in training_dict:
-                    training_dict[key] = default
-
             self.training = Training(**training_dict)
 
             #  ProxyAnchorLoss 설정 출력 (verbose만)

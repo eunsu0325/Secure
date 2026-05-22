@@ -9,7 +9,6 @@ Variants (per plan §B.4.1, DER++-convention 3-tier structure):
     L_replay    — DER++'s "ER":  memory replay ON, but all method extras OFF
     L_full      — current config unchanged (proposed method, reference)
     no_proxy    — L_full minus ProxyAnchor
-    no_idl      — L_full minus IDL-RTM
     no_der      — L_full minus DER++
     no_qar      — L_full minus QAR
     no_snorm    — L_full minus S-norm
@@ -53,7 +52,6 @@ VARIANTS = {
             ("Training", "memory_batch_size"): 0,
             # Disable all method components (same as L_replay below)
             ("Training", "use_proxy_anchor"): False,
-            ("Training", "use_idl_rtm"): False,
             ("Training", "der_alpha"): 0.0,
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
@@ -67,7 +65,6 @@ VARIANTS = {
         "overrides": {
             # Memory replay stays ON (default memory_batch_size=160)
             ("Training", "use_proxy_anchor"): False,
-            ("Training", "use_idl_rtm"): False,
             ("Training", "der_alpha"): 0.0,
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
@@ -84,12 +81,6 @@ VARIANTS = {
         "desc": "L_full minus ProxyAnchor",
         "overrides": {
             ("Training", "use_proxy_anchor"): False,
-        },
-    },
-    "no_idl": {
-        "desc": "L_full minus IDL-RTM",
-        "overrides": {
-            ("Training", "use_idl_rtm"): False,
         },
     },
     "no_der": {
@@ -132,19 +123,6 @@ VARIANTS = {
     "only_proxy": {
         "desc": "L_replay + ProxyAnchor (isolated)",
         "overrides": {
-            ("Training", "use_idl_rtm"): False,
-            ("Training", "der_alpha"): 0.0,
-            ("Training", "use_qar"): False,
-            ("Openset", "use_snorm"): False,
-            ("Openset", "score_mode"): "cosine",
-            ("Openset", "threshold_alpha"): 1.0,
-            ("Openset", "threshold_max_delta"): 1.0,
-        },
-    },
-    "only_idl": {
-        "desc": "L_replay + IDL-RTM (isolated)",
-        "overrides": {
-            ("Training", "use_proxy_anchor"): False,
             ("Training", "der_alpha"): 0.0,
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
@@ -157,7 +135,6 @@ VARIANTS = {
         "desc": "L_replay + DER++ (isolated)",
         "overrides": {
             ("Training", "use_proxy_anchor"): False,
-            ("Training", "use_idl_rtm"): False,
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
             ("Openset", "score_mode"): "cosine",
@@ -169,7 +146,6 @@ VARIANTS = {
         "desc": "L_replay + QAR (isolated)",
         "overrides": {
             ("Training", "use_proxy_anchor"): False,
-            ("Training", "use_idl_rtm"): False,
             ("Training", "der_alpha"): 0.0,
             ("Openset", "use_snorm"): False,
             ("Openset", "score_mode"): "cosine",
@@ -181,7 +157,6 @@ VARIANTS = {
         "desc": "L_replay + S-norm (isolated)",
         "overrides": {
             ("Training", "use_proxy_anchor"): False,
-            ("Training", "use_idl_rtm"): False,
             ("Training", "der_alpha"): 0.0,
             ("Training", "use_qar"): False,
             ("Openset", "score_mode"): "cosine",
@@ -193,7 +168,6 @@ VARIANTS = {
         "desc": "L_replay + Mahalanobis NCM (isolated)",
         "overrides": {
             ("Training", "use_proxy_anchor"): False,
-            ("Training", "use_idl_rtm"): False,
             ("Training", "der_alpha"): 0.0,
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
@@ -205,7 +179,6 @@ VARIANTS = {
         "desc": "L_replay + τ recalibration EMA (isolated)",
         "overrides": {
             ("Training", "use_proxy_anchor"): False,
-            ("Training", "use_idl_rtm"): False,
             ("Training", "der_alpha"): 0.0,
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
@@ -273,7 +246,6 @@ def main() -> int:
         # Snapshot the effective flags for manifest (helps Phase 4 reading).
         effective = {
             "use_proxy_anchor": cfg["Training"].get("use_proxy_anchor"),
-            "use_idl_rtm": cfg["Training"].get("use_idl_rtm"),
             "der_alpha": cfg["Training"].get("der_alpha"),
             "use_qar": cfg["Training"].get("use_qar"),
             "use_snorm": cfg["Openset"].get("use_snorm"),

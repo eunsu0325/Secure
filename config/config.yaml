@@ -57,17 +57,6 @@ Training:
   proxy_lr_ratio: 50         # 100→50 (proxy 진동 방지, 논문 권장 10~100 범위 내)
   proxy_lambda: 0.5          # 0.7→0.5 (SupCon과 균형, 최종 weight: 0.5×0.5=0.25)
 
-  # IDL+RTM Loss (Su et al., "Open-Set Biometrics" — Eq. 7-13)
-  use_idl_rtm: true
-  idl_alpha_det: 3.0          # α: Detection sigmoid steepness (Eq. 7, Table 2)
-  idl_beta_id: 0.35            # β: Identification sigmoid steepness (Eq. 9, Table 2)
-  idl_gamma_rank: 3.0         # γ: Rank sigmoid steepness (Eq. 10, Table 2)
-  idl_rtm_weight: 4.0         # λ: L^RTM weight in L = L^IDL + λ·L^RTM (Eq. 13, Table 2)
-  idl_rtm_lambda: 0.4         # 0.6→0.4 (QAR 추가로 tail 학습 보강, IDL 과도한 지배 완화)
-  idl_rtm_warmup_users: 5     # warmup 기간 (사용자 수)
-  idl_min_gallery_classes: 2  # 최소 gallery 클래스 수
-  idl_gallery_fraction: 0.7   # gallery로 사용할 클래스 비율
-
   # DER++ (Dark Experience Replay) — 2048D feature distillation (CCNet getFeatureCode output dim)
   der_alpha: 0.15             # 0.1→0.15 (QAR이 active rehab → DER 보존력 약간 강화)
   der_batch_size: 32          # DER loss 계산용 샘플 수/iteration

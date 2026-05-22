@@ -175,29 +175,6 @@ class COCONUTTrainer:
             self.proxy_anchor_loss = None
             self.proxy_lambda = 0.0
 
-        # IDL+RTM Loss 초기화 (Su et al., "Open-Set Biometrics")
-        self.use_idl_rtm = getattr(config.training, 'use_idl_rtm', False)
-        if self.use_idl_rtm:
-            from coconut.losses import IDL_RTMLoss
-            self.idl_rtm_loss = IDL_RTMLoss(
-                alpha=getattr(config.training, 'idl_alpha_det', 6.0),
-                beta=getattr(config.training, 'idl_beta_id', 0.2),
-                gamma=getattr(config.training, 'idl_gamma_rank', 6.0),
-                rtm_lambda=getattr(config.training, 'idl_rtm_weight', 4.0),
-                min_gallery_classes=getattr(config.training, 'idl_min_gallery_classes', 2),
-                gallery_fraction=getattr(config.training, 'idl_gallery_fraction', 0.7),
-            )
-            self.idl_rtm_lambda = getattr(config.training, 'idl_rtm_lambda', 0.3)
-            self.idl_rtm_warmup_users = getattr(config.training, 'idl_rtm_warmup_users', 5)
-            if self.verbose:
-                print(f"[COCONUT] IDL+RTM Loss enabled: ext_λ={self.idl_rtm_lambda}, "
-                      f"α={self.idl_rtm_loss.alpha}, β={self.idl_rtm_loss.beta}, "
-                      f"γ={self.idl_rtm_loss.gamma}, RTM_λ={self.idl_rtm_loss.rtm_lambda}")
-        else:
-            self.idl_rtm_loss = None
-            self.idl_rtm_lambda = 0.0
-            self.idl_rtm_warmup_users = 0
-
         # DER++ (Dark Experience Replay) — 2048D feature distillation (CCNet getFeatureCode output dim)
         self.der_alpha = getattr(config.training, 'der_alpha', 0.0)
         self.der_batch_size = getattr(config.training, 'der_batch_size', 32)
@@ -640,17 +617,6 @@ class COCONUTTrainer:
                     # CCNet 결과 그대로 사용
                     features_paired = torch.stack([f1, f2], dim=1)
 
-                    # IDL+RTM Loss 계산 (배치 내 episode splitting)
-                    if self.use_idl_rtm and len(set(batch_labels.tolist())) >= 2:
-                        # 랜덤 view 선택으로 augmentation 편향 감소
-                        idl_features = f1 if random.random() < 0.5 else f2
-                        idl_rtm_loss_val, idl_rtm_info = self.idl_rtm_loss(idl_features, batch_labels)
-                    else:
-                        # A7: grad-connected zero (consistency with loss_supcon path; harmless
-                        # in default case since idl_rtm_weight=0 zeros this out anyway).
-                        idl_rtm_loss_val = features_paired.sum() * 0.0
-                        idl_rtm_info = {}
-
                     # Curriculum Loss Schedule + Batch Gating
                     ramp_users = getattr(self.config.training, 'curriculum_ramp_users', 12)
                     num_users = len(self.registered_users)
@@ -674,7 +640,7 @@ class COCONUTTrainer:
                         loss_supcon = self.criterion(features_paired, batch_labels)
                     else:
                         # A7: grad-connected zero so loss.backward() works when all auxiliary
-                        # losses (ProxyAnchor / IDL-RTM / DER++) are off (e.g. L_naive, L_replay,
+                        # losses (ProxyAnchor / DER++) are off (e.g. L_naive, L_replay,
                         # no_proxy variants). Pre-fix this returned a leaf zero with no grad_fn
                         # and broke training at exp 1 when buffer has only 1 class.
                         loss_supcon = features_paired.sum() * 0.0
@@ -688,13 +654,7 @@ class COCONUTTrainer:
                         proxy_weight = w_proxy * self.proxy_lambda
                         supcon_weight = w_supcon
 
-                        # IDL+RTM warmup: 사용자 수에 따라 가중치 점진 증가
-                        if self.use_idl_rtm:
-                            idl_rtm_weight = self.idl_rtm_lambda * min(1.0, num_users / max(1, self.idl_rtm_warmup_users))
-                        else:
-                            idl_rtm_weight = 0.0
-
-                        loss = proxy_weight * loss_proxy + supcon_weight * loss_supcon + idl_rtm_weight * idl_rtm_loss_val
+                        loss = proxy_weight * loss_proxy + supcon_weight * loss_supcon
 
                         if iteration == 0 and epoch == 0:
                             # compact 모드용: curriculum weights 저장
@@ -702,24 +662,12 @@ class COCONUTTrainer:
                                 'w_proxy': proxy_weight, 'w_supcon': supcon_weight,
                                 'loss_supcon': loss_supcon.item(), 'loss_proxy': loss_proxy.item()
                             }
-                            if self.use_idl_rtm:
-                                self._last_curriculum['w_idl_rtm'] = idl_rtm_weight
-                                self._last_curriculum['loss_idl_rtm'] = idl_rtm_loss_val.item()
-                                self._last_idl_rtm_info = idl_rtm_info
                             if self.verbose:
                                 print(f"[Curriculum] users={num_users}, w_proxy={w_proxy:.2f}, w_supcon={w_supcon:.2f}, gate={'ON' if unique_in_batch >= 2 else 'OFF'}")
                                 print(f"   Weights → proxy:{proxy_weight:.2f}, supcon:{supcon_weight:.2f}")
                                 print(f"   SupCon: {loss_supcon.item():.4f}, ProxyAnchor: {loss_proxy.item():.4f}")
-                                if self.use_idl_rtm and not idl_rtm_info.get('skipped', True):
-                                    print(f"   IDL+RTM: w={idl_rtm_weight:.2f}, L_IDL={idl_rtm_info['L_IDL']:.4f}, L_RTM={idl_rtm_info['L_RTM']:.4f}")
-                                    print(f"   S_det={idl_rtm_info['S_det_mean']:.4f}, S_id={idl_rtm_info['S_id_mean']:.4f} | G={idl_rtm_info['n_gallery']}, NM={idl_rtm_info['n_nonmated']}")
                     else:
-                        # IDL+RTM도 포함
-                        if self.use_idl_rtm:
-                            idl_rtm_weight = self.idl_rtm_lambda * min(1.0, num_users / max(1, self.idl_rtm_warmup_users))
-                            loss = loss_supcon + idl_rtm_weight * idl_rtm_loss_val
-                        else:
-                            loss = loss_supcon
+                        loss = loss_supcon
 
                     # === DER++ Feature Distillation ===
                     if self.der_alpha > 0 and len(self.memory_buffer) > 0:
@@ -874,19 +822,11 @@ class COCONUTTrainer:
                     first_loss = getattr(self, '_first_epoch_loss', 0)
                     last_loss = getattr(self, '_last_epoch_loss', 0)
                     epochs = self.config.training.epochs_per_experience
-                    w_idl_rtm = curriculum.get('w_idl_rtm', 0)
                     loss_line = f"  Loss: {first_loss:.4f} -> {last_loss:.4f} ({epochs}ep) | w_proxy={w_proxy:.2f}, w_supcon={w_supcon:.2f}"
-                    if self.use_idl_rtm and w_idl_rtm > 0:
-                        loss_line += f", w_idl_rtm={w_idl_rtm:.2f}"
                     der_info = getattr(self, '_last_der_info', {})
                     if der_info:
                         loss_line += f", DER={der_info['loss']:.4f}(α={der_info['alpha_eff']:.2f})"
                     print(loss_line)
-
-                    # IDL+RTM 손실 상세 (활성화 시)
-                    idl_info = getattr(self, '_last_idl_rtm_info', {})
-                    if self.use_idl_rtm and not idl_info.get('skipped', True):
-                        print(f"  IDL+RTM: L_IDL={idl_info['L_IDL']:.4f}, L_RTM={idl_info['L_RTM']:.4f} | S_det={idl_info['S_det_mean']:.4f}, S_id={idl_info['S_id_mean']:.4f} | G={idl_info['n_gallery']}, NM={idl_info['n_nonmated']}")
 
                     # (Step 8 출력에서 FNIR@1/5/10%를 CI와 함께 이미 찍음 — 중복 제거)
 

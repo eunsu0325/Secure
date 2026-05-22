@@ -65,17 +65,6 @@ class Training:
     # 로그 출력 설정
     verbose: bool = False  # True: 전체 출력, False: compact 출력 (논문 지표 중심)
 
-    # IDL+RTM Loss 설정 (Su et al., "Open-Set Biometrics")
-    use_idl_rtm: bool = False
-    idl_alpha_det: float = 6.0          # α: Detection sigmoid steepness (Eq. 7)
-    idl_beta_id: float = 0.2            # β: Identification sigmoid steepness (Eq. 9)
-    idl_gamma_rank: float = 6.0         # γ: Rank sigmoid steepness (Eq. 10)
-    idl_rtm_weight: float = 4.0         # λ: L^RTM weight in L = L^IDL + λ·L^RTM (Eq. 13)
-    idl_rtm_lambda: float = 0.3         # COCONUT 전체 손실 내 IDL+RTM 외부 가중치
-    idl_rtm_warmup_users: int = 5       # warmup 기간 (사용자 수)
-    idl_min_gallery_classes: int = 2    # 최소 gallery 클래스 수
-    idl_gallery_fraction: float = 0.7   # gallery로 사용할 클래스 비율
-
     # DER++ (Dark Experience Replay) settings — feature distillation
     der_alpha: float = 0.0       # 0.0 = 비활성화. 권장 범위: 0.1~0.3
     der_batch_size: int = 32     # DER loss 계산용 버퍼 샘플 수
