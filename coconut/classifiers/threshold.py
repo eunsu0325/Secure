@@ -1,9 +1,8 @@
 # coconut/classifiers/threshold.py
 """
-FAR 타겟 기반 임계치 계산 및 스무딩
+FAR 타겟 기반 임계치 계산
 - τ = quantile(unknown_dev_scores, 1 - target_FPIR)
 - 코사인 유사도 기준
-- EMA 스무딩 + 변화폭 제한
 - 선택적 마진 자동 조정
 """
 
@@ -20,7 +19,6 @@ class ThresholdCalibrator:
     전역 임계치(τ_s) 캘리브레이터
     - τ = quantile(unknown_dev_scores, 1 - target_FPIR)
     - 코사인 유사도 기반(기본)
-    - EMA 스무딩 + 변화폭 제한
     - (옵션) 마진 자동 조정
     """
 
@@ -29,8 +27,6 @@ class ThresholdCalibrator:
         mode: str = "cosine",                    # "cosine" 또는 "euclidean"
         threshold_mode: str = "far",
         target_far: float = 0.01,                # FAR 타겟 (1%)
-        alpha: float = 0.2,                      # EMA 계수
-        max_delta: float = 0.03,                 # 한 번에 바뀌는 최대 변화폭
         clip_range: Optional[Tuple[float, float]] = (-1.0, 1.0),  # 코사인 기본 범위
         use_auto_margin: bool = False,           # 마진 자동 조정 여부
         margin_init: float = 0.05,               # 초기 마진값
@@ -44,22 +40,19 @@ class ThresholdCalibrator:
         self.mode = mode
         self.threshold_mode = threshold_mode     # ️ EER or FAR
         self.target_far = target_far             # ️ FAR 타겟값
-        self.alpha = alpha
-        self.max_delta = max_delta
         self.clip_range = clip_range
-        self.verbose = verbose                   #         
+        self.verbose = verbose                   #
         #  마진 관련
         self.use_auto_margin = use_auto_margin
         self.tau_m = margin_init
         self.margin_bounds = margin_bounds
         self.margin_step_up = margin_step_up
         self.margin_step_down = margin_step_down
-        #  self.far_target = far_target  # 중복 제거
-        self.far_target_margin = far_target      # ️ 마진용 FAR 타겟 (이름 변경)
-        
+        self.far_target_margin = far_target      # ️ 마진용 FAR 타겟
+
         #  최소 샘플 요구사항
         self.min_samples = min_samples
-        
+
         #  히스토리 추적
         self.history: List[Dict] = []
         self.tau_s_current: Optional[float] = None
@@ -101,34 +94,21 @@ class ThresholdCalibrator:
     
     def smooth_tau(self, old_tau: Optional[float], new_tau: float) -> float:
         """
-         EMA 스무딩 + 변화폭 제한 (기존 유지)
-        
+        새로 계산된 τ를 그대로 사용 (clip만 적용).
+
+        과거에는 EMA + max_delta 평활화를 적용했으나, L_minimal ablation에서
+        평활화의 기여가 미미해 제거됨. 이름은 호환성 유지 차원에서 보존.
+
         Args:
-            old_tau: 이전 임계치 (None이면 new_tau 그대로)
+            old_tau: 이전 임계치 (no longer used; kept for backward-compat)
             new_tau: 새로 계산된 임계치
-            
+
         Returns:
-            스무딩된 임계치
+            clip 적용된 임계치
         """
-        if old_tau is None:
-            # 첫 번째 계산
-            tau = new_tau
-        else:
-            # EMA 적용
-            tau = (1 - self.alpha) * old_tau + self.alpha * new_tau
-            
-            # 변화폭 제한
-            delta = tau - old_tau
-            if abs(delta) > self.max_delta:
-                tau = old_tau + np.sign(delta) * self.max_delta
-                if self.verbose:
-                    print(f"WARNING: Delta clipped: {delta:.4f} → {np.sign(delta) * self.max_delta:.4f}")
-        
-        # 범위 클리핑
         if self.clip_range is not None:
-            tau = float(np.clip(tau, self.clip_range[0], self.clip_range[1]))
-        
-        return float(tau)
+            return float(np.clip(new_tau, self.clip_range[0], self.clip_range[1]))
+        return float(new_tau)
     
     def auto_tune_margin(self, far_current: float) -> float:
         """
@@ -266,10 +246,8 @@ if __name__ == "__main__":
     print("-" * 50)
     calibrator_far = ThresholdCalibrator(
         mode="cosine",
-        threshold_mode="far",  # ️ FAR 타겟
-        target_far=0.01,  # ️ 1% FAR
-        alpha=0.2,
-        max_delta=0.03,
+        threshold_mode="far",
+        target_far=0.01,
         clip_range=(-1.0, 1.0),
         use_auto_margin=False,
         margin_init=0.05,

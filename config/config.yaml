@@ -69,9 +69,7 @@ Openset:
   enabled: true
 
   threshold_mode: 'far'
-  target_far: 0.01            # FAR target 1% (0.001→0.01: τ 과도하게 높아지는 문제 완화)
-  threshold_alpha: 0.2       # EMA smoothing coefficient (0.8→0.2: τ 급변 방지)
-  threshold_max_delta: 0.05  # Maximum change limit (1.0→0.05: τ 급변 방지)
+  target_far: 0.01            # FAR target 1%
 
   # Initial values and warmup
   warmup_users: 10           # Warmup period

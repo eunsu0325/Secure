@@ -241,8 +241,6 @@ class COCONUTTrainer:
                     mode='cosine',
                     threshold_mode=config.openset.threshold_mode,
                     target_far=config.openset.target_far,
-                    alpha=config.openset.threshold_alpha,
-                    max_delta=config.openset.threshold_max_delta,
                     clip_range=(-1.0, 1.0),
                     min_samples=10,
                     verbose=_cal_verbose
@@ -251,8 +249,6 @@ class COCONUTTrainer:
                     mode='cosine',
                     threshold_mode=config.openset.threshold_mode,
                     target_far=config.openset.target_far,
-                    alpha=config.openset.threshold_alpha,
-                    max_delta=config.openset.threshold_max_delta,
                     clip_range=(0.0, 2.0),
                     min_samples=10,
                     verbose=_cal_verbose
@@ -268,8 +264,6 @@ class COCONUTTrainer:
                     mode='cosine',
                     threshold_mode=config.openset.threshold_mode,
                     target_far=config.openset.target_far,
-                    alpha=config.openset.threshold_alpha,
-                    max_delta=config.openset.threshold_max_delta,
                     clip_range=cal_clip_range,
                     min_samples=10,
                     verbose=_cal_verbose

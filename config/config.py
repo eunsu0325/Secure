@@ -87,9 +87,7 @@ class Openset:
     # 통일된 임계치 파라미터
     threshold_mode: str = 'far'
     target_far: float = 0.01              # FAR 타겟 (1%)
-    threshold_alpha: float = 0.2          # EMA 계수 (기존 smoothing_alpha)
-    threshold_max_delta: float = 0.03     # 최대 변화폭 (기존 max_delta)
-    
+
     dev_ratio: float = 0.2
 
     # 추가 옵션

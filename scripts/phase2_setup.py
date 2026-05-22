@@ -11,7 +11,6 @@ Variants (3-tier structure for necessity ablation):
     no_proxy    — L_full minus ProxyAnchor
     no_qar      — L_full minus QAR
     no_snorm    — L_full minus S-norm
-    no_recal    — L_full minus τ recalibration (static τ)
 
 L_minimal is generated AFTER Phase 2 leave-one-out results, not here.
 
@@ -52,8 +51,6 @@ VARIANTS = {
             ("Training", "use_proxy_anchor"): False,
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
-            ("Openset", "threshold_alpha"): 1.0,
-            ("Openset", "threshold_max_delta"): 1.0,
         },
     },
     "L_replay": {
@@ -63,8 +60,6 @@ VARIANTS = {
             ("Training", "use_proxy_anchor"): False,
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
-            ("Openset", "threshold_alpha"): 1.0,
-            ("Openset", "threshold_max_delta"): 1.0,
         },
     },
     "L_full": {
@@ -89,13 +84,6 @@ VARIANTS = {
             ("Openset", "use_snorm"): False,
         },
     },
-    "no_recal": {
-        "desc": "L_full minus τ recalibration (static τ after first calibration)",
-        "overrides": {
-            ("Openset", "threshold_alpha"): 1.0,
-            ("Openset", "threshold_max_delta"): 1.0,
-        },
-    },
     # ===== LOI (Leave-One-In) variants =====
     # L_replay (replay only) + each method component added in isolation.
     # Used in combination with LOO to detect component redundancy:
@@ -107,8 +95,6 @@ VARIANTS = {
         "overrides": {
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
-            ("Openset", "threshold_alpha"): 1.0,
-            ("Openset", "threshold_max_delta"): 1.0,
         },
     },
     "only_qar": {
@@ -116,8 +102,6 @@ VARIANTS = {
         "overrides": {
             ("Training", "use_proxy_anchor"): False,
             ("Openset", "use_snorm"): False,
-            ("Openset", "threshold_alpha"): 1.0,
-            ("Openset", "threshold_max_delta"): 1.0,
         },
     },
     "only_snorm": {
@@ -125,17 +109,6 @@ VARIANTS = {
         "overrides": {
             ("Training", "use_proxy_anchor"): False,
             ("Training", "use_qar"): False,
-            ("Openset", "threshold_alpha"): 1.0,
-            ("Openset", "threshold_max_delta"): 1.0,
-        },
-    },
-    "only_recal": {
-        "desc": "L_replay + τ recalibration EMA (isolated)",
-        "overrides": {
-            ("Training", "use_proxy_anchor"): False,
-            ("Training", "use_qar"): False,
-            ("Openset", "use_snorm"): False,
-            # threshold_alpha/max_delta keep L_full's default (0.2 / 0.05)
         },
     },
 }
@@ -200,8 +173,6 @@ def main() -> int:
             "use_proxy_anchor": cfg["Training"].get("use_proxy_anchor"),
             "use_qar": cfg["Training"].get("use_qar"),
             "use_snorm": cfg["Openset"].get("use_snorm"),
-            "threshold_alpha": cfg["Openset"].get("threshold_alpha"),
-            "threshold_max_delta": cfg["Openset"].get("threshold_max_delta"),
         }
         manifest["variants"][vname] = {
             "desc": vinfo["desc"],
