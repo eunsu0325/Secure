@@ -11,7 +11,6 @@ Variants (3-tier structure for necessity ablation):
     no_proxy    — L_full minus ProxyAnchor
     no_qar      — L_full minus QAR
     no_snorm    — L_full minus S-norm
-    no_maha     — L_full minus Mahalanobis (cosine score)
     no_recal    — L_full minus τ recalibration (static τ)
 
 L_minimal is generated AFTER Phase 2 leave-one-out results, not here.
@@ -53,7 +52,6 @@ VARIANTS = {
             ("Training", "use_proxy_anchor"): False,
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
-            ("Openset", "score_mode"): "cosine",
             ("Openset", "threshold_alpha"): 1.0,
             ("Openset", "threshold_max_delta"): 1.0,
         },
@@ -65,13 +63,12 @@ VARIANTS = {
             ("Training", "use_proxy_anchor"): False,
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
-            ("Openset", "score_mode"): "cosine",
             ("Openset", "threshold_alpha"): 1.0,
             ("Openset", "threshold_max_delta"): 1.0,
         },
     },
     "L_full": {
-        "desc": "Current config — all 7 components on (reference baseline)",
+        "desc": "Current config — all components on (reference baseline)",
         "overrides": {},  # no changes
     },
     "no_proxy": {
@@ -92,12 +89,6 @@ VARIANTS = {
             ("Openset", "use_snorm"): False,
         },
     },
-    "no_maha": {
-        "desc": "L_full minus Mahalanobis (cosine score)",
-        "overrides": {
-            ("Openset", "score_mode"): "cosine",
-        },
-    },
     "no_recal": {
         "desc": "L_full minus τ recalibration (static τ after first calibration)",
         "overrides": {
@@ -116,7 +107,6 @@ VARIANTS = {
         "overrides": {
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
-            ("Openset", "score_mode"): "cosine",
             ("Openset", "threshold_alpha"): 1.0,
             ("Openset", "threshold_max_delta"): 1.0,
         },
@@ -126,7 +116,6 @@ VARIANTS = {
         "overrides": {
             ("Training", "use_proxy_anchor"): False,
             ("Openset", "use_snorm"): False,
-            ("Openset", "score_mode"): "cosine",
             ("Openset", "threshold_alpha"): 1.0,
             ("Openset", "threshold_max_delta"): 1.0,
         },
@@ -136,17 +125,6 @@ VARIANTS = {
         "overrides": {
             ("Training", "use_proxy_anchor"): False,
             ("Training", "use_qar"): False,
-            ("Openset", "score_mode"): "cosine",
-            ("Openset", "threshold_alpha"): 1.0,
-            ("Openset", "threshold_max_delta"): 1.0,
-        },
-    },
-    "only_maha": {
-        "desc": "L_replay + Mahalanobis NCM (isolated)",
-        "overrides": {
-            ("Training", "use_proxy_anchor"): False,
-            ("Training", "use_qar"): False,
-            ("Openset", "use_snorm"): False,
             ("Openset", "threshold_alpha"): 1.0,
             ("Openset", "threshold_max_delta"): 1.0,
         },
@@ -157,7 +135,6 @@ VARIANTS = {
             ("Training", "use_proxy_anchor"): False,
             ("Training", "use_qar"): False,
             ("Openset", "use_snorm"): False,
-            ("Openset", "score_mode"): "cosine",
             # threshold_alpha/max_delta keep L_full's default (0.2 / 0.05)
         },
     },
@@ -223,7 +200,6 @@ def main() -> int:
             "use_proxy_anchor": cfg["Training"].get("use_proxy_anchor"),
             "use_qar": cfg["Training"].get("use_qar"),
             "use_snorm": cfg["Openset"].get("use_snorm"),
-            "score_mode": cfg["Openset"].get("score_mode"),
             "threshold_alpha": cfg["Openset"].get("threshold_alpha"),
             "threshold_max_delta": cfg["Openset"].get("threshold_max_delta"),
         }

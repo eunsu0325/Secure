@@ -104,22 +104,6 @@ class ConfigParser:
             if 'use_snorm' not in openset_dict:
                 openset_dict['use_snorm'] = False
 
-            # Mahalanobis variant 기본값
-            if 'mahalanobis_variant' not in openset_dict:
-                openset_dict['mahalanobis_variant'] = 'diagonal'
-            if 'pca_explained_var' not in openset_dict:
-                openset_dict['pca_explained_var'] = 0.99
-            if 'pca_max_k' not in openset_dict:
-                openset_dict['pca_max_k'] = 256
-            if 'pca_shrinkage_mode' not in openset_dict:
-                openset_dict['pca_shrinkage_mode'] = 'auto'
-            if 'pca_shrinkage_lambda' not in openset_dict:
-                openset_dict['pca_shrinkage_lambda'] = 0.1
-            if 'pca_k_mode' not in openset_dict:
-                openset_dict['pca_k_mode'] = 'adaptive'
-            if 'pca_fixed_k' not in openset_dict:
-                openset_dict['pca_fixed_k'] = 32
-
             self.openset = Openset(**openset_dict)
 
             _verbose = getattr(self.training, 'verbose', False) if self.training else False

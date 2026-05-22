@@ -17,7 +17,7 @@ class NCMClassifier(nn.Module):
      normalize=True: 코사인 유사도 기반
     """
 
-    def __init__(self, normalize: bool = True, score_mode: str = 'cosine', var_reg_alpha: float = 1e-4):
+    def __init__(self, normalize: bool = True):
         super().__init__()
         self.register_buffer("class_means", None)
         self.class_means_dict = {}
@@ -33,11 +33,6 @@ class NCMClassifier(nn.Module):
         self.tau_margin = None       # margin threshold (top1 - top2)
         self.rejection_gate = 'top1_only'  # 'top1_only' | 'top1_margin'
 
-        # Mahalanobis 관련
-        self.score_mode = score_mode          # 'cosine' | 'mahalanobis'
-        self.var_reg_alpha = var_reg_alpha
-        self.global_var = None                # Tensor(D,) — shared diagonal variance
-
         # S-norm (per-class Z-score on raw cosine)
         # cohort = unknown_dev features. cohort_mu/sigma는 _vectorize_means_dict와
         # 같은 (max_class+1,) 1D 텐서로 저장되어 forward에서 broadcast됨.
@@ -49,9 +44,6 @@ class NCMClassifier(nn.Module):
     def state_dict(self):
         """register_buffer 외 plain 속성도 함께 저장합니다."""
         sd = super().state_dict()
-        # Mahalanobis
-        sd['_custom_score_mode'] = self.score_mode
-        sd['_custom_global_var'] = self.global_var
         # S-norm
         sd['_custom_snorm_enabled'] = self.snorm_enabled
         sd['_custom_cohort_mu'] = self.cohort_mu
@@ -72,9 +64,9 @@ class NCMClassifier(nn.Module):
         self.max_class = max(self.class_means_dict.keys()) if self.class_means_dict else -1
 
         # custom 상태 복원 (이전 체크포인트 하위 호환: 키 없으면 기본값 유지)
+        # Mahalanobis 관련 _custom_score_mode / _custom_global_var 키는 이전
+        # 체크포인트에는 있을 수 있으나 무시됨 (cosine-only)
         if custom_keys:
-            self.score_mode = custom_keys.get('_custom_score_mode', self.score_mode)
-            self.global_var = custom_keys.get('_custom_global_var', None)
             self.snorm_enabled = custom_keys.get('_custom_snorm_enabled', False)
             self.cohort_mu = custom_keys.get('_custom_cohort_mu', None)
             self.cohort_sigma = custom_keys.get('_custom_cohort_sigma', None)
@@ -101,7 +93,6 @@ class NCMClassifier(nn.Module):
         """
          최적화된 NCM 분류
 
-        score_mode='mahalanobis': whitened euclidean (shared diagonal Mahalanobis)
         normalize=True: 코사인 유사도 (정규화 후 내적)
         normalize=False: 유클리디안 거리 (제곱 거리 사용)
 
@@ -114,36 +105,6 @@ class NCMClassifier(nn.Module):
 
         # dtype 일치 보장 (fp16/AMP 지원)
         M = self.class_means.to(device=x.device, dtype=x.dtype)
-
-        if self.score_mode == 'mahalanobis':
-            scores = None
-
-            # --- Diagonal Mahalanobis ---
-            if self.global_var is not None:
-                x = F.normalize(x, p=2, dim=1, eps=1e-12)
-                inv_std = 1.0 / torch.sqrt(
-                    self.global_var.to(device=x.device, dtype=x.dtype) + self.var_reg_alpha
-                )
-                x_w = x * inv_std
-                M_w = M * inv_std
-                x2 = (x_w * x_w).sum(dim=1, keepdim=True)
-                m2 = (M_w * M_w).sum(dim=1, keepdim=False)
-                xm = x_w @ M_w.T
-                scores = -(x2 + m2.unsqueeze(0) - 2 * xm)
-
-            if scores is not None:
-                # S-norm compose (shared for both branches)
-                if apply_snorm and self.snorm_enabled and self.cohort_mu is not None:
-                    mu = self.cohort_mu.to(device=scores.device, dtype=scores.dtype)
-                    sigma = self.cohort_sigma.to(device=scores.device, dtype=scores.dtype)
-                    C_scores = scores.shape[1]
-                    C_cohort = mu.shape[0]
-                    if C_cohort < C_scores:
-                        pad = C_scores - C_cohort
-                        mu = torch.cat([mu, torch.zeros(pad, device=mu.device, dtype=mu.dtype)])
-                        sigma = torch.cat([sigma, torch.ones(pad, device=sigma.device, dtype=sigma.dtype)])
-                    scores = (scores - mu.unsqueeze(0)) / sigma.unsqueeze(0)
-                return scores
 
         if self.normalize:
             # 코사인 유사도 기반
@@ -179,9 +140,8 @@ class NCMClassifier(nn.Module):
 
         self.class_means_dict = {k: v.clone() for k, v in class_means_dict.items()}
 
-        # L2 정규화: cosine 모드는 항상, mahalanobis 모드도 동일하게 적용
-        # (forward()에서 probe를 L2 normalize하므로 mean도 맞춰야 함)
-        if self.normalize or self.score_mode == 'mahalanobis':
+        # L2 정규화: cosine 모드는 항상 적용
+        if self.normalize:
             for k in self.class_means_dict:
                 self.class_means_dict[k] = F.normalize(
                     self.class_means_dict[k], p=2, dim=0, eps=1e-12
@@ -215,10 +175,6 @@ class NCMClassifier(nn.Module):
         if tau_margin is not None:
             self.tau_margin = float(tau_margin)
 
-    def set_global_var(self, global_var: Tensor):
-        """Global shared diagonal variance 설정 (Mahalanobis용)"""
-        self.global_var = global_var.clone()
-
     def set_cohort_stats(self, cohort_mu_dict: Dict[int, float], cohort_sigma_dict: Dict[int, float]):
         """S-norm용 per-class cohort 평균/표준편차 설정.
         class_means와 같은 (max_class+1,) 텐서로 vectorize."""
@@ -238,9 +194,9 @@ class NCMClassifier(nn.Module):
         self.cohort_mu = mu
         self.cohort_sigma = sigma
         self.snorm_enabled = True
-        # 진단: cohort 통계가 어느 score space에서 계산됐는지 확인용
+        # 진단: cohort 통계 확인용
         nz = (sigma != 1.0).sum().item()
-        print(f"   [S-norm] cohort set on score_mode='{self.score_mode}': "
+        print(f"   [S-norm] cohort set: "
               f"C={C}, nz_classes={nz}, "
               f"mu[mean={mu.mean().item():.3e}, std={mu.std().item():.3e}], "
               f"sigma[mean={sigma.mean().item():.3e}, min={sigma.min().item():.3e}]")

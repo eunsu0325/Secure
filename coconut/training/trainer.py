@@ -42,7 +42,6 @@ from coconut.openset import (
 # diagnostic logging (PCA spectrum, xdomain FPIR).
 MAX_UNK_CALIB_SAMPLES = 3000   # unknown_dev cap for τ calibration
 MAX_NEGREF_EVAL_SAMPLES = 1000  # xdomain (negref) cap for FPIR_xdom diagnostic
-MAX_PCA_DIAG_SAMPLES = 2000    # memory buffer cap for PCA spectrum diagnostic
 
 
 def worker_init_fn(worker_id):
@@ -233,8 +232,7 @@ class COCONUTTrainer:
             if self.verbose:
                 print(f" Rejection gate: {self.rejection_gate}")
 
-            # ThresholdCalibrator 초기화
-            score_mode = getattr(config.openset, 'score_mode', 'cosine')
+            # ThresholdCalibrator 초기화 (cosine-only)
             _cal_verbose = self.verbose and config.openset.verbose_calibration
 
             if self.rejection_gate == 'top1_margin':
@@ -262,16 +260,12 @@ class COCONUTTrainer:
                 # 레거시 호환: 단일 calibrator도 cosine용으로 alias
                 self.threshold_calibrator = self.threshold_calibrator_cos
             else:
-                # 기존 단일 calibrator (top1_only)
-                if score_mode == 'mahalanobis':
-                    cal_clip_range = None
-                elif self.use_snorm:
-                    cal_clip_range = None  # z-score는 [-1,1] 범위 초과 가능
-                else:
-                    cal_clip_range = (-1.0, 1.0)
+                # 단일 calibrator (top1_only). S-norm 켜져 있으면 z-score 범위가
+                # [-1,1]을 벗어날 수 있으므로 clip 비활성화.
+                cal_clip_range = None if self.use_snorm else (-1.0, 1.0)
 
                 self.threshold_calibrator = ThresholdCalibrator(
-                    mode=score_mode,
+                    mode='cosine',
                     threshold_mode=config.openset.threshold_mode,
                     target_far=config.openset.target_far,
                     alpha=config.openset.threshold_alpha,
@@ -295,8 +289,6 @@ class COCONUTTrainer:
 
             # 진단 로그 저장용
             self._diag_history = []
-            self._last_pca = None  # 🍑 _diagnose_pca() 결과 캐시 (diag_history.json에 포함)
-
             # 초기 임계치 설정
             initial_tau = config.openset.initial_tau
             if self.rejection_gate == 'top1_margin':
@@ -710,16 +702,6 @@ class COCONUTTrainer:
 
                 self._calibrate_threshold()
                 metrics = self._evaluate_openset()
-
-                # PCA 진단: 10 experience마다 실행 (무거운 연산이므로 매번 X)
-                print(f"[PCA] check: experience_count={self.experience_count}, mod10={self.experience_count % 10}", flush=True)
-                if self.experience_count % 10 == 0:
-                    try:
-                        self._diagnose_pca()
-                    except Exception as e:
-                        import traceback
-                        print(f"[PCA] 진단 실패: {e}", flush=True)
-                        traceback.print_exc()
 
                 _eval_entry = {
                     'experience': self.experience_count,
@@ -1563,10 +1545,6 @@ class COCONUTTrainer:
                 _diag_entry['worst_users'] = [(int(uid), float(sc)) for uid, sc in _worst5]
                 _diag_entry['best_users'] = [(int(uid), float(sc)) for uid, sc in _best5]
 
-            # 🍑 PCA 진단 결과 추가 (10 experience마다 갱신됨)
-            if hasattr(self, '_last_pca') and self._last_pca is not None:
-                _diag_entry['pca'] = dict(self._last_pca)
-
             # Bootstrap CI + nonmated tail 추가
             for fpir_pct in [1, 5, 10]:
                 ci_lo = results.get(f'FNIR@{fpir_pct}%FPIR_ci_lo')
@@ -1799,172 +1777,11 @@ class COCONUTTrainer:
         # NCM 업데이트
         self.ncm.replace_class_means_dict(class_means)
 
-        # Global diagonal variance 계산 (Mahalanobis 모드)
-        # Pooled within-class diagonal variance + OAS-style shrinkage
-        # (이전 버그: all_features를 통째로 var → total variance (between+within))
-        ncm_score_mode = getattr(self.config.openset, 'score_mode', 'cosine')
-        if ncm_score_mode == 'mahalanobis':
-            sum_sq = None
-            total_dof = 0
-            num_classes_used = 0
-            for features_list in class_features.values():
-                n = len(features_list)
-                if n < 2:
-                    continue
-                feat_tensor = torch.stack(features_list)
-                feat_norm = F.normalize(feat_tensor, p=2, dim=1, eps=1e-12)
-                class_mean = feat_norm.mean(dim=0, keepdim=True)
-                centered = feat_norm - class_mean
-                class_sum_sq = (centered * centered).sum(dim=0)
-                sum_sq = class_sum_sq if sum_sq is None else sum_sq + class_sum_sq
-                total_dof += (n - 1)
-                num_classes_used += 1
-            if sum_sq is not None and total_dof > 0:
-                pooled_var = sum_sq / total_dof
-                # OAS-style shrinkage toward isotropic target (mean variance)
-                # D=2048, dof≈900 → λ≈0.69 (few-shot high-dim에서 강한 regularization)
-                D = pooled_var.shape[0]
-                lam = min(1.0, float(D) / (D + total_dof))
-                target = pooled_var.mean()
-                pooled_var = (1.0 - lam) * pooled_var + lam * target
-                self.ncm.set_global_var(pooled_var)
-                # Mahalanobis 진단 로그 (verbose 무관 — smoke test 판단용 필수)
-                pv_mean = pooled_var.mean().item()
-                pv_min = pooled_var.min().item()
-                pv_max = pooled_var.max().item()
-                ratio = (pv_max / pv_min) if pv_min > 0 else float('inf')
-                has_bad = (not torch.isfinite(pooled_var).all().item())
-                print(f"   [Maha] pooled_var: C={num_classes_used}, dof={total_dof}, "
-                      f"lambda={lam:.3f}, mean={pv_mean:.3e}, "
-                      f"min={pv_min:.3e}, max={pv_max:.3e}, max/min={ratio:.1f}"
-                      + (" !!NaN/Inf!!" if has_bad else ""))
-
         if self.verbose:
-            print(f" Updated NCM with {len(class_means)} classes"
-                  + (f" (score_mode={ncm_score_mode})" if ncm_score_mode != 'cosine' else ""))
+            print(f" Updated NCM with {len(class_means)} classes")
 
         self.model.train()
 
-    @torch.no_grad()
-    def _diagnose_pca(self):
-        """
-        2048D CCNet 임베딩의 실효 차원을 PCA로 진단.
-        메모리 버퍼 + 등록 사용자 데이터에서 feature를 추출하고
-        explained variance ratio의 누적합으로 실효 차원을 측정.
-        """
-        if len(self.memory_buffer) < 20:
-            print(f"[PCA] 버퍼 부족 (n={len(self.memory_buffer)}), 스킵", flush=True)
-            return
-
-        was_training = self.model.training
-        self.model.eval()
-
-        # 1. 메모리 버퍼에서 feature 추출
-        # ClassBalancedBuffer.get_all_data() → (data, labels, logits)
-        # data는 이미지 경로(str) 리스트
-        all_paths, all_labels, _ = self.memory_buffer.get_all_data()
-
-        # 최대 MAX_PCA_DIAG_SAMPLES 샘플로 제한 (메모리/속도)
-        # B5: hardcoded seed=42 -> config.training.seed + experience_count
-        if len(all_paths) > MAX_PCA_DIAG_SAMPLES:
-            pca_seed = getattr(self.config.training, 'seed', 42) + self.experience_count
-            rng = np.random.RandomState(pca_seed)
-            idx = rng.choice(len(all_paths), MAX_PCA_DIAG_SAMPLES, replace=False)
-            all_paths = [all_paths[i] for i in idx]
-            all_labels = [all_labels[i] for i in idx]
-
-        channels = self.config.dataset.channels
-
-        # raw 2048D feature 추출 (CCNet getFeatureCode)
-        feats = extract_features(
-            self.model, all_paths, self.test_transform, self.device,
-            batch_size=64, channels=channels
-        )
-
-        if len(feats) < 20:
-            print(f"[PCA] feature 추출 부족 (n={len(feats)}), 스킵", flush=True)
-            if was_training:
-                self.model.train()
-            return
-
-        # L2 normalize (NCM과 동일한 조건)
-        feats_norm = feats / (np.linalg.norm(feats, axis=1, keepdims=True) + 1e-12)
-
-        # 2. PCA 수행 (SVD 기반)
-        N, D = feats_norm.shape
-        mean = feats_norm.mean(axis=0)
-        centered = feats_norm - mean
-
-        # 경제적 SVD: min(N, D) 성분만 계산
-        try:
-            U, S, Vt = np.linalg.svd(centered, full_matrices=False)
-        except np.linalg.LinAlgError:
-            print("[PCA] SVD 수렴 실패, 진단 스킵")
-            if was_training:
-                self.model.train()
-            return
-
-        explained_var = (S ** 2) / (N - 1)
-        total_var = explained_var.sum()
-        explained_ratio = explained_var / total_var
-        cumulative = np.cumsum(explained_ratio)
-
-        # 3. 실효 차원 측정 (다양한 기준)
-        dim_90 = int(np.searchsorted(cumulative, 0.90) + 1)
-        dim_95 = int(np.searchsorted(cumulative, 0.95) + 1)
-        dim_99 = int(np.searchsorted(cumulative, 0.99) + 1)
-
-        # Participation Ratio (PR): (Σλ)² / Σλ² — 유효 차원의 또 다른 측정법
-        pr = (explained_var.sum() ** 2) / (explained_var ** 2).sum()
-
-        # Top-k 성분의 기여도
-        top1 = explained_ratio[0] * 100
-        top5 = cumulative[4] * 100 if len(cumulative) >= 5 else cumulative[-1] * 100
-        top10 = cumulative[9] * 100 if len(cumulative) >= 10 else cumulative[-1] * 100
-        top50 = cumulative[49] * 100 if len(cumulative) >= 50 else cumulative[-1] * 100
-
-        print(f"\n{'='*60}")
-        print(f"[PCA 진단] {D}D 임베딩 실효 차원 분석 (N={N} samples)")
-        print(f"{'='*60}")
-        print(f"  Participation Ratio (PR): {pr:.1f}D")
-        print(f"  90% 분산 설명 차원: {dim_90}D / {D}D")
-        print(f"  95% 분산 설명 차원: {dim_95}D / {D}D")
-        print(f"  99% 분산 설명 차원: {dim_99}D / {D}D")
-        print(f"")
-        print(f"  Top-1  PC 기여도: {top1:.1f}%")
-        print(f"  Top-5  PC 누적:   {top5:.1f}%")
-        print(f"  Top-10 PC 누적:   {top10:.1f}%")
-        print(f"  Top-50 PC 누적:   {top50:.1f}%")
-
-        # 🍑 diag_history.json에 자동 포함되도록 결과 저장
-        self._last_pca = {
-            'embedding_dim': int(D),
-            'n_samples': int(N),
-            'pr': float(pr),
-            'dim_90': int(dim_90),
-            'dim_95': int(dim_95),
-            'dim_99': int(dim_99),
-            'top1_pct': float(top1),
-            'top5_pct': float(top5),
-            'top10_pct': float(top10),
-            'top50_pct': float(top50),
-        }
-
-        # 5. 오픈셋 관점 해석
-        print(f"")
-        if pr < 100:
-            print(f"  ⚠ PR={pr:.0f}D: {D}D 중 실효 {pr:.0f}D만 사용 → 오픈셋에 불리")
-            print(f"    → Impostor max cosine이 높아지는 원인 (저차원 부분공간 집중)")
-            print(f"    → Projection Head 또는 Uniformity Loss 권장")
-        elif pr < 500:
-            print(f"  △ PR={pr:.0f}D: 중간 수준. 개선 여지 있음")
-        else:
-            print(f"  ✓ PR={pr:.0f}D: 충분한 실효 차원")
-
-        print(f"{'='*60}\n")
-
-        if was_training:
-            self.model.train()
 
     def evaluate(self, test_dataset: Dataset) -> float:
         """NCM을 사용하여 정확도를 평가합니다."""

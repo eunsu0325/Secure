@@ -83,12 +83,6 @@ Openset:
   # Logging
   verbose_calibration: true  # Verbose output
 
-  # Score mode: 'cosine' | 'mahalanobis'
-  # Mahalanobis: pooled within-class diagonal variance + OAS shrinkage (trainer.py::_update_ncm)
-  # S-norm과 compose 가능 (ncm.py::forward)
-  score_mode: 'mahalanobis'
-  var_reg_alpha: 0.0001
-
-  # Rejection gate mode: 'top1_only' | 'top1_margin' (score_mode와 독립)
+  # Rejection gate mode: 'top1_only' | 'top1_margin'
   rejection_gate: 'top1_only'     # top-1 score ≥ τ 단일 게이트 (+ S-norm)
   use_snorm: true                 # per-class Z-score normalization (crowding 보정)
