@@ -2,8 +2,10 @@
 
 from .ccnet import ccnet
 from .pretrained_loader import PretrainedLoader
+from .projection import ProjectionHead
 
 __all__ = [
     'ccnet',
-    'PretrainedLoader'
+    'PretrainedLoader',
+    'ProjectionHead',
 ]

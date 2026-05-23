@@ -62,6 +62,13 @@ class Training:
     # See Stage A ablation; legacy default preserves backward-compat with prior runs.
     use_canonical_proxy_loss: bool = False
 
+    # ProjectionHead 설정 (2048D → projection_dim linear projection w/ PCA init)
+    # use_projection_head=False (default): bypass — CCNet 2048D 그대로 다운스트림 전달
+    # use_projection_head=True: enable projection at trainer init time
+    use_projection_head: bool = False
+    projection_dim: int = 512        # 권장: 128, 256, 512. <= 2048 (CCNet output)
+    projection_lr_ratio: float = 1.0 # backbone LR 대비 projection LR 배율
+
     # 로그 출력 설정
     verbose: bool = False  # True: 전체 출력, False: compact 출력 (논문 지표 중심)
 
