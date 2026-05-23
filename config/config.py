@@ -58,6 +58,9 @@ class Training:
     proxy_alpha: float = 32          # Proxy Anchor scaling α
     proxy_lr_ratio: float = 10       # 프록시 학습률 배수
     proxy_lambda: float = 0.3        # ProxyAnchor loss 스칼라 가중치
+    # Loss formulation: False=legacy (P+ only neg term), True=paper Eq. (4) canonical.
+    # See Stage A ablation; legacy default preserves backward-compat with prior runs.
+    use_canonical_proxy_loss: bool = False
 
     # 로그 출력 설정
     verbose: bool = False  # True: 전체 출력, False: compact 출력 (논문 지표 중심)

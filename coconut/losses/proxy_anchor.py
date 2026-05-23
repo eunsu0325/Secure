@@ -10,16 +10,36 @@ import torch.nn.functional as F
 
 class ProxyAnchorLoss(nn.Module):
     """
-    Proxy Anchor Loss for Deep Metric Learning (CVPR 2020)
+    Proxy Anchor Loss for Deep Metric Learning.
 
-    프록시를 앵커로 사용하여 data-to-data relations를 활용하는 손실 함수
-    Continual Learning을 위한 동적 프록시 추가 지원
+    Reference:
+        Kim, Sungyeon, et al. "Proxy Anchor Loss for Deep Metric Learning."
+        CVPR 2020. https://arxiv.org/abs/2003.13911
+
+    Default hyperparameters from the paper: margin δ = 0.1, alpha α = 32.
+
+    COCONUT-specific extension:
+        Dynamic proxy addition via add_classes() for sequential user
+        enrollment in continual learning.
+
+    Negative term formulation (controlled by ``use_canonical``):
+        - ``use_canonical=False`` (default, legacy behaviour): negative
+          contributions are summed only over proxies that have at least
+          one positive in the batch (P+) and the term is divided by |P+|.
+          This is the implementation that all prior COCONUT ablation
+          numbers (L_full, L_minimal, etc.) were measured under.
+        - ``use_canonical=True``: matches paper Eq. (4) — negative
+          contributions are summed over ALL proxies in P and divided by
+          |P|, providing inter-class separation gradient for every
+          registered class regardless of batch composition.
     """
-    def __init__(self, embedding_size=128, margin=0.1, alpha=32):
+    def __init__(self, embedding_size=128, margin=0.1, alpha=32,
+                 use_canonical: bool = False):
         super().__init__()
         self.embedding_size = embedding_size
         self.margin = margin
         self.alpha = alpha
+        self.use_canonical = use_canonical
 
         # 동적 프록시 관리
         self.proxies = None
@@ -117,13 +137,26 @@ class ProxyAnchorLoss(nn.Module):
         P_sim_sum = (pos_exp * P_one_hot).sum(dim=0)  # [C]
         N_sim_sum = (neg_exp * N_one_hot).sum(dim=0)  # [C]
 
-        # Positive 항: 양성 샘플이 실제로 존재하는 프록시만
+        # Positive 항: 양성 샘플이 실제로 존재하는 프록시만 (|P+|)
         with_pos = (P_one_hot.sum(dim=0) > 0)
         num_valid = with_pos.sum().clamp_min(1)
 
+        # Positive term: sum over P+, divide by |P+| (paper Eq. 4 first sum)
         # 수치 안정성: log1p + clamp_min
         pos_term = torch.log1p(P_sim_sum[with_pos].clamp_min(1e-12)).sum() / num_valid
-        neg_term = torch.log1p(N_sim_sum[with_pos].clamp_min(1e-12)).sum() / num_valid
+
+        # Negative term: paper says sum over ALL P, divide by |P|.
+        # Legacy COCONUT implementation restricted to P+ and divided by |P+|.
+        if self.use_canonical:
+            # Paper Eq. (4) second sum: include every registered proxy in the
+            # negative push, so classes absent from the batch still receive
+            # inter-class separation gradient.
+            num_total = max(int(self.num_classes), 1)
+            neg_term = torch.log1p(N_sim_sum.clamp_min(1e-12)).sum() / num_total
+        else:
+            # Legacy behaviour preserved for backward-compatibility of all
+            # prior ablation results (L_full, L_minimal, etc.).
+            neg_term = torch.log1p(N_sim_sum[with_pos].clamp_min(1e-12)).sum() / num_valid
 
         return pos_term + neg_term
 

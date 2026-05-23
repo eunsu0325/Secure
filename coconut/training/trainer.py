@@ -147,10 +147,12 @@ class COCONUTTrainer:
             #  실제 특징 차원에 맞춰 ProxyAnchor 초기화
             embedding_dim = 2048
 
+            use_canonical = getattr(config.training, 'use_canonical_proxy_loss', False)
             self.proxy_anchor_loss = ProxyAnchorLoss(
                 embedding_size=embedding_dim,
                 margin=getattr(config.training, 'proxy_margin', 0.1),
-                alpha=getattr(config.training, 'proxy_alpha', 32)
+                alpha=getattr(config.training, 'proxy_alpha', 32),
+                use_canonical=use_canonical,
             ).to(device)
 
             if self.verbose:
@@ -163,6 +165,7 @@ class COCONUTTrainer:
                 print(f"   Margin (δ): {self.proxy_anchor_loss.margin}")
                 print(f"   Alpha (α): {self.proxy_anchor_loss.alpha}")
                 print(f"   Lambda (fixed): {self.proxy_lambda}")
+                print(f"   Negative term: {'canonical (paper Eq. 4)' if use_canonical else 'legacy (P+ only)'}")
         else:
             self.proxy_anchor_loss = None
             self.proxy_lambda = 0.0
