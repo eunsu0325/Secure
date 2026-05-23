@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 COCONUT Training Script with Open-set Support
-CCNet + ProxyAnchor + SupCon for Continual Learning
+CCNet + ProxyAnchor for Continual Learning
 """
 
 import os
@@ -274,7 +274,7 @@ def main(args):
     if verbose:
         print("\n" + "="*60)
         print("[COCONUT] COCONUT Training Starting")
-        print("   CCNet + ProxyAnchor + SupCon")
+        print("   CCNet + ProxyAnchor")
         print("="*60 + "\n")
         print(f"Using config: {args.config}")
         print(config)
@@ -446,7 +446,7 @@ def main(args):
         else:
             os_info = "Open-set: OFF"
 
-        print(f"\n[COCONUT] CCNet + ProxyAnchor + SupCon | {device} | Seed={seed}")
+        print(f"\n[COCONUT] CCNet + ProxyAnchor | {device} | Seed={seed}")
         print(f"  {pretrained_info}")
         print(f"  {pa_info} | LR={config_obj.training.learning_rate}")
         print(f"  {os_info}")
@@ -459,7 +459,6 @@ def main(args):
         print(f"Evaluation interval: every {config_obj.training.test_interval} users")
         print(f"Learning rate: {config_obj.training.learning_rate}")
         print(f"Memory batch size: {config_obj.training.memory_batch_size}")
-        print(f"Temperature: {config_obj.training.temperature}")
         print(f"Random seed: {config_obj.training.seed}")
 
     start_time = time.time()
@@ -762,7 +761,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='COCONUT Training (CCNet + ProxyAnchor + SupCon)')
+    parser = argparse.ArgumentParser(description='COCONUT Training (CCNet + ProxyAnchor)')
     parser.add_argument('--config', type=str, default='config/config.yaml',
                         help='Path to config file')
     parser.add_argument('--seed', type=int, default=42,

@@ -42,7 +42,6 @@ class Training:
     learning_rate: float
     scheduler_step_size: int
     scheduler_gamma: float
-    temperature: float
     test_interval: int
     checkpoint_path: Path
     results_path: Path
@@ -53,14 +52,12 @@ class Training:
     batch_size: int = 128
     seed: int = 42  # 추가!
 
-    # ProxyAnchorLoss 설정 추가
+    # ProxyAnchorLoss 설정
     use_proxy_anchor: bool = True
     proxy_margin: float = 0.1        # Proxy Anchor margin δ
     proxy_alpha: float = 32          # Proxy Anchor scaling α
     proxy_lr_ratio: float = 10       # 프록시 학습률 배수
-    proxy_lambda: float = 0.3        # 고정 가중치 (SupCon: 0.7, ProxyAnchor: 0.3)
-
-    curriculum_ramp_users: int = 12
+    proxy_lambda: float = 0.3        # ProxyAnchor loss 스칼라 가중치
 
     # 로그 출력 설정
     verbose: bool = False  # True: 전체 출력, False: compact 출력 (논문 지표 중심)
@@ -73,10 +70,6 @@ class Training:
 
     # A8: diagnostic Phase 2 용 minimal-output 모드 (Drive I/O 비용 절감)
     paper_minimal_outputs: bool = False  # True 면 per-step PNG/CSV/체크포인트 저장 skip
-
-    # SupCon ablation (paper-extra): False 면 SupCon 가중치 강제 0
-    # 평소엔 항상 True (SupCon 이 base loss). "ProxyAnchor 가 SupCon 없이도 동작하나?" 실험용.
-    use_supcon: bool = True
 
 @dataclasses.dataclass
 class Openset:

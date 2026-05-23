@@ -77,12 +77,12 @@ behavior changes A1 and A5, which only affect previously-broken code paths.
 - **Phase 2 use**: enabled via `scripts/phase2_setup.py --paper_minimal_outputs` for all 10 variants together with `--num_experiences 50` (diagnostic-tier).
 - **Follow-up tightening (2026-05-20)**: also skip `evaluator.save_results()` per-step (only at final exp) and skip final t-SNE entirely when `paper_minimal=True`. After these, per-step disk I/O is effectively zero in paper_minimal mode — all artifacts written once at end-of-run.
 
-### A7 — Grad-connected zero loss_supcon fallback (backward graph fix)
+### A7 — Grad-connected zero loss fallback (backward graph fix)
 
-- **File**: `coconut/training/trainer.py` (loss_supcon fallback block)
-- **Finding**: Phase 2 L_naive / L_replay / no_proxy attempt at exp 1 crashed with `RuntimeError: element 0 of tensors does not require grad and does not have a grad_fn` at `loss.backward()`. Root cause: trainer batch-gates SupCon when `unique_in_batch < 2` (single class in batch — happens at experience 1 with only user 0 in buffer) by setting `loss_supcon = torch.tensor(0.0, device=...)`. This is a **leaf zero with no grad_fn**. In L_full, ProxyAnchor still contributes a differentiable term so `loss.backward()` works. With ProxyAnchor off (L_naive, L_replay, no_proxy), the entire `loss` becomes a leaf zero.
-- **Change**: Replace `torch.tensor(0.0, device=self.device)` with `features_paired.sum() * 0.0` — same numeric value but maintains the autograd graph so `loss.backward()` is a safe no-op for parameter gradients.
-- **Behavior impact**: All variants with ProxyAnchor off now train cleanly from exp 1 onward. L_full's bit-exact behavior is preserved (it never hit the leaf-zero path).
+- **File**: `coconut/training/trainer.py` (no-proxy fallback in training loop)
+- **Finding**: Phase 2 L_naive / L_replay / no_proxy attempt at exp 1 crashed with `RuntimeError: element 0 of tensors does not require grad and does not have a grad_fn` at `loss.backward()`. With ProxyAnchor off, the loss became a leaf zero tensor with no grad_fn.
+- **Change**: When ProxyAnchor is disabled, set `loss = features_all.sum() * 0.0` — same numeric value but maintains the autograd graph so `loss.backward()` is a safe no-op for parameter gradients. (Originally introduced for the SupCon batch-gating path before SupCon was removed.)
+- **Behavior impact**: All variants with ProxyAnchor off train cleanly from exp 1 onward.
 
 ### A6 — numpy-aware JSON encoder in train_coconut.py
 

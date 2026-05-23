@@ -13,7 +13,7 @@ import copy
 import os
 import random
 
-from coconut.losses import SupConLoss, ProxyAnchorLoss
+from coconut.losses import ProxyAnchorLoss
 from coconut.data import MemoryDataset, get_scr_transforms
 from .average_meter import AverageMeter
 from coconut.models import PretrainedLoader
@@ -79,14 +79,13 @@ def repeat_and_augment_data(paths, labels, target_size):
 
 class COCONUTTrainer:
     """
-    COCONUT Trainer: CCNet + ProxyAnchor + Supervised Contrastive Replay
+    COCONUT Trainer: CCNet + ProxyAnchor + Memory Replay + QAR
 
     Combines:
     - CCNet backbone
-    - ProxyAnchorLoss for metric learning
-    - Supervised Contrastive Learning (SupCon)
-    - Memory replay for continual learning
-    - Open-set recognition support
+    - ProxyAnchorLoss for class-level metric learning
+    - Class-balanced memory replay + QAR tail-user rehab
+    - Open-set recognition support (cosine NCM + S-norm)
     """
 
     def __init__(self,
@@ -140,12 +139,6 @@ class COCONUTTrainer:
         self.ncm = ncm_classifier
         self.memory_buffer = memory_buffer
         self.config = config
-
-        # Loss function
-        self.criterion = SupConLoss(
-            temperature=config.training.temperature,
-            base_temperature=config.training.temperature
-        )
 
         # ProxyAnchorLoss 초기화
         self.use_proxy_anchor = getattr(config.training, 'use_proxy_anchor', True)
@@ -586,66 +579,27 @@ class COCONUTTrainer:
 
                     self.optimizer.zero_grad()
 
-                    # Forward: CCNet feature extraction
+                    # Forward: CCNet feature extraction (dual-view 그대로 — augmentation 효과)
                     features_all = self.model(x)
-
-                    f1 = features_all[:batch_size]
-                    f2 = features_all[batch_size:]
-
-                    # CCNet 결과 그대로 사용
-                    features_paired = torch.stack([f1, f2], dim=1)
-
-                    # Curriculum Loss Schedule + Batch Gating
-                    ramp_users = getattr(self.config.training, 'curriculum_ramp_users', 12)
-                    num_users = len(self.registered_users)
-                    w_supcon = min(0.5, num_users / ramp_users)
-                    w_proxy = 1.0 - w_supcon
-
-                    # Batch Gating: 배치 내 클래스 < 2이면 SupCon 비활성화
-                    unique_in_batch = len(set(batch_labels.tolist()))
-                    if unique_in_batch < 2:
-                        w_supcon = 0.0
-                        w_proxy = 1.0
-
-                    # Paper-extra ablation: use_supcon=False 면 SupCon 강제 비활성화
-                    if not getattr(self.config.training, 'use_supcon', True):
-                        w_supcon = 0.0
-                        # ProxyAnchor 가 켜져 있으면 그 weight 를 1.0 으로 키워서 학습 신호 유지
-                        if self.use_proxy_anchor and self.proxy_anchor_loss.proxies is not None:
-                            w_proxy = 1.0
-
-                    if w_supcon > 0:
-                        loss_supcon = self.criterion(features_paired, batch_labels)
-                    else:
-                        # A7: grad-connected zero so loss.backward() works when ProxyAnchor is
-                        # off (e.g. L_naive, L_replay, no_proxy variants). Pre-fix this returned
-                        # a leaf zero with no grad_fn and broke training at exp 1 when buffer
-                        # has only 1 class.
-                        loss_supcon = features_paired.sum() * 0.0
 
                     # ProxyAnchorLoss
                     if self.use_proxy_anchor and self.proxy_anchor_loss.proxies is not None:
                         all_labels = batch_labels.repeat(2)
                         loss_proxy = self.proxy_anchor_loss(features_all, all_labels)
-
-                        # proxy_lambda는 ProxyAnchor 비중을 조절하는 명시적 가중치
-                        proxy_weight = w_proxy * self.proxy_lambda
-                        supcon_weight = w_supcon
-
-                        loss = proxy_weight * loss_proxy + supcon_weight * loss_supcon
+                        loss = self.proxy_lambda * loss_proxy
 
                         if iteration == 0 and epoch == 0:
-                            # compact 모드용: curriculum weights 저장
+                            # compact 모드용: loss 저장
                             self._last_curriculum = {
-                                'w_proxy': proxy_weight, 'w_supcon': supcon_weight,
-                                'loss_supcon': loss_supcon.item(), 'loss_proxy': loss_proxy.item()
+                                'loss_proxy': loss_proxy.item()
                             }
                             if self.verbose:
-                                print(f"[Curriculum] users={num_users}, w_proxy={w_proxy:.2f}, w_supcon={w_supcon:.2f}, gate={'ON' if unique_in_batch >= 2 else 'OFF'}")
-                                print(f"   Weights → proxy:{proxy_weight:.2f}, supcon:{supcon_weight:.2f}")
-                                print(f"   SupCon: {loss_supcon.item():.4f}, ProxyAnchor: {loss_proxy.item():.4f}")
+                                num_users = len(self.registered_users)
+                                print(f"[Loss] users={num_users}, ProxyAnchor={loss_proxy.item():.4f}")
                     else:
-                        loss = loss_supcon
+                        # ProxyAnchor 비활성화 (L_naive, L_replay, no_proxy variants):
+                        # grad-connected zero loss로 loss.backward()가 작동하도록.
+                        loss = features_all.sum() * 0.0
 
                     loss_avg.update(loss.item(), batch_size)
 
@@ -720,14 +674,13 @@ class COCONUTTrainer:
                     # Line 1: Experience header
                     print(f"\n[Exp {self.experience_count:03d}] User {user_id} | Train={n_train}, Probe={n_probe} | Proxies: {n_proxies}")
 
-                    # Line 2: Loss + curriculum
+                    # Line 2: Loss
                     curriculum = getattr(self, '_last_curriculum', {})
-                    w_proxy = curriculum.get('w_proxy', 0)
-                    w_supcon = curriculum.get('w_supcon', 0)
+                    loss_proxy = curriculum.get('loss_proxy', 0.0)
                     first_loss = getattr(self, '_first_epoch_loss', 0)
                     last_loss = getattr(self, '_last_epoch_loss', 0)
                     epochs = self.config.training.epochs_per_experience
-                    loss_line = f"  Loss: {first_loss:.4f} -> {last_loss:.4f} ({epochs}ep) | w_proxy={w_proxy:.2f}, w_supcon={w_supcon:.2f}"
+                    loss_line = f"  Loss: {first_loss:.4f} -> {last_loss:.4f} ({epochs}ep) | ProxyAnchor={loss_proxy:.4f}"
                     print(loss_line)
 
                     # (Step 8 출력에서 FNIR@1/5/10%를 CI와 함께 이미 찍음 — 중복 제거)

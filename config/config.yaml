@@ -38,14 +38,12 @@ Training:
   learning_rate: 0.0001
   scheduler_step_size: 40           # 50→40 (LR decay를 조금 더 일찍, 2회 decay 가능)
   scheduler_gamma: 0.5              # 0.8→0.5 (더 확실한 LR 감소: 0.0001→0.00005→0.000025)
-  temperature: 0.07  # SupConLoss temperature
   test_interval: 1  # Evaluation and calibration frequency
   checkpoint_path: /content/drive/MyDrive/coconut_update_13
   results_path: /content/drive/MyDrive/coconut_update_13
   gpu_ids: "0"
   ncm_momentum: 0.8
   seed: 42
-  curriculum_ramp_users: 12
 
   # Logging
   verbose: false  # true: 전체 출력, false: compact 출력 (논문 지표 중심)
@@ -55,7 +53,7 @@ Training:
   proxy_margin: 0.1          # 0.15→0.1 (논문 default, alpha=32와 균형)
   proxy_alpha: 32            # 16→32 (논문 default, class separation 강화)
   proxy_lr_ratio: 50         # 100→50 (proxy 진동 방지, 논문 권장 10~100 범위 내)
-  proxy_lambda: 0.5          # 0.7→0.5 (SupCon과 균형, 최종 weight: 0.5×0.5=0.25)
+  proxy_lambda: 0.5          # ProxyAnchor loss 스칼라 가중치
 
   # QAR (Quality-Aware Replay) — tail user 선별 재학습
   # 배치 구성: current(16) + memory(160, balanced) + rehab(tail only, 추가)
