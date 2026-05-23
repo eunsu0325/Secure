@@ -16,7 +16,7 @@ import random
 from coconut.losses import ProxyAnchorLoss
 from coconut.data import MemoryDataset, get_scr_transforms
 from .average_meter import AverageMeter
-from coconut.models import PretrainedLoader
+from coconut.models import PretrainedLoader, ProjectionHead
 from coconut.classifiers.threshold import ThresholdCalibrator
 
 # 오픈셋 유틸리티 함수들
@@ -140,12 +140,28 @@ class COCONUTTrainer:
         self.memory_buffer = memory_buffer
         self.config = config
 
+        # ProjectionHead 초기화 (선택적: CCNet 2048D → projection_dim)
+        # PCA 가중치 초기화는 train_coconut.py에서 학습 시작 전에 별도 수행.
+        # 여기서는 학습 가능한 텐서만 만들어 두고, optimizer는 _create_optimizer_with_grouped_params 에서 처리.
+        self.use_projection_head = bool(getattr(config.training, 'use_projection_head', False))
+        if self.use_projection_head:
+            self.projection_dim = int(getattr(config.training, 'projection_dim', 512))
+            self.projection_lr_ratio = float(getattr(config.training, 'projection_lr_ratio', 1.0))
+            self.projection = ProjectionHead(in_dim=2048, out_dim=self.projection_dim).to(device)
+            if self.verbose:
+                print(f"[COCONUT] ProjectionHead enabled: 2048 -> {self.projection_dim} "
+                      f"(lr_ratio={self.projection_lr_ratio}x backbone)")
+        else:
+            self.projection = None
+            self.projection_dim = 2048
+            self.projection_lr_ratio = 0.0
+
         # ProxyAnchorLoss 초기화
         self.use_proxy_anchor = getattr(config.training, 'use_proxy_anchor', True)
 
         if self.use_proxy_anchor:
-            #  실제 특징 차원에 맞춰 ProxyAnchor 초기화
-            embedding_dim = 2048
+            # ProxyAnchor 의 embedding_size 는 projection 출력 차원에 맞춤
+            embedding_dim = self.projection_dim
 
             use_canonical = getattr(config.training, 'use_canonical_proxy_loss', False)
             self.proxy_anchor_loss = ProxyAnchorLoss(
@@ -310,6 +326,39 @@ class COCONUTTrainer:
                 print(f" COCONUTTrainer initialized with random weights")
 
 
+    # ────────────────────────────────────────────────────────────────────
+    # Projection helpers
+    # ────────────────────────────────────────────────────────────────────
+    def _project_features(self, features):
+        """Apply projection head to a feature tensor (training-graph aware).
+
+        If projection is disabled, returns features unchanged.
+        """
+        if self.projection is None:
+            return features
+        return self.projection(features)
+
+    @torch.no_grad()
+    def _extract_features_projected(self, paths, channels, batch_size=64):
+        """Wrapper for openset.extract_features that projects after extraction.
+
+        Returns a numpy array in the *downstream* feature space:
+          - if projection is on  → shape (N, projection_dim)
+          - if projection is off → shape (N, 2048) (CCNet getFeatureCode output)
+
+        Used at every evaluation/calibration call site so that NCM prototypes
+        and probe features always live in the same space.
+        """
+        raw = extract_features(
+            self.model, paths, self.test_transform, self.device,
+            batch_size=batch_size, channels=channels
+        )
+        if self.projection is None or len(raw) == 0:
+            return raw
+        tensor = torch.as_tensor(raw, device=self.device)
+        projected = self.projection(tensor)
+        return projected.detach().cpu().numpy()
+
     def _create_optimizer_with_grouped_params(self, include_proxies=True):
         """ 파라미터 그룹별로 다른 학습률 적용한 옵티마이저 생성"""
         param_groups = []
@@ -324,6 +373,17 @@ class COCONUTTrainer:
             })
             if self.verbose:
                 print(f"️ Backbone LR: {self.config.training.learning_rate:.6f}")
+
+        # Projection 파라미터 그룹 (선택적: PCA-init linear projection)
+        if self.projection is not None:
+            proj_lr = self.base_lr * self.projection_lr_ratio
+            param_groups.append({
+                'params': list(self.projection.parameters()),
+                'lr': proj_lr,
+                'name': 'projection'
+            })
+            if self.verbose:
+                print(f"[COCONUT] Projection LR: {proj_lr:.6f} ({self.projection_lr_ratio}x)")
 
         # 프록시 파라미터 그룹 (새로 초기화된 프록시)
         if include_proxies and self.use_proxy_anchor and hasattr(self, 'proxy_anchor_loss') and self.proxy_anchor_loss.proxies is not None:
@@ -355,6 +415,16 @@ class COCONUTTrainer:
                         for k, v in self.optimizer.state[param].items()
                     }
 
+            # Projection state 저장 (있는 경우)
+            old_projection_states = {}
+            if self.projection is not None:
+                for param in self.projection.parameters():
+                    if param in self.optimizer.state and self.optimizer.state[param]:
+                        old_projection_states[param] = {
+                            k: v.clone() if torch.is_tensor(v) else v
+                            for k, v in self.optimizer.state[param].items()
+                        }
+
             # 스케줄러 step 위치 저장
             old_scheduler_state = self.scheduler.state_dict() if hasattr(self, 'scheduler') else None
 
@@ -363,6 +433,10 @@ class COCONUTTrainer:
 
             # 백본 state 복원
             for param, state in old_model_states.items():
+                self.optimizer.state[param] = state
+
+            # Projection state 복원
+            for param, state in old_projection_states.items():
                 self.optimizer.state[param] = state
 
             # 프록시 state 이전: 기존 N개 복원 + 새 슬롯은 0으로 초기화
@@ -434,6 +508,9 @@ class COCONUTTrainer:
                                 img = _open_with_channels(p, self.config.dataset.channels)
                                 img = self.test_transform(img).unsqueeze(0).to(self.device)
                                 feat = self.model.getFeatureCode(img)
+                                # Projection: proxy 는 projection 출력 공간에서 산다
+                                if self.projection is not None:
+                                    feat = self.projection(feat)
                                 feats.append(feat.squeeze(0))
                             feature_means[cid] = torch.stack(feats).mean(dim=0)
                     self.model.train()
@@ -584,6 +661,9 @@ class COCONUTTrainer:
 
                     # Forward: CCNet feature extraction (dual-view 그대로 — augmentation 효과)
                     features_all = self.model(x)
+                    # Projection (if enabled): 2048D → projection_dim
+                    if self.projection is not None:
+                        features_all = self.projection(features_all)
 
                     # ProxyAnchorLoss
                     if self.use_proxy_anchor and self.proxy_anchor_loss.proxies is not None:
@@ -812,9 +892,8 @@ class COCONUTTrainer:
                     idx = rng.choice(len(unk_paths), MAX_UNK_CALIB_SAMPLES, replace=False)
                     unk_paths = [unk_paths[i] for i in idx]
                 if unk_paths:
-                    unk_feats = extract_features(
-                        self.model, unk_paths, self.test_transform, self.device,
-                        channels=channels
+                    unk_feats = self._extract_features_projected(
+                        unk_paths, channels=channels
                     )
                     if len(unk_feats) > 0:
                         unk_tensor = torch.from_numpy(unk_feats).to(self.device)
@@ -831,9 +910,8 @@ class COCONUTTrainer:
             for uid, (paths, labels) in self.probe_data.items():
                 all_probe_paths.extend(paths)
             if all_probe_paths:
-                gen_feats = extract_features(
-                    self.model, all_probe_paths, self.test_transform, self.device,
-                    channels=channels
+                gen_feats = self._extract_features_projected(
+                    all_probe_paths, channels=channels
                 )
                 if len(gen_feats) > 0:
                     gen_tensor = torch.from_numpy(gen_feats).to(self.device)
@@ -917,9 +995,8 @@ class COCONUTTrainer:
                     idx = rng.choice(len(unk_paths), MAX_UNK_CALIB_SAMPLES, replace=False)
                     unk_paths = [unk_paths[i] for i in idx]
                 if unk_paths:
-                    unk_feats = extract_features(
-                        self.model, unk_paths, self.test_transform, self.device,
-                        channels=channels
+                    unk_feats = self._extract_features_projected(
+                        unk_paths, channels=channels
                     )
                     if len(unk_feats) > 0:
                         unk_tensor = torch.from_numpy(unk_feats).to(self.device)
@@ -1093,14 +1170,12 @@ class COCONUTTrainer:
         # ========================================
         # Step 3: Feature 추출
         # ========================================
-        mated_feats = extract_features(
-            self.model, mated_paths, self.test_transform, self.device,
-            batch_size=64, channels=channels
+        mated_feats = self._extract_features_projected(
+            mated_paths, channels=channels, batch_size=64
         )
 
-        nonmated_feats = extract_features(
-            self.model, nonmated_paths, self.test_transform, self.device,
-            batch_size=64, channels=channels
+        nonmated_feats = self._extract_features_projected(
+            nonmated_paths, channels=channels, batch_size=64
         )
 
         # ========================================
@@ -1710,6 +1785,8 @@ class COCONUTTrainer:
             labels = labels.to(self.device, non_blocking=True)
 
             features = self.model.getFeatureCode(data)
+            if self.projection is not None:
+                features = self.projection(features)
 
             for i, label in enumerate(labels):
                 label_item = label.item()
@@ -1756,6 +1833,8 @@ class COCONUTTrainer:
                 labels = labels.to(self.device, non_blocking=True)
 
                 features = self.model.getFeatureCode(data)
+                if self.projection is not None:
+                    features = self.projection(features)
                 predictions = self.ncm.predict(features)
 
                 correct += (predictions == labels).sum().item()
@@ -1795,6 +1874,18 @@ class COCONUTTrainer:
                 }
             except Exception as e:
                 print(f"Warning: Could not save proxy anchor data: {e}")
+
+        # ProjectionHead 저장 (활성화된 경우)
+        if self.projection is not None:
+            try:
+                checkpoint_dict['projection_state_dict'] = self.projection.state_dict()
+                checkpoint_dict['projection_meta'] = {
+                    'in_dim': self.projection.in_dim,
+                    'out_dim': self.projection.out_dim,
+                    'pca_initialised': self.projection._pca_initialised,
+                }
+            except Exception as e:
+                print(f"Warning: Could not save projection state: {e}")
 
         # 오픈셋 관련 추가 저장
         if self.openset_enabled:
@@ -1868,6 +1959,25 @@ class COCONUTTrainer:
                     print(f"[OK] Scheduler state restored")
             except Exception as e:
                 print(f"Warning: Could not restore scheduler state: {e}")
+
+        # ProjectionHead 복원 (저장된 체크포인트가 있고 현재 trainer에 projection이 켜져있는 경우)
+        if 'projection_state_dict' in checkpoint and self.projection is not None:
+            try:
+                meta = checkpoint.get('projection_meta', {})
+                ckpt_in = meta.get('in_dim')
+                ckpt_out = meta.get('out_dim')
+                if ckpt_in is not None and (ckpt_in != self.projection.in_dim or ckpt_out != self.projection.out_dim):
+                    print(f"Warning: projection dim mismatch (ckpt {ckpt_in}->{ckpt_out} vs "
+                          f"current {self.projection.in_dim}->{self.projection.out_dim}). Skipping projection restore.")
+                else:
+                    self.projection.load_state_dict(checkpoint['projection_state_dict'])
+                    self.projection._pca_initialised = bool(meta.get('pca_initialised', False))
+                    if self.verbose:
+                        print(f"[OK] ProjectionHead restored ({self.projection.in_dim}->{self.projection.out_dim})")
+            except Exception as e:
+                print(f"Warning: Could not restore projection state: {e}")
+        elif 'projection_state_dict' in checkpoint and self.projection is None:
+            print("Warning: checkpoint has projection state but current trainer has projection disabled. Ignored.")
 
         # ProxyAnchorLoss 복원
         if 'proxy_anchor_data' in checkpoint and self.use_proxy_anchor:
