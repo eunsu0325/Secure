@@ -41,7 +41,8 @@ from coconut import (
 )
 from coconut.openset import (
     predict_batch,
-    load_paths_labels_from_txt
+    load_paths_labels_from_txt,
+    extract_features,
 )
 
 
@@ -59,6 +60,58 @@ def _json_default(o):
     if isinstance(o, np.ndarray):
         return o.tolist()
     raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+
+def fit_projection_pca(trainer, enroll_paths_file: str, channels: int,
+                       max_n: int = 1000, verbose: bool = True):
+    """Initialise trainer.projection.proj.weight with top-k PCA components
+    of pretrained CCNet features sampled from enroll_file.
+
+    PCA is unsupervised (no labels used). Reads only from enroll_file —
+    the training data — so there is no leakage with unknown_test_file
+    (the final FPIR evaluation pool).
+
+    No-op when trainer.projection is None or when fewer than 2 samples can
+    be extracted.
+
+    Returns the diagnostic dict from ProjectionHead.init_with_pca, or None
+    if the fit was skipped.
+    """
+    if trainer.projection is None:
+        return None
+
+    paths, _ = load_paths_labels_from_txt(enroll_paths_file)
+    if len(paths) == 0:
+        print("[PCA-init] No paths found in enroll_file; skipping PCA init.")
+        return None
+
+    # Deterministic sampling — uses trainer's seed for reproducibility.
+    if len(paths) > max_n:
+        rng = np.random.RandomState(getattr(trainer, 'seed', 42))
+        idx = rng.choice(len(paths), max_n, replace=False)
+        paths = [paths[i] for i in idx]
+
+    # Raw 2048-D CCNet features (this is what PCA fits)
+    feats_np = extract_features(
+        trainer.model, paths, trainer.test_transform, trainer.device,
+        batch_size=64, channels=channels,
+    )
+    if feats_np is None or len(feats_np) < 2:
+        print(f"[PCA-init] Only {0 if feats_np is None else len(feats_np)} features extracted; skipping.")
+        return None
+
+    feats_tensor = torch.from_numpy(feats_np).float()
+    info = trainer.projection.init_with_pca(feats_tensor)
+
+    if verbose:
+        print("[PCA-init] ProjectionHead weight initialised with PCA components:")
+        print(f"   n_samples              = {info['n_samples']}")
+        print(f"   rank_limit (=min(N-1,D))= {info['rank_limit']}")
+        print(f"   usable_components      = {info['usable_components']}")
+        print(f"   retained_variance_ratio= {info['retained_variance_ratio']:.4f}")
+        print(f"   top-5 singular values  = {info['singular_values_top5']}")
+
+    return info
 
 
 @torch.no_grad()
@@ -387,6 +440,17 @@ def main(args):
         memory_buffer=memory_buffer,
         config=config_obj,
         device=device
+    )
+
+    # ProjectionHead PCA init (no-op if use_projection_head=False)
+    # Must run AFTER trainer creation (uses trainer.model + trainer.test_transform)
+    # and BEFORE training starts (so first batch already sees PCA-initialised projection).
+    fit_projection_pca(
+        trainer,
+        enroll_paths_file=str(config_obj.dataset.enroll_file),
+        channels=config_obj.dataset.channels,
+        max_n=1000,
+        verbose=True,  # always print — important diagnostic
     )
 
     if verbose:
