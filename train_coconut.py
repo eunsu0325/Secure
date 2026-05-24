@@ -91,9 +91,16 @@ def fit_projection_pca(trainer, enroll_paths_file: str, channels: int,
         idx = rng.choice(len(paths), max_n, replace=False)
         paths = [paths[i] for i in idx]
 
-    # Raw 2048-D CCNet features (this is what PCA fits)
+    # Raw 2048-D CCNet features (this is what PCA fits).
+    # IMPORTANT: trainer.model is a ProjectionWrappedModel when projection is
+    # enabled, and its getFeatureCode automatically applies the projection.
+    # For PCA initialisation we want the UNPROJECTED 2048-D features — those
+    # are exactly what PCA needs to derive the projection basis from in the
+    # first place. So we bypass the wrapper here and extract from
+    # ``trainer.model.ccnet`` directly.
+    raw_ccnet = trainer.model.ccnet if hasattr(trainer.model, 'ccnet') else trainer.model
     feats_np = extract_features(
-        trainer.model, paths, trainer.test_transform, trainer.device,
+        raw_ccnet, paths, trainer.test_transform, trainer.device,
         batch_size=64, channels=channels,
     )
     if feats_np is None or len(feats_np) < 2:
@@ -101,6 +108,10 @@ def fit_projection_pca(trainer, enroll_paths_file: str, channels: int,
         return None
 
     feats_tensor = torch.from_numpy(feats_np).float()
+    assert feats_tensor.dim() == 2 and feats_tensor.size(1) == 2048, (
+        f"[PCA-init] expected raw (N, 2048) features for PCA, got {tuple(feats_tensor.shape)} "
+        f"(wrapper may not have been bypassed)"
+    )
     info = trainer.projection.init_with_pca(feats_tensor)
 
     if verbose:
