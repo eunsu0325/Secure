@@ -133,3 +133,59 @@ class ProjectionHead(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply the linear projection. Input ``(B, in_dim)`` → ``(B, out_dim)``."""
         return self.proj(x)
+
+
+class ProjectionWrappedModel(nn.Module):
+    """Wraps a CCNet backbone so that every feature-extraction call also passes
+    through a :class:`ProjectionHead`.
+
+    Why a wrapper instead of monkey-patching?
+        Monkey-patching ``model.forward`` / ``model.getFeatureCode`` on the
+        original CCNet instance does work for direct callers but can interact
+        badly with framework internals (e.g. torch script tracing, deepcopy,
+        `.to()` device moves performed before patching, state_dict/load_state_dict
+        round-trips). A proper nn.Module wrapper is the canonical solution and
+        composes correctly with every downstream code path that reads
+        ``trainer.model``.
+
+    What gets registered:
+        - ``self.ccnet`` — registered as a submodule (so .train()/.eval()/.to()
+          all propagate and `ccnet.parameters()` works as expected).
+        - ``self.projection`` — also registered as a submodule.
+
+    The trainer constructs the optimiser explicitly with
+    ``wrapper.ccnet.parameters()`` and ``wrapper.projection.parameters()`` so
+    the two groups can get separate learning rates without parameter overlap.
+
+    Forwarded methods:
+        - ``forward(x)`` → ``projection(ccnet(x))``
+        - ``getFeatureCode(x)`` → ``projection(ccnet.getFeatureCode(x))``
+
+    All other attributes (including custom CCNet attrs like
+    ``_pretrained_load_info``) are delegated to ``self.ccnet`` via
+    ``__getattr__`` so external code that expects "the CCNet model" still
+    works transparently.
+    """
+
+    def __init__(self, ccnet: nn.Module, projection: 'ProjectionHead'):
+        super().__init__()
+        self.ccnet = ccnet
+        self.projection = projection
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.projection(self.ccnet(x))
+
+    def getFeatureCode(self, x: torch.Tensor) -> torch.Tensor:
+        return self.projection(self.ccnet.getFeatureCode(x))
+
+    def __getattr__(self, name: str):
+        # First let nn.Module find submodules / parameters / buffers.
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            # Fall back to attributes set directly on the wrapped ccnet
+            # (e.g. _pretrained_load_info that train_coconut.py reads).
+            ccnet = self.__dict__.get('_modules', {}).get('ccnet')
+            if ccnet is not None and hasattr(ccnet, name):
+                return getattr(ccnet, name)
+            raise

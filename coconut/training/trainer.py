@@ -16,7 +16,7 @@ import random
 from coconut.losses import ProxyAnchorLoss
 from coconut.data import MemoryDataset, get_scr_transforms
 from .average_meter import AverageMeter
-from coconut.models import PretrainedLoader, ProjectionHead
+from coconut.models import PretrainedLoader, ProjectionHead, ProjectionWrappedModel
 from coconut.classifiers.threshold import ThresholdCalibrator
 
 # 오픈셋 유틸리티 함수들
@@ -142,41 +142,30 @@ class COCONUTTrainer:
 
         # ProjectionHead 초기화 (선택적: CCNet 2048D → projection_dim)
         # PCA 가중치 초기화는 train_coconut.py에서 학습 시작 전에 별도 수행.
-        # 여기서는 학습 가능한 텐서만 만들어 두고, optimizer는 _create_optimizer_with_grouped_params 에서 처리.
         self.use_projection_head = bool(getattr(config.training, 'use_projection_head', False))
         if self.use_projection_head:
             self.projection_dim = int(getattr(config.training, 'projection_dim', 512))
             self.projection_lr_ratio = float(getattr(config.training, 'projection_lr_ratio', 1.0))
             self.projection = ProjectionHead(in_dim=2048, out_dim=self.projection_dim).to(device)
+
+            # Wrap the model so every downstream caller — including evaluator
+            # and openset.score_extraction — automatically receives projected
+            # features. The wrapper is a proper nn.Module (not a monkey-patch)
+            # so .train()/.eval()/.to() propagate correctly, state_dict
+            # round-trips work, and attribute lookups for custom CCNet attrs
+            # (e.g. _pretrained_load_info) still resolve via wrapper.__getattr__.
+            #
+            # IMPORTANT: After this line, self.model is the wrapper. The
+            # optimiser builds backbone vs projection groups using
+            # self.model.ccnet.parameters() and self.model.projection.parameters()
+            # so the two groups stay disjoint and get separate learning rates.
+            model = ProjectionWrappedModel(ccnet=model, projection=self.projection).to(device)
+
             if self.verbose:
                 print(f"[COCONUT] ProjectionHead enabled: 2048 -> {self.projection_dim} "
                       f"(lr_ratio={self.projection_lr_ratio}x backbone)")
-
-            # Monkey-patch the model's forward and getFeatureCode so that every
-            # downstream caller (evaluator, openset.score_extraction, evaluate(),
-            # _update_ncm, ...) automatically receives projected features —
-            # without each call site needing to know about the projection.
-            # This avoids feature-space mismatches between NCM prototypes
-            # (projected) and probe scores (would otherwise be raw 2048-D).
-            proj_ref = self.projection
-            _orig_forward = model.forward
-            _orig_getFeatureCode = model.getFeatureCode
-
-            def _patched_forward(x):
-                return proj_ref(_orig_forward(x))
-
-            def _patched_getFeatureCode(x):
-                return proj_ref(_orig_getFeatureCode(x))
-
-            # Instance-level method replacement (shadows the class-level method).
-            # nn.Module.__call__ uses self.forward, so this still routes through
-            # the patched implementation.
-            model.forward = _patched_forward
-            model.getFeatureCode = _patched_getFeatureCode
-
-            if self.verbose:
-                print(f"[COCONUT] Patched model.forward + model.getFeatureCode "
-                      f"to apply projection automatically")
+                print(f"[COCONUT] Model wrapped with ProjectionWrappedModel; every "
+                      f"forward/getFeatureCode now passes through projection.")
         else:
             self.projection = None
             self.projection_dim = 2048
@@ -371,11 +360,24 @@ class COCONUTTrainer:
         )
 
     def _create_optimizer_with_grouped_params(self, include_proxies=True):
-        """ 파라미터 그룹별로 다른 학습률 적용한 옵티마이저 생성"""
+        """ 파라미터 그룹별로 다른 학습률 적용한 옵티마이저 생성
+
+        When ProjectionWrappedModel is used, self.model.ccnet and
+        self.model.projection are accessed explicitly so the backbone and
+        projection groups stay disjoint. When projection is off,
+        self.model is the raw ccnet and self.model.parameters() is the
+        backbone group.
+        """
         param_groups = []
 
         # 백본 파라미터 그룹 (사전학습된 CCNet)
-        backbone_params = list(self.model.parameters())
+        if self.projection is not None:
+            # Wrapper: backbone = wrapper.ccnet.parameters() only
+            backbone_params = list(self.model.ccnet.parameters())
+        else:
+            # No wrapper: backbone = full model
+            backbone_params = list(self.model.parameters())
+
         if backbone_params:
             param_groups.append({
                 'params': backbone_params,
@@ -388,8 +390,10 @@ class COCONUTTrainer:
         # Projection 파라미터 그룹 (선택적: PCA-init linear projection)
         if self.projection is not None:
             proj_lr = self.base_lr * self.projection_lr_ratio
+            # Use wrapper's projection sub-module for parameter list — same
+            # object as self.projection since wrapper stores it as a submodule.
             param_groups.append({
-                'params': list(self.projection.parameters()),
+                'params': list(self.model.projection.parameters()),
                 'lr': proj_lr,
                 'name': 'projection'
             })
@@ -418,8 +422,12 @@ class COCONUTTrainer:
 
         if current_num_proxies != self.last_num_proxies:
             # 백본 state 저장 (파라미터 객체가 동일하므로 복원 가능)
+            # When wrapped, iterate ccnet's params explicitly to skip projection.
+            backbone_iter = (self.model.ccnet.parameters()
+                             if self.projection is not None
+                             else self.model.parameters())
             old_model_states = {}
-            for param in self.model.parameters():
+            for param in backbone_iter:
                 if param in self.optimizer.state and self.optimizer.state[param]:
                     old_model_states[param] = {
                         k: v.clone() if torch.is_tensor(v) else v
@@ -1857,8 +1865,17 @@ class COCONUTTrainer:
         if save_dir:
             os.makedirs(save_dir, exist_ok=True)
 
+        # When projection wrapping is on, save the underlying ccnet's
+        # state_dict (not the wrapper's). The projection is saved
+        # separately below via projection_state_dict so it can be
+        # reconstructed even if a future load runs without projection.
+        if self.projection is not None:
+            model_sd = self.model.ccnet.state_dict()
+        else:
+            model_sd = self.model.state_dict()
+
         checkpoint_dict = {
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': model_sd,
             'ncm_state_dict': self.ncm.state_dict(),
             'experience_count': self.experience_count,
             'memory_buffer_size': len(self.memory_buffer)
@@ -1938,7 +1955,12 @@ class COCONUTTrainer:
         checkpoint = torch.load(path, map_location=self.device)
 
         # 모델 가중치 복원
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        # When wrapped, the saved state_dict is the underlying ccnet's
+        # (we strip the wrapper at save time) so load it into ccnet directly.
+        if self.projection is not None:
+            self.model.ccnet.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            self.model.load_state_dict(checkpoint['model_state_dict'])
         if self.verbose:
             print(f"[OK] Model weights restored")
 
