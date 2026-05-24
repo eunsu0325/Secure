@@ -135,13 +135,16 @@ class COCONUTTrainer:
             if self.verbose:
                 print("📦 Using random initialization (no pretrained weights)")
 
-        self.model = model
         self.ncm = ncm_classifier
         self.memory_buffer = memory_buffer
         self.config = config
 
         # ProjectionHead 초기화 (선택적: CCNet 2048D → projection_dim)
         # PCA 가중치 초기화는 train_coconut.py에서 학습 시작 전에 별도 수행.
+        # NOTE: self.model assignment happens AFTER projection setup so that
+        # when projection is on, self.model points to the wrapper (not the raw
+        # ccnet). This is critical for _create_optimizer_with_grouped_params
+        # which reads self.model.ccnet / self.model.projection.
         self.use_projection_head = bool(getattr(config.training, 'use_projection_head', False))
         if self.use_projection_head:
             self.projection_dim = int(getattr(config.training, 'projection_dim', 512))
@@ -150,16 +153,10 @@ class COCONUTTrainer:
 
             # Wrap the model so every downstream caller — including evaluator
             # and openset.score_extraction — automatically receives projected
-            # features. The wrapper is a proper nn.Module (not a monkey-patch)
-            # so .train()/.eval()/.to() propagate correctly, state_dict
-            # round-trips work, and attribute lookups for custom CCNet attrs
-            # (e.g. _pretrained_load_info) still resolve via wrapper.__getattr__.
-            #
-            # IMPORTANT: After this line, self.model is the wrapper. The
-            # optimiser builds backbone vs projection groups using
-            # self.model.ccnet.parameters() and self.model.projection.parameters()
-            # so the two groups stay disjoint and get separate learning rates.
-            model = ProjectionWrappedModel(ccnet=model, projection=self.projection).to(device)
+            # features.
+            self.model = ProjectionWrappedModel(
+                ccnet=model, projection=self.projection
+            ).to(device)
 
             if self.verbose:
                 print(f"[COCONUT] ProjectionHead enabled: 2048 -> {self.projection_dim} "
@@ -170,6 +167,7 @@ class COCONUTTrainer:
             self.projection = None
             self.projection_dim = 2048
             self.projection_lr_ratio = 0.0
+            self.model = model
 
         # ProxyAnchorLoss 초기화
         self.use_proxy_anchor = getattr(config.training, 'use_proxy_anchor', True)
