@@ -151,6 +151,32 @@ class COCONUTTrainer:
             if self.verbose:
                 print(f"[COCONUT] ProjectionHead enabled: 2048 -> {self.projection_dim} "
                       f"(lr_ratio={self.projection_lr_ratio}x backbone)")
+
+            # Monkey-patch the model's forward and getFeatureCode so that every
+            # downstream caller (evaluator, openset.score_extraction, evaluate(),
+            # _update_ncm, ...) automatically receives projected features —
+            # without each call site needing to know about the projection.
+            # This avoids feature-space mismatches between NCM prototypes
+            # (projected) and probe scores (would otherwise be raw 2048-D).
+            proj_ref = self.projection
+            _orig_forward = model.forward
+            _orig_getFeatureCode = model.getFeatureCode
+
+            def _patched_forward(x):
+                return proj_ref(_orig_forward(x))
+
+            def _patched_getFeatureCode(x):
+                return proj_ref(_orig_getFeatureCode(x))
+
+            # Instance-level method replacement (shadows the class-level method).
+            # nn.Module.__call__ uses self.forward, so this still routes through
+            # the patched implementation.
+            model.forward = _patched_forward
+            model.getFeatureCode = _patched_getFeatureCode
+
+            if self.verbose:
+                print(f"[COCONUT] Patched model.forward + model.getFeatureCode "
+                      f"to apply projection automatically")
         else:
             self.projection = None
             self.projection_dim = 2048
@@ -327,37 +353,22 @@ class COCONUTTrainer:
 
 
     # ────────────────────────────────────────────────────────────────────
-    # Projection helpers
+    # Projection helper (now a thin pass-through)
     # ────────────────────────────────────────────────────────────────────
-    def _project_features(self, features):
-        """Apply projection head to a feature tensor (training-graph aware).
-
-        If projection is disabled, returns features unchanged.
-        """
-        if self.projection is None:
-            return features
-        return self.projection(features)
-
     @torch.no_grad()
     def _extract_features_projected(self, paths, channels, batch_size=64):
-        """Wrapper for openset.extract_features that projects after extraction.
+        """Pass-through wrapper for openset.extract_features.
 
-        Returns a numpy array in the *downstream* feature space:
-          - if projection is on  → shape (N, projection_dim)
-          - if projection is off → shape (N, 2048) (CCNet getFeatureCode output)
-
-        Used at every evaluation/calibration call site so that NCM prototypes
-        and probe features always live in the same space.
+        After Commit 4 hotfix, projection is applied inside model.getFeatureCode
+        (monkey-patched in __init__ when use_projection_head=True). So
+        extract_features() already returns projected features automatically.
+        This helper exists only to keep the call sites in this file
+        consistent and to centralise any future feature-side processing.
         """
-        raw = extract_features(
+        return extract_features(
             self.model, paths, self.test_transform, self.device,
-            batch_size=batch_size, channels=channels
+            batch_size=batch_size, channels=channels,
         )
-        if self.projection is None or len(raw) == 0:
-            return raw
-        tensor = torch.as_tensor(raw, device=self.device)
-        projected = self.projection(tensor)
-        return projected.detach().cpu().numpy()
 
     def _create_optimizer_with_grouped_params(self, include_proxies=True):
         """ 파라미터 그룹별로 다른 학습률 적용한 옵티마이저 생성"""
@@ -507,10 +518,9 @@ class COCONUTTrainer:
                             for p in cls_paths:
                                 img = _open_with_channels(p, self.config.dataset.channels)
                                 img = self.test_transform(img).unsqueeze(0).to(self.device)
+                                # model.getFeatureCode is monkey-patched to apply
+                                # projection automatically when use_projection_head=True
                                 feat = self.model.getFeatureCode(img)
-                                # Projection: proxy 는 projection 출력 공간에서 산다
-                                if self.projection is not None:
-                                    feat = self.projection(feat)
                                 feats.append(feat.squeeze(0))
                             feature_means[cid] = torch.stack(feats).mean(dim=0)
                     self.model.train()
@@ -660,10 +670,9 @@ class COCONUTTrainer:
                     self.optimizer.zero_grad()
 
                     # Forward: CCNet feature extraction (dual-view 그대로 — augmentation 효과)
+                    # self.model.forward is monkey-patched to apply projection automatically
+                    # when use_projection_head=True.
                     features_all = self.model(x)
-                    # Projection (if enabled): 2048D → projection_dim
-                    if self.projection is not None:
-                        features_all = self.projection(features_all)
 
                     # ProxyAnchorLoss
                     if self.use_proxy_anchor and self.proxy_anchor_loss.proxies is not None:
@@ -1784,9 +1793,8 @@ class COCONUTTrainer:
             data = data.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
+            # getFeatureCode is monkey-patched to include projection when enabled
             features = self.model.getFeatureCode(data)
-            if self.projection is not None:
-                features = self.projection(features)
 
             for i, label in enumerate(labels):
                 label_item = label.item()
@@ -1832,9 +1840,8 @@ class COCONUTTrainer:
                 data = data.to(self.device, non_blocking=True)
                 labels = labels.to(self.device, non_blocking=True)
 
+                # getFeatureCode is monkey-patched to include projection when enabled
                 features = self.model.getFeatureCode(data)
-                if self.projection is not None:
-                    features = self.projection(features)
                 predictions = self.ncm.predict(features)
 
                 correct += (predictions == labels).sum().item()
