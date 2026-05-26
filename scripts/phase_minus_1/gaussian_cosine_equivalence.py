@@ -1,5 +1,12 @@
 """
-Phase -1.3 (v2 — REWRITE): Gaussian-cosine equivalence diagnostic (C-GPAC-1).
+Phase -1.3 (v4 — REWRITE + GT accuracy): Gaussian-cosine equivalence diagnostic.
+
+v4 adds the decisive missing measurement: do the boundary probes where
+Gaussian disagrees with cosine actually get MORE accurate top-1 picks under
+Gaussian, or LESS? Without this, v3's "51% boundary disagree" was ambiguous
+(could be signal OR noise). We compare top1 picks against ground truth for
+in-gallery probes and report wc/cw = (gauss-only correct)/(cos-only correct)
+at each floor. wc/cw > 1 → Gaussian net beats cosine.
 
 PRIOR-VERSION DESIGN ERRORS (acknowledged and fixed here):
   (E1) Used raw proxy as Gaussian center, but 1.2 measured cos(proxy, NCM_mean)
@@ -356,7 +363,117 @@ def compute_rho_per_probe(
         'top1_agreement_gauss_vs_cos': top1_agreement,
         'top1_agreement_low_margin': top1_agree_low,
         'n_probes': int(N),
+        # numpy arrays (excluded from JSON dump downstream)
+        '_pred_cos': pred_cos,
+        '_pred_gauss': pred_gauss,
+        '_low_margin_mask': low_margin_mask,
     }
+
+
+def compute_accuracy_breakdown(
+    pred_cos: np.ndarray,             # (N,) gallery row index 0..C-1
+    pred_gauss: np.ndarray,           # (N,) gallery row index 0..C-1
+    eval_labels: List[int],           # (N,) raw user_id
+    gallery_user_ids: List[int],      # ordered list mapping row idx -> user_id
+    low_margin_mask: np.ndarray,      # (N,) bool, cosine-margin-based
+) -> Dict:
+    """Compare cosine vs Gaussian top-1 against ground truth.
+
+    Only in-gallery probes have ground truth (probe label ∈ gallery_user_ids).
+    Reports closed-set accuracy + 4-way confusion (both correct / cos-only
+    correct / gauss-only correct / both wrong), overall and on low-margin
+    subset.
+
+    The ratio wc/cw = (gauss-only correct)/(cos-only correct) is the decisive
+    metric:
+      wc/cw > 1  → Gaussian net beats cosine (GPAC valuable)
+      wc/cw < 1  → Cosine net beats Gaussian (GPAC harmful)
+      wc/cw ≈ 1  → swap only, no net effect
+    """
+    N = len(eval_labels)
+    assert pred_cos.shape == (N,) and pred_gauss.shape == (N,)
+    assert low_margin_mask.shape == (N,)
+
+    gallery_set = set(gallery_user_ids)
+    gallery_idx_of = {u: i for i, u in enumerate(gallery_user_ids)}
+
+    # Convert raw user_id labels into gallery row indices; -1 for non-enrolled
+    in_gallery_labels = np.array([
+        gallery_idx_of[int(y)] if int(y) in gallery_set else -1
+        for y in eval_labels
+    ], dtype=np.int64)
+    in_gallery_mask = in_gallery_labels >= 0
+
+    n_in = int(in_gallery_mask.sum())
+    if n_in == 0:
+        return {'error': 'no in-gallery probes'}
+
+    cos_correct = (pred_cos == in_gallery_labels)
+    gauss_correct = (pred_gauss == in_gallery_labels)
+
+    def _breakdown(mask: np.ndarray) -> Dict:
+        n = int(mask.sum())
+        if n == 0:
+            return {
+                'n': 0, 'cos_acc': None, 'gauss_acc': None,
+                'accuracy_delta': None,
+                'both_correct': 0, 'cos_only_correct': 0,
+                'gauss_only_correct': 0, 'both_wrong': 0,
+                'wc_cw_ratio': None,
+            }
+        cos_acc = float(cos_correct[mask].mean())
+        gauss_acc = float(gauss_correct[mask].mean())
+        cc = int((cos_correct & gauss_correct & mask).sum())
+        cw = int((cos_correct & (~gauss_correct) & mask).sum())
+        wc = int(((~cos_correct) & gauss_correct & mask).sum())
+        ww = int(((~cos_correct) & (~gauss_correct) & mask).sum())
+        ratio = (wc / cw) if cw > 0 else (float('inf') if wc > 0 else None)
+        return {
+            'n': n,
+            'cos_acc': cos_acc,
+            'gauss_acc': gauss_acc,
+            'accuracy_delta': gauss_acc - cos_acc,
+            'both_correct': cc,
+            'cos_only_correct': cw,
+            'gauss_only_correct': wc,
+            'both_wrong': ww,
+            'wc_cw_ratio': ratio,
+        }
+
+    bd_mask = low_margin_mask & in_gallery_mask
+    return {
+        'n_in_gallery': n_in,
+        'n_in_gallery_low_margin': int(bd_mask.sum()),
+        'all': _breakdown(in_gallery_mask),
+        'low_margin': _breakdown(bd_mask),
+    }
+
+
+def classify_accuracy_verdict(acc: Dict) -> str:
+    """Label this floor's GPAC viability from accuracy data."""
+    if 'error' in acc:
+        return "NO_GROUND_TRUTH"
+    bd = acc['low_margin']
+    if bd['n'] < 10:
+        # Fall back to all-probe verdict if too few boundary samples
+        all_b = acc['all']
+        ratio = all_b['wc_cw_ratio']
+        if ratio is None:
+            return "NO_DISAGREEMENT"
+    else:
+        ratio = bd['wc_cw_ratio']
+
+    if ratio is None:
+        return "NO_DISAGREEMENT"
+    if ratio == float('inf') or ratio > 1.5:
+        return "GAUSS_BEATS_COS"
+    if ratio > 1.05:
+        return "GAUSS_SLIGHTLY_BEATS"
+    if ratio > 0.95:
+        return "TIE_SWAP_ONLY"
+    if ratio > 0.67:
+        return "COS_SLIGHTLY_BEATS"
+    return "COS_BEATS_GAUSS"
 
 
 def render_verdict_for_floor(rho_stats: Dict, variance_stats: Dict) -> Dict:
@@ -393,17 +510,17 @@ def render_verdict_for_floor(rho_stats: Dict, variance_stats: Dict) -> Dict:
 
 
 def render_sweep_verdict(sweep_results: List[Dict]) -> Dict:
-    """Aggregate verdict across the floor sweep.
+    """Aggregate verdict across the floor sweep using ground-truth accuracy.
 
-    Key question: as floor → 0 (true anisotropic Gaussian emerges), do ρ and
-    top1_agreement remain near 1.0, or do they drop? If they drop, Gaussian
-    carries information cosine lacks.
+    v4 change: accuracy-based decisive verdict rather than rho/top1-only.
+    Each sweep_result carries an 'accuracy' dict (cos_acc, gauss_acc, wc, cw,
+    breakdown). The pivotal floor is the one with mid-range floor_active_frac
+    (typically floor_rel=1.0, i.e. σ²_shared) — neither noise-dominated nor
+    fully Euclidean. We report the wc/cw ratio there as the decisive number.
     """
-    # Sort by floor ascending so we read "tighter → looser"
     sweep_sorted = sorted(sweep_results, key=lambda r: r['var_floor'])
-    smallest_floor = sweep_sorted[0]
-    largest_floor = sweep_sorted[-1]
 
+    # rho/top1 range
     rho_min = min(r['rho_all'] for r in sweep_sorted)
     rho_max = max(r['rho_all'] for r in sweep_sorted)
     top1_min = min(r['top1_agreement'] for r in sweep_sorted)
@@ -412,52 +529,85 @@ def render_sweep_verdict(sweep_results: List[Dict]) -> Dict:
                    if r['rho_low_margin'] is not None]
     rho_lm_min = min(rho_lm_vals) if rho_lm_vals else None
 
-    delta_rho = rho_max - rho_min
-    delta_top1 = top1_max - top1_min
+    # Pick the pivotal floor: prefer floor_active_frac closest to 0.5
+    # (balanced — noise floor on small-var dims, anisotropy on large-var dims)
+    pivotal = min(
+        sweep_sorted,
+        key=lambda r: abs(r.get('floor_active_frac', 0.5) - 0.5),
+    )
+    pivotal_acc = pivotal.get('accuracy') or {}
+    pivotal_acc_lm = pivotal_acc.get('low_margin') or {}
+    pivotal_ratio = pivotal_acc_lm.get('wc_cw_ratio')
+    pivotal_delta = pivotal_acc_lm.get('accuracy_delta')
+    pivotal_cos_acc = pivotal_acc_lm.get('cos_acc')
+    pivotal_gauss_acc = pivotal_acc_lm.get('gauss_acc')
 
-    # Strong duplicate across the entire floor range -> GPAC loss has no math basis
-    if rho_min >= 0.985 and top1_min >= 0.99:
-        action = "STRONG_DUPLICATE_DISCARD_GPAC_LOSS"
+    # Decisive accuracy-based action
+    if pivotal_ratio is None:
+        action = "NO_BOUNDARY_DISAGREEMENT"
         rationale = (
-            f"Across all floor scales {[r['var_floor'] for r in sweep_sorted]}, "
-            f"rho stayed in [{rho_min:.4f}, {rho_max:.4f}] and top1 in "
-            f"[{top1_min:.4f}, {top1_max:.4f}]. Gaussian = cosine even when "
-            f"per-dim anisotropy is fully exposed. GPAC training loss adds nothing."
+            f"At pivotal floor (floor_active≈{pivotal.get('floor_active_frac')}), "
+            "no boundary case where exactly one metric is correct — Gaussian "
+            "and cosine agree on every classifiable probe."
         )
-    elif rho_lm_min is not None and rho_lm_min < 0.90:
-        action = "USEFUL_SIGNAL_GPAC_VIABLE"
+    elif pivotal_ratio == float('inf'):
+        action = "GAUSS_STRICTLY_BEATS_COS"
         rationale = (
-            f"At some floor, rho_low_margin dropped to {rho_lm_min:.4f} < 0.90. "
-            "Gaussian distance disagrees with cosine on boundary samples — "
-            "exactly where GPAC would help."
+            f"At pivotal floor, every boundary disagreement favored Gaussian "
+            f"(cos_only_correct=0, gauss_only_correct>0). Δacc={pivotal_delta}."
         )
-    elif delta_rho > 0.02 or delta_top1 > 0.02 or top1_min < 0.95:
-        action = "FLOOR_DEPENDENT_SIGNAL_GPAC_AUXILIARY"
+    elif pivotal_ratio > 1.5:
+        action = "GPAC_VIABLE_GAUSS_BEATS"
         rationale = (
-            f"Δrho={delta_rho:.4f}, Δtop1={delta_top1:.4f} across floor sweep. "
-            "Anisotropy carries some information but only at low floor; "
-            "auxiliary GPAC usage justified, full loss replacement is not."
+            f"At pivotal floor, wc/cw={pivotal_ratio:.2f} >> 1 — Gaussian beats "
+            f"cosine on boundary cases (cos_acc={pivotal_cos_acc:.4f} → "
+            f"gauss_acc={pivotal_gauss_acc:.4f}, Δ={pivotal_delta:+.4f}). "
+            "GPAC loss/inference both warrant proper testing."
+        )
+    elif pivotal_ratio > 1.05:
+        action = "GPAC_MARGINAL_GAUSS_SLIGHTLY_BEATS"
+        rationale = (
+            f"wc/cw={pivotal_ratio:.2f}, Δacc={pivotal_delta:+.4f}. "
+            "Gaussian slightly net-positive on boundary — auxiliary GPAC only."
+        )
+    elif pivotal_ratio > 0.95:
+        action = "TIE_SWAP_ONLY_NO_NET_BENEFIT"
+        rationale = (
+            f"wc/cw={pivotal_ratio:.2f}, Δacc={pivotal_delta:+.4f}. "
+            "Gaussian and cosine disagree but neither is consistently better. "
+            "Boundary swaps cancel out — GPAC adds no closed-set value."
+        )
+    elif pivotal_ratio > 0.67:
+        action = "COS_SLIGHTLY_BEATS_GPAC_RISKY"
+        rationale = (
+            f"wc/cw={pivotal_ratio:.2f} (cosine wins more). Δacc={pivotal_delta:+.4f}. "
+            "GPAC inference likely harmful; loss formulation needs justification."
         )
     else:
-        action = "LIKELY_DUPLICATE_AUXILIARY_ONLY"
+        action = "COS_BEATS_GAUSS_DISCARD_GPAC"
         rationale = (
-            f"rho∈[{rho_min:.4f}, {rho_max:.4f}], top1∈[{top1_min:.4f}, {top1_max:.4f}]; "
-            "narrow window with no boundary signal. GPAC loss redundant."
+            f"wc/cw={pivotal_ratio:.2f} (cosine clearly wins). Δacc={pivotal_delta:+.4f}. "
+            "Gaussian boundary disagreement is noise, not signal. Discard GPAC."
         )
 
     return {
         'action': action,
         'rationale': rationale,
+        'pivotal_floor': {
+            'floor_rel': pivotal.get('floor_rel'),
+            'var_floor': pivotal.get('var_floor'),
+            'floor_active_frac': pivotal.get('floor_active_frac'),
+        },
+        'pivotal_accuracy_low_margin': pivotal_acc_lm,
+        'pivotal_accuracy_all': pivotal_acc.get('all', {}),
         'sweep_summary': {
             'rho_min': rho_min,
             'rho_max': rho_max,
             'top1_min': top1_min,
             'top1_max': top1_max,
             'rho_low_margin_min': rho_lm_min,
-            'delta_rho': delta_rho,
-            'delta_top1': delta_top1,
-            'smallest_floor': smallest_floor,
-            'largest_floor': largest_floor,
+            'delta_rho': rho_max - rho_min,
+            'delta_top1': top1_max - top1_min,
         }
     }
 
@@ -473,8 +623,8 @@ def main():
 
     config = ConfigParser(args.config)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"[1.3v3] device: {device}")
-    print(f"[1.3v3] design fixes: NCM-center, normalized-space, "
+    print(f"[1.3v4] device: {device}")
+    print(f"[1.3v4] design fixes: NCM-center, normalized-space, "
           f"floor_sweep={FLOOR_REL_SWEEP}, n_0={SHRINKAGE_N0}")
 
     model, projection, class_means = load_checkpoint_components(
@@ -489,7 +639,7 @@ def main():
     ])
     class_means_dict = {u: class_means[u] for u in gallery_user_ids}
     class_means_mat = torch.stack([class_means_dict[u] for u in gallery_user_ids], dim=0)
-    print(f"[1.3v3] gallery users: {len(gallery_user_ids)}")
+    print(f"[1.3v4] gallery users: {len(gallery_user_ids)}")
 
     transform = get_scr_transforms(
         train=False,
@@ -498,7 +648,7 @@ def main():
     )
 
     # ── Enroll features for variance estimation ────────────────────────────
-    print(f"[1.3v3] extracting enroll features (for variance estimation)...")
+    print(f"[1.3v4] extracting enroll features (for variance estimation)...")
     enroll_paths, enroll_labels = load_paths_labels_from_txt(str(config.dataset.enroll_file))
     if args.max_enroll is not None and len(enroll_paths) > args.max_enroll:
         enroll_paths = enroll_paths[:args.max_enroll]
@@ -522,13 +672,13 @@ def main():
           f"{len(set(enroll_labels_f))} users")
 
     # ── Estimate variance models (NCM-centered, normalized-space) ──────────
-    print(f"[1.3v3] fitting variance models...")
+    print(f"[1.3v4] fitting variance models...")
     var_models = estimate_variance_models(
         enroll_norm_f, enroll_labels_f, class_means_dict,
     )
 
     # ── Eval features ──────────────────────────────────────────────────────
-    print(f"[1.3v3] extracting eval probe features...")
+    print(f"[1.3v4] extracting eval probe features...")
     eval_paths, eval_labels = load_paths_labels_from_txt(str(config.dataset.eval_probe_file))
     if args.max_eval is not None and len(eval_paths) > args.max_eval:
         eval_paths = eval_paths[:args.max_eval]
@@ -547,7 +697,7 @@ def main():
             var_models['per_user_sigma'][u] = var_models['sigma_shared_per_dim']
 
     # ── Precompute floor-independent tensors ─────────────────────────────
-    print(f"[1.3v3] precomputing cos_sim, diff_sq ...")
+    print(f"[1.3v4] precomputing cos_sim, diff_sq ...")
     with torch.no_grad():
         cos_sim_all = eval_norm @ class_means_mat.T
         diff_all = eval_norm.unsqueeze(1) - class_means_mat.unsqueeze(0)
@@ -557,30 +707,52 @@ def main():
 
     # ── Floor sweep ───────────────────────────────────────────────────────
     sigma_shared_scalar = var_models['sigma_shared_scalar']
-    print(f"[1.3v3] sigma_shared_scalar = {sigma_shared_scalar:.6e}")
+    print(f"[1.3v4] sigma_shared_scalar = {sigma_shared_scalar:.6e}")
 
-    sweep_results = []
-    sweep_verdicts = []
+    sweep_results = []     # per-floor verdict dicts (action, accuracy, rho summary)
+    sweep_rho_stats = []   # per-floor raw rho/top1/numpy arrays (json-unsafe parts stripped later)
     for floor_rel in FLOOR_REL_SWEEP:
         var_floor = max(floor_rel * sigma_shared_scalar, FLOOR_ABS_MIN)
-        print(f"\n[1.3v3] computing rho at floor_rel={floor_rel} → var_floor={var_floor:.6e}")
+        print(f"\n[1.3v4] computing rho at floor_rel={floor_rel} → var_floor={var_floor:.6e}")
         rho_stats = compute_rho_per_probe(
             eval_norm, class_means_mat, gallery_user_ids,
             var_models['per_user_sigma'], var_models['sigma_shared_per_dim'],
             var_floor=var_floor, precomputed=precomputed,
         )
         rho_stats['floor_rel'] = floor_rel
+
+        # ── Ground-truth accuracy breakdown (v4 addition) ───────────────
+        acc = compute_accuracy_breakdown(
+            pred_cos=rho_stats['_pred_cos'],
+            pred_gauss=rho_stats['_pred_gauss'],
+            eval_labels=eval_labels,
+            gallery_user_ids=gallery_user_ids,
+            low_margin_mask=rho_stats['_low_margin_mask'],
+        )
+        acc_verdict = classify_accuracy_verdict(acc)
+
         v = render_verdict_for_floor(rho_stats, var_models['stats'])
         v['floor_rel'] = floor_rel
         v['var_floor'] = var_floor
         v['floor_active_frac'] = rho_stats['floor_active_frac']
+        v['accuracy'] = acc
+        v['accuracy_verdict'] = acc_verdict
         sweep_results.append(v)
-        sweep_verdicts.append(rho_stats)
+        sweep_rho_stats.append(rho_stats)
+
+        # Single-line summary
+        bd = acc.get('low_margin') or {}
+        cos_acc_lm = bd.get('cos_acc')
+        gauss_acc_lm = bd.get('gauss_acc')
+        ratio = bd.get('wc_cw_ratio')
         print(f"  floor_active_frac={rho_stats['floor_active_frac']:.4f}  "
               f"rho_all={rho_stats['mean_rho_all']:.4f}  "
-              f"rho_lm={rho_stats['mean_rho_low_margin']}  "
               f"top1={rho_stats['top1_agreement_gauss_vs_cos']:.4f}  "
               f"top1_lm={rho_stats['top1_agreement_low_margin']}")
+        if cos_acc_lm is not None:
+            print(f"    LM accuracy: cos={cos_acc_lm:.4f} gauss={gauss_acc_lm:.4f} "
+                  f"Δ={gauss_acc_lm - cos_acc_lm:+.4f}  "
+                  f"wc/cw={ratio}  verdict={acc_verdict}")
 
     verdict = render_sweep_verdict(sweep_results)
 
@@ -601,26 +773,60 @@ def main():
     print(f"  pooled residual eff_rank:    {s['pooled_residual_eff_rank']}")
     print(f"  pooled residual condition:   {s['pooled_residual_condition']}")
 
-    print("\n=== Floor Sweep Table ===")
+    print("\n=== Floor Sweep — rank/top1 ===")
     print(f"  {'floor_rel':>10} {'var_floor':>12} {'floor%':>8} "
-          f"{'rho_all':>8} {'rho_lm':>8} {'top1':>8} {'top1_lm':>8}  action")
-    for sv, rs in zip(sweep_results, sweep_verdicts):
+          f"{'rho_all':>8} {'rho_lm':>8} {'top1':>8} {'top1_lm':>8}")
+    for sv, rs in zip(sweep_results, sweep_rho_stats):
         rho_lm_str = f"{rs['mean_rho_low_margin']:.4f}" if rs['mean_rho_low_margin'] is not None else "  N/A "
         t1lm_str = f"{rs['top1_agreement_low_margin']:.4f}" if rs['top1_agreement_low_margin'] is not None else "  N/A "
         print(f"  {sv['floor_rel']:>10.2f} {sv['var_floor']:>12.4e} "
               f"{sv['floor_active_frac']*100:>7.2f}% "
               f"{rs['mean_rho_all']:>8.4f} {rho_lm_str:>8} "
-              f"{rs['top1_agreement_gauss_vs_cos']:>8.4f} {t1lm_str:>8}  {sv['action']}")
+              f"{rs['top1_agreement_gauss_vs_cos']:>8.4f} {t1lm_str:>8}")
 
-    print(f"\n=== Sweep Verdict ===")
+    print("\n=== Floor Sweep — GT accuracy (in-gallery probes) ===")
+    print(f"  {'floor_rel':>10} {'n_all':>6} {'cos_acc':>8} {'gauss_acc':>10} "
+          f"{'Δ_all':>8} | {'n_lm':>5} {'cos_lm':>8} {'gauss_lm':>10} "
+          f"{'Δ_lm':>8} {'wc/cw':>8}  verdict")
+    for sv in sweep_results:
+        a_all = sv['accuracy'].get('all') or {}
+        a_lm = sv['accuracy'].get('low_margin') or {}
+        cos_a = a_all.get('cos_acc')
+        gau_a = a_all.get('gauss_acc')
+        d_all = a_all.get('accuracy_delta')
+        cos_lm = a_lm.get('cos_acc')
+        gau_lm = a_lm.get('gauss_acc')
+        d_lm = a_lm.get('accuracy_delta')
+        ratio = a_lm.get('wc_cw_ratio')
+
+        def _fmt(v, w, prec=4):
+            if v is None:
+                return f"{'N/A':>{w}}"
+            if isinstance(v, float):
+                if v == float('inf'):
+                    return f"{'inf':>{w}}"
+                return f"{v:>{w}.{prec}f}"
+            return f"{v:>{w}}"
+
+        print(f"  {sv['floor_rel']:>10.2f} {a_all.get('n', 0):>6d} "
+              f"{_fmt(cos_a, 8)} {_fmt(gau_a, 10)} {_fmt(d_all, 8, prec=4)} | "
+              f"{a_lm.get('n', 0):>5d} {_fmt(cos_lm, 8)} {_fmt(gau_lm, 10)} "
+              f"{_fmt(d_lm, 8, prec=4)} {_fmt(ratio, 8, prec=2)}  {sv['accuracy_verdict']}")
+
+    print(f"\n=== Sweep Verdict (accuracy-based) ===")
     print(f"  ACTION: {verdict['action']}")
     print(f"  rationale: {verdict['rationale']}")
+    print(f"  pivotal floor: floor_rel={verdict['pivotal_floor']['floor_rel']} "
+          f"(active={verdict['pivotal_floor']['floor_active_frac']})")
     sm = verdict['sweep_summary']
-    print(f"  rho range:        [{sm['rho_min']:.4f}, {sm['rho_max']:.4f}] "
-          f"(delta={sm['delta_rho']:.4f})")
-    print(f"  top1 range:       [{sm['top1_min']:.4f}, {sm['top1_max']:.4f}] "
-          f"(delta={sm['delta_top1']:.4f})")
-    print(f"  rho_low_margin_min: {sm['rho_low_margin_min']}")
+    print(f"  rho range:  [{sm['rho_min']:.4f}, {sm['rho_max']:.4f}] (Δ={sm['delta_rho']:.4f})")
+    print(f"  top1 range: [{sm['top1_min']:.4f}, {sm['top1_max']:.4f}] (Δ={sm['delta_top1']:.4f})")
+
+    # ── JSON save: strip numpy arrays from rho_stats before serialization ──
+    sweep_rho_stats_safe = []
+    for rs in sweep_rho_stats:
+        rs_safe = {k: v for k, v in rs.items() if not k.startswith('_')}
+        sweep_rho_stats_safe.append(rs_safe)
 
     save_obj = {
         'config': args.config,
@@ -630,16 +836,17 @@ def main():
             'E2_variance_space': 'L2_normalized',
             'E3_var_floor': 'adaptive_sweep (FLOOR_REL_SWEEP × sigma_shared_scalar)',
             'E4_shrinkage_n0': SHRINKAGE_N0,
+            'v4_ground_truth_accuracy': True,
         },
         'variance_stats': var_models['stats'],
-        'sweep_results': sweep_verdicts,
-        'sweep_verdicts': sweep_results,
+        'rho_stats_per_floor': sweep_rho_stats_safe,
+        'verdict_per_floor': sweep_results,
         'verdict': verdict,
     }
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     with open(args.output, 'w') as f:
         json.dump(save_obj, f, indent=2, default=float)
-    print(f"\n[1.3v3] saved: {args.output}")
+    print(f"\n[1.3v4] saved: {args.output}")
 
 
 if __name__ == '__main__':
