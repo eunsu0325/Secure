@@ -186,10 +186,7 @@ def main():
     print(f"[1.0c] device: {device}")
 
     # Load pretrained CCNet (raw 2048-D features)
-    model = ccnet(
-        num_classes=getattr(config.model, 'num_classes', 600),
-        weight=config.model.competition_weight,
-    ).to(device)
+    model = ccnet(weight=config.model.competition_weight).to(device)
     if config.model.use_pretrained:
         loader = PretrainedLoader(model)
         loader.load(str(config.model.pretrained_path), strict=False)
