@@ -7,7 +7,12 @@
       "Bash(rm -rf /tmp/phase2_test)",
       "Bash(python3 scripts/phase2_setup.py --base config/config.yaml --out_dir /tmp/phase2_test --results_root /tmp/fake_results)",
       "Bash(echo \"exit=$?\")",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Read(//Users/kimeunsu/.ssh/**)",
+      "Bash(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -T git@github.com)",
+      "Bash(env)",
+      "Read(//Users/kimeunsu/**)",
+      "Bash(security find-internet-password *)"
     ]
   }
 }
