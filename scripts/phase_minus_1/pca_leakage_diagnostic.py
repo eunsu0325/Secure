@@ -187,9 +187,15 @@ def main():
 
     # Load pretrained CCNet (raw 2048-D features)
     model = ccnet(weight=config.model.competition_weight).to(device)
-    if config.model.use_pretrained:
-        loader = PretrainedLoader(model)
-        loader.load(str(config.model.pretrained_path), strict=False)
+    if config.model.use_pretrained and config.model.pretrained_path:
+        loader = PretrainedLoader()
+        model = loader.load_ccnet_pretrained(
+            model=model,
+            checkpoint_path=config.model.pretrained_path,
+            device=str(device),
+            verbose=False,
+        )
+        print(f"[1.0c] loaded pretrained: {config.model.pretrained_path}")
     model.eval()
 
     transform = get_scr_transforms(
