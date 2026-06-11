@@ -219,25 +219,41 @@ class ClassBalancedBuffer:
         for class_id, class_buf in self.buffer_groups.items():
             self.buffer_groups[class_id].resize(class_to_len[class_id])
 
-    def sample(self, n: int) -> Tuple[List, List, List]:
+    def sample(self, n: int, eligible_class_ids=None) -> Tuple[List, List, List]:
         """
         모든 클래스에서 균등하게 n개의 샘플을 선택합니다.
 
         :param n: 선택할 총 샘플 수
+        :param eligible_class_ids: None(기본)이면 현행과 *완전히 동일* — 모든
+            클래스에서 균등 샘플링. set/iterable 이 주어지면 그 클래스들로만
+            제한(MRS cohort scheduler / predictive override 용). 교집합이 비면
+            빈 결과를 반환한다.
         :return: (데이터 리스트, 레이블 리스트, logit 리스트) 튜플
+
+        byte-identity: ``eligible_class_ids is None`` 경로는 기존 코드와 동일한
+        순서로 동일한 ``torch.randperm`` 호출을 수행한다(RNG 소비 동일).
         """
         if not self.buffer_groups:
             return [], [], []
 
+        # eligible 필터 (None → 현행 그대로). dict insertion order 보존.
+        if eligible_class_ids is None:
+            groups = list(self.buffer_groups.items())
+        else:
+            eligible = set(eligible_class_ids)
+            groups = [(c, b) for c, b in self.buffer_groups.items() if c in eligible]
+            if not groups:
+                return [], [], []
+
         # 각 클래스에서 뽑을 샘플 수 계산
-        samples_per_class = n // len(self.buffer_groups)
-        remainder = n % len(self.buffer_groups)
+        samples_per_class = n // len(groups)
+        remainder = n % len(groups)
 
         all_data = []
         all_labels = []
         all_logits = []
 
-        for i, (class_id, buffer) in enumerate(self.buffer_groups.items()):
+        for i, (class_id, buffer) in enumerate(groups):
             n_samples = samples_per_class
             # 나머지를 앞쪽 클래스에 1개씩 추가
             if i < remainder:
