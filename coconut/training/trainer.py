@@ -205,6 +205,7 @@ class COCONUTTrainer:
         self.rehab_samples_per_user = getattr(config.training, 'rehab_samples_per_user', 4)
         self.qar_warmup_users = getattr(config.training, 'qar_warmup_users', 10)
         self._qar_class_scores = {}  # {user_id: mean_genuine_cosine} — 평가 시 갱신
+        self._qar_raw_floor = None   # QAR tail 판정용 raw-cosine floor (tau_cos는 S-norm 시 z-score라 못 씀)
         self._qar_rehab_log = []     # 진단용: [(exp, tail_ids, n_rehab_samples)]
         if self.use_qar and self.verbose:
             print(f"[COCONUT] QAR enabled: margin={self.rehab_margin}, "
@@ -822,11 +823,14 @@ class COCONUTTrainer:
         if not self._qar_class_scores:
             return []
 
-        tau_cos = self.ncm.tau_cos
-        if tau_cos is None:
+        # ⚠️ QAR floor는 raw cosine 단위여야 함: _qar_class_scores는 raw cosine(mean genuine)인데
+        # NCM tau_cos는 use_snorm 시 per-class z-score → 단위 불일치(전원 tail 오판정) 버그.
+        # _calibrate_threshold가 산출한 raw-cosine impostor floor를 사용.
+        floor = self._qar_raw_floor
+        if floor is None:
             return []
 
-        threshold = tau_cos + self.rehab_margin
+        threshold = floor + self.rehab_margin
         tail_users = [
             uid for uid, score in self._qar_class_scores.items()
             if score < threshold and uid in self.memory_buffer.buffer_groups
@@ -864,12 +868,12 @@ class COCONUTTrainer:
             rehab_paths.extend(paths)
             rehab_labels.extend(labels)
 
-        # 진단 로그
-        tau_cos = self.ncm.tau_cos if self.ncm.tau_cos is not None else 0.0
+        # 진단 로그 (QAR raw-cosine floor 기준)
+        floor = self._qar_raw_floor if self._qar_raw_floor is not None else 0.0
         self._qar_rehab_log.append({
             'exp': self.experience_count,
-            'tau_cos': float(tau_cos),
-            'threshold': float(tau_cos + self.rehab_margin),
+            'raw_floor': float(floor),
+            'threshold': float(floor + self.rehab_margin),
             'n_tail': len(tail_users),
             'tail_ids': [int(uid) for uid in tail_users],
             'n_rehab_samples': len(rehab_paths),
@@ -977,6 +981,7 @@ class COCONUTTrainer:
                     tau_margin=tau_margin_new
                 )
                 self.ncm.tau_s = tau_cos_new  # 레거시 호환
+                self._qar_raw_floor = float(tau_cos_new)  # top1_margin: cosine τ = raw-cosine floor
 
                 # Joint FPIR 검증
                 joint_pass = (s_impostor_cos >= tau_cos_new) & (s_impostor_margin >= tau_margin_new)
@@ -1035,6 +1040,9 @@ class COCONUTTrainer:
                         snorm_scores = self.ncm.forward(unk_tensor)  # snorm_enabled=True
                         registered_ids_local = sorted(self.ncm.class_means_dict.keys())
                         s_impostor = snorm_scores[:, registered_ids_local].max(dim=1).values.cpu().numpy()
+                        # QAR용 raw-cosine impostor floor (tau_cos는 z-score라 QAR 단위에 못 씀)
+                        _raw_imp_max = raw_unk[:, registered_ids_local].max(dim=1).values.cpu().numpy()
+                        self._qar_raw_floor = float(np.quantile(_raw_imp_max, 1 - self.openset_config.target_far))
                     else:
                         s_impostor = np.array([])
                 else:
@@ -1088,6 +1096,8 @@ class COCONUTTrainer:
             # NCM에 적용
             new_tau = result['tau_smoothed']
             self.ncm.set_thresholds(tau_s=new_tau, tau_cos=new_tau)
+            if not self.use_snorm:
+                self._qar_raw_floor = float(new_tau)  # non-snorm: tau_cos가 곧 raw-cosine floor
 
             if self.verbose:
                 print(f"FPIR Target Results:")
