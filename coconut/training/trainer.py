@@ -242,6 +242,27 @@ class COCONUTTrainer:
             print(f"[COCONUT] QAR enabled: margin={self.rehab_margin}, "
                   f"samples/user={self.rehab_samples_per_user}, warmup={self.qar_warmup_users}")
 
+        # ── Loss-head ablation 대조군 (ProxyAnchor vs softmax) ──────────────
+        # 'proxy'(기본) = 현행 byte-identical. softmax 모드면 ProxyAnchor를 끄고
+        # SoftmaxHead로 대체(같은 백본·데이터·NCM eval, 손실만 교체 = loss-only 귀속).
+        self.loss_head = getattr(config.training, 'loss_head', 'proxy')
+        self.softmax_head = None
+        self.softmax_lr_ratio = float(getattr(config.training, 'softmax_lr_ratio', 50.0))
+        if self.loss_head != 'proxy':
+            from coconut.losses import SoftmaxHead
+            self.use_proxy_anchor = False          # softmax가 ProxyAnchor를 대체
+            self.proxy_anchor_loss = None
+            self.proxy_lambda = 0.0
+            self.softmax_head = SoftmaxHead(
+                embedding_size=self.projection_dim,   # proxy와 동일 D
+                max_classes=int(config.training.num_experiences),
+                mode=self.loss_head,
+                scale=float(getattr(config.training, 'softmax_scale', 16.0)),
+            ).to(device)
+            if self.verbose:
+                print(f"[COCONUT] Loss head = {self.loss_head} (D={self.projection_dim}, "
+                      f"LR ratio={self.softmax_lr_ratio}x) — ProxyAnchor OFF")
+
         # [CORE] 핵심 수정: 옵티마이저 관리 개선
         self.base_lr = config.training.learning_rate
         self.proxy_lr_ratio = getattr(config.training, 'proxy_lr_ratio', 10) if self.use_proxy_anchor else 1
@@ -440,6 +461,18 @@ class COCONUTTrainer:
             if self.verbose:
                 print(f"[COCONUT] Proxies LR: {self.base_lr * self.proxy_lr_ratio:.6f} ({self.proxy_lr_ratio}x)")
 
+        # Softmax head 그룹 (loss-head ablation; proxy와 동등하게 별도 LR로 학습).
+        # W가 pre-allocated이라 include_proxies와 무관하게 항상 포함 → optimizer state 보존.
+        if getattr(self, 'softmax_head', None) is not None:
+            param_groups.append({
+                'params': list(self.softmax_head.parameters()),
+                'lr': self.base_lr * self.softmax_lr_ratio,
+                'name': 'softmax_head'
+            })
+            if self.verbose:
+                print(f"[COCONUT] Softmax head LR: {self.base_lr * self.softmax_lr_ratio:.6f} "
+                      f"({self.softmax_lr_ratio}x)")
+
         return optim.Adam(param_groups)
 
     def _recreate_optimizer_with_proxies(self, old_proxy_state=None, n_old=0):
@@ -578,6 +611,29 @@ class COCONUTTrainer:
                     old_proxy_state=old_proxy_state,
                     n_old=n_old
                 )
+
+        # Softmax head 클래스 등록 (loss-head ablation). cosine 모드면 proxy와 *동일하게*
+        # feature-mean으로 컬럼 init(기하·init 동일, 손실만 다름). W는 pre-allocated이라
+        # 텐서 재생성·optimizer state 보존 머신이 불필요(구조적으로 보존됨).
+        if self.softmax_head is not None:
+            real_classes = list(set(labels))
+            new_class_ids = [c for c in real_classes
+                             if c not in self.softmax_head.class_to_idx]
+            feature_means = {}
+            if new_class_ids and self.loss_head == 'cosine_softmax':
+                self.model.eval()
+                with torch.no_grad():
+                    for cid in new_class_ids:
+                        cls_paths = [p for p, l in zip(image_paths, labels) if l == cid]
+                        feats = []
+                        for p in cls_paths:
+                            img = _open_with_channels(p, self.config.dataset.channels)
+                            img = self.test_transform(img).unsqueeze(0).to(self.device)
+                            feat = self.model.getFeatureCode(img)
+                            feats.append(feat.squeeze(0))
+                        feature_means[cid] = torch.stack(feats).mean(dim=0)
+                self.model.train()
+            self.softmax_head.add_classes(real_classes, feature_means=feature_means)
 
         # 원본 labels를 보존
         original_labels = labels.copy()
@@ -739,6 +795,15 @@ class COCONUTTrainer:
                             if self.verbose:
                                 num_users = len(self.registered_users)
                                 print(f"[Loss] users={num_users}, ProxyAnchor={loss_proxy.item():.4f}")
+                    elif self.softmax_head is not None:
+                        # Loss-head ablation: ProxyAnchor 대신 softmax CE (cosine/vanilla).
+                        # features_all=[2B,D] dual-view → labels.repeat(2)로 두 뷰 모두 분류.
+                        loss = self.softmax_head(features_all, batch_labels.repeat(2))
+                        if iteration == 0 and epoch == 0:
+                            self._last_curriculum = {'loss_softmax': loss.item()}
+                            if self.verbose:
+                                print(f"[Loss] users={len(self.registered_users)}, "
+                                      f"{self.loss_head}={loss.item():.4f}")
                     else:
                         # ProxyAnchor 비활성화 (L_naive, L_replay, no_proxy variants):
                         # grad-connected zero loss로 loss.backward()가 작동하도록.
@@ -750,6 +815,8 @@ class COCONUTTrainer:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     if self.use_proxy_anchor and self.proxy_anchor_loss.proxies is not None:
                         torch.nn.utils.clip_grad_norm_(self.proxy_anchor_loss.proxies, max_norm=1.0)
+                    elif self.softmax_head is not None:
+                        torch.nn.utils.clip_grad_norm_(self.softmax_head.parameters(), max_norm=1.0)
 
                     self.optimizer.step()
 
