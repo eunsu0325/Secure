@@ -62,6 +62,13 @@ Training:
   rehab_samples_per_user: 4 # tail user당 추가 replay 샘플 수 (memory_size/100 ≈ 10, 40% 활용)
   qar_warmup_users: 10      # QAR 활성화 최소 등록 사용자 수 (= openset.warmup_users와 정합)
 
+  # Loss-head ablation 대조군 (ProxyAnchor vs softmax) — 'proxy'=현행 byte-identical.
+  # cosine_softmax/vanilla_softmax로 바꾸면 ProxyAnchor를 끄고 softmax CE로 학습
+  # (같은 백본·데이터·NCM eval, 손실만 교체 = "ProxyAnchor가 망각을 막는다" 귀속 실험).
+  loss_head: 'proxy'         # 'proxy' | 'cosine_softmax' | 'vanilla_softmax'
+  softmax_lr_ratio: 50.0     # softmax head LR = learning_rate × 이 값 (proxy proxy_lr_ratio와 동등)
+  softmax_scale: 32.0        # cosine_softmax logit scale s — proxy_alpha(32)와 동일(matched). {16,32,64} 튜닝 가능
+
   # MRS (Memory-risk Replay Scheduling: ⓐ SSL + ⓑ cohort 간격 + ⓒ 위험 override)
   # 전부 default OFF = 기존 동작과 byte-identical. Phase 3에서 켜서 균등/QAR과 비교.
   use_mrs: false            # ⓑ+ⓒ replay 스케줄링 활성화
