@@ -78,6 +78,13 @@ class Training:
     rehab_samples_per_user: int = 4   # tail user당 추가 replay 샘플 수
     qar_warmup_users: int = 10        # QAR 활성화 최소 등록 사용자 수
 
+    # MRS (Memory-risk Replay Scheduling) — 전부 default OFF = 기존 동작 byte-identical
+    use_mrs: bool = False             # ⓑ cohort 간격 + ⓒ 위험 override replay 활성화
+    mrs_recall_interval: int = 1      # ⓑ: 각 사용자를 R experience마다 recall (1=off=균등)
+    mrs_warmup_users: int = 10        # ⓑ: 등록 사용자 < 이 수면 균등(off)
+    mrs_override_cap: int = 0         # ⓒ: 한 번에 override할 최대 사용자 수 (0=무제한)
+    w_ssl: float = 0.0                # ⓐ: SSL consistency loss 가중 (0=off)
+
     # A8: diagnostic Phase 2 용 minimal-output 모드 (Drive I/O 비용 절감)
     paper_minimal_outputs: bool = False  # True 면 per-step PNG/CSV/체크포인트 저장 skip
 

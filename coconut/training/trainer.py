@@ -35,6 +35,16 @@ from coconut.openset import (
 )
 
 
+class _HistTracker:
+    """DecayPredictor(at_risk)가 기대하는 tracker 인터페이스를
+    _qar_score_history(dict: {uid: [raw-cosine score,...]})로 채우는 어댑터."""
+    def __init__(self, hist):
+        self.performance_matrix = hist
+
+    def get_performance_trajectory(self, uid, metric=None):
+        return list(self.performance_matrix.get(uid, []))
+
+
 # B6: Diagnostic / calibration subsample caps — lifted from buried inline magic
 # numbers so reviewers can audit "no cherry-pick" without grep-ing for ints.
 # Full data is always used for the final paper metrics; these only cap how
@@ -207,6 +217,27 @@ class COCONUTTrainer:
         self._qar_class_scores = {}  # {user_id: mean_genuine_cosine} — 평가 시 갱신
         self._qar_raw_floor = None   # QAR tail 판정용 raw-cosine floor (tau_cos는 S-norm 시 z-score라 못 씀)
         self._qar_rehab_log = []     # 진단용: [(exp, tail_ids, n_rehab_samples)]
+        self._qar_score_history = {} # {uid: [raw-cosine genuine score per eval]} — MRS ⓒ 궤적용
+
+        # MRS (replay scheduling: ⓐ SSL + ⓑ cohort 간격 + ⓒ 위험 override)
+        # ★ 전부 default OFF = 학습/평가 경로 byte-identical.
+        from coconut.memory import CohortScheduler, DecayPredictor
+        from coconut.losses import SSLConsistencyLoss
+        self.use_mrs = getattr(config.training, 'use_mrs', False)
+        self.w_ssl = getattr(config.training, 'w_ssl', 0.0)
+        self.cohort_scheduler = CohortScheduler(
+            recall_interval=getattr(config.training, 'mrs_recall_interval', 1),
+            warmup_classes=getattr(config.training, 'mrs_warmup_users', 10),
+        )
+        self.decay_predictor = DecayPredictor(
+            enabled=self.use_mrs,
+            higher_is_better=True,   # raw-cosine genuine score: 클수록 좋음
+            floor=0.0,               # 호출 시 self._qar_raw_floor(raw cosine)로 갱신
+            horizon=1, min_history=2,
+            cap=(getattr(config.training, 'mrs_override_cap', 0) or None),  # 0=무제한
+        )
+        self.ssl_loss = SSLConsistencyLoss(mode='cosine') if self.w_ssl > 0 else None
+
         if self.use_qar and self.verbose:
             print(f"[COCONUT] QAR enabled: margin={self.rehab_margin}, "
                   f"samples/user={self.rehab_samples_per_user}, warmup={self.qar_warmup_users}")
@@ -571,6 +602,7 @@ class COCONUTTrainer:
             train_labels = original_labels
 
         self.registered_users.add(user_id)
+        self.cohort_scheduler.register(user_id)  # MRS ⓑ: 등록 순서 기록 (OFF면 eligible()=None이라 미사용)
 
         #  현재 사용자 데이터를 experience_batch_size만큼 증강
         augmented_current_paths, augmented_current_labels = repeat_and_augment_data(
@@ -606,6 +638,10 @@ class COCONUTTrainer:
                     print(f"[QAR] Rehab: {n_tail} tail users, "
                           f"{len(rehab_paths)} samples injected")
 
+        # MRS: 이번 experience의 replay 대상 제한 (ⓑ cohort 간격 ∪ ⓒ 위험 override).
+        # OFF면 None → memory_buffer.sample(n, None) = 현행 균등 (byte-identical).
+        mrs_eligible = self._mrs_eligible_classes() if self.use_mrs else None
+
         # SCR 논문 방식: epoch당 여러 iteration
         self.model.train()
 
@@ -625,7 +661,8 @@ class COCONUTTrainer:
                         len(self.memory_buffer)
                     )
                     memory_paths, memory_labels, _ = self.memory_buffer.sample(
-                        effective_memory_batch
+                        effective_memory_batch,
+                        eligible_class_ids=mrs_eligible,  # MRS: OFF면 None=현행 균등
                     )
 
                     if torch.is_tensor(memory_labels):
@@ -686,6 +723,13 @@ class COCONUTTrainer:
                         all_labels = batch_labels.repeat(2)
                         loss_proxy = self.proxy_anchor_loss(features_all, all_labels)
                         loss = self.proxy_lambda * loss_proxy
+
+                        # MRS ⓐ: dual-view consistency (features_all[:B]=view1, [B:]=view2).
+                        # w_ssl==0이면 ssl_loss=None → 미추가 = byte-identical.
+                        if self.ssl_loss is not None and self.w_ssl > 0:
+                            loss = loss + self.w_ssl * self.ssl_loss(
+                                features_all[:batch_size], features_all[batch_size:]
+                            )
 
                         if iteration == 0 and epoch == 0:
                             # compact 모드용: loss 저장
@@ -812,6 +856,26 @@ class COCONUTTrainer:
         """
         # numpy.int64 등 non-serializable key/value를 Python 기본형으로 변환
         self._qar_class_scores.update({int(k): float(v) for k, v in class_scores.items()})
+        for k, v in class_scores.items():  # MRS ⓒ: per-user raw-cosine 궤적 누적
+            self._qar_score_history.setdefault(int(k), []).append(float(v))
+
+    def _mrs_eligible_classes(self):
+        """MRS ON: 이번 experience의 replay 대상 클래스 = ⓑ cohort 간격 ∪ ⓒ 위험 override.
+        ⓑ가 None(recall_interval<=1 또는 warmup 전)이면 None 반환 → 현행 균등(byte-identical)."""
+        eligible = self.cohort_scheduler.eligible(self.experience_count)
+        if eligible is None:
+            return None
+        at_risk = set()
+        floor = self._qar_raw_floor
+        if floor is not None:
+            # ⓒ: raw-cosine 궤적이 floor 아래로 떨어질 것으로 예측되는 등록 사용자 강제 포함
+            self.decay_predictor.floor = float(floor)
+            cands = [u for u in self._qar_score_history
+                     if u in self.memory_buffer.buffer_groups]
+            at_risk = self.decay_predictor.at_risk(
+                _HistTracker(self._qar_score_history), candidate_ids=cands
+            )
+        return set(eligible) | set(at_risk)
 
     def _qar_identify_tail_users(self) -> List[int]:
         """
@@ -1477,8 +1541,8 @@ class COCONUTTrainer:
 
             _class_means = {k: np.mean(v) for k, v in _class_scores.items()}
 
-            # QAR: per-class genuine score 갱신
-            if self.use_qar:
+            # QAR/MRS: per-class genuine score 갱신 (MRS ⓒ도 이 궤적을 씀 → use_mrs도 포함)
+            if self.use_qar or self.use_mrs:
                 self._qar_update_scores(_class_means)
 
             _worst5 = sorted(_class_means.items(), key=lambda x: x[1])[:5]

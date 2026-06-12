@@ -62,6 +62,14 @@ Training:
   rehab_samples_per_user: 4 # tail user당 추가 replay 샘플 수 (memory_size/100 ≈ 10, 40% 활용)
   qar_warmup_users: 10      # QAR 활성화 최소 등록 사용자 수 (= openset.warmup_users와 정합)
 
+  # MRS (Memory-risk Replay Scheduling: ⓐ SSL + ⓑ cohort 간격 + ⓒ 위험 override)
+  # 전부 default OFF = 기존 동작과 byte-identical. Phase 3에서 켜서 균등/QAR과 비교.
+  use_mrs: false            # ⓑ+ⓒ replay 스케줄링 활성화
+  mrs_recall_interval: 2    # ⓑ: 각 사용자를 R experience마다 recall (1=off=균등; 켤 땐 2~3)
+  mrs_warmup_users: 10      # ⓑ: 등록 < 이 수면 균등
+  mrs_override_cap: 0       # ⓒ: 한 번에 override할 최대 사용자 수 (0=무제한)
+  w_ssl: 0.0                # ⓐ: SSL consistency 가중 (0=off; 켤 땐 0.3~0.5)
+
 # Open-set recognition settings
 Openset:
   enabled: true
