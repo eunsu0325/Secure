@@ -57,7 +57,7 @@ class Training:
     proxy_margin: float = 0.1        # Proxy Anchor margin δ
     proxy_alpha: float = 32          # Proxy Anchor scaling α
     proxy_lr_ratio: float = 10       # 프록시 학습률 배수
-    proxy_lambda: float = 0.3        # ProxyAnchor loss 스칼라 가중치
+    proxy_lambda: float = 1.0        # 단독 손실 가중치 (0.5/0.3은 contrastive 동시학습 잔재 → 1.0 정정)
     # Loss formulation: False=legacy (P+ only neg term), True=paper Eq. (4) canonical.
     # See Stage A ablation; legacy default preserves backward-compat with prior runs.
     use_canonical_proxy_loss: bool = False
@@ -82,7 +82,7 @@ class Training:
     loss_head: str = 'proxy'          # 'proxy' | 'cosine_softmax' | 'vanilla_softmax'
     softmax_lr_ratio: float = 50.0    # softmax head LR = base_lr × 이 값 (proxy와 동등 대우)
     softmax_scale: float = 32.0       # cosine_softmax logit scale s = proxy_alpha(32) matched treatment
-    softmax_lambda: float = 0.5       # softmax 손실 weight λ = proxy_lambda(0.5) matched (미설정시 proxy_lambda 상속)
+    softmax_lambda: float = 1.0       # softmax 손실 weight = proxy_lambda(1.0) matched (단독손실 자연값)
 
     # MRS (Memory-risk Replay Scheduling) — 전부 default OFF = 기존 동작 byte-identical
     use_mrs: bool = False             # ⓑ cohort 간격 + ⓒ 위험 override replay 활성화
