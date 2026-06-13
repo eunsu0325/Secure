@@ -248,6 +248,10 @@ class COCONUTTrainer:
         self.loss_head = getattr(config.training, 'loss_head', 'proxy')
         self.softmax_head = None
         self.softmax_lr_ratio = float(getattr(config.training, 'softmax_lr_ratio', 50.0))
+        # softmax 손실 weight λ. 기본 = proxy_lambda → proxy와 *matched*(0.5-vs-1.0 비대칭 제거).
+        # config.yaml의 proxy_lambda는 여기서 안 건드려져서(=원본) fallback으로 안전하게 읽힘.
+        self.softmax_lambda = float(getattr(config.training, 'softmax_lambda',
+                                            getattr(config.training, 'proxy_lambda', 0.5)))
         if self.loss_head != 'proxy':
             from coconut.losses import SoftmaxHead
             self.use_proxy_anchor = False          # softmax가 ProxyAnchor를 대체
@@ -798,12 +802,13 @@ class COCONUTTrainer:
                     elif self.softmax_head is not None:
                         # Loss-head ablation: ProxyAnchor 대신 softmax CE (cosine/vanilla).
                         # features_all=[2B,D] dual-view → labels.repeat(2)로 두 뷰 모두 분류.
-                        loss = self.softmax_head(features_all, batch_labels.repeat(2))
+                        # softmax_lambda는 기본 proxy_lambda와 동일 → matched (λ confound 제거).
+                        loss = self.softmax_lambda * self.softmax_head(features_all, batch_labels.repeat(2))
                         if iteration == 0 and epoch == 0:
                             self._last_curriculum = {'loss_softmax': loss.item()}
                             if self.verbose:
                                 print(f"[Loss] users={len(self.registered_users)}, "
-                                      f"{self.loss_head}={loss.item():.4f}")
+                                      f"{self.loss_head}(λ={self.softmax_lambda})={loss.item():.4f}")
                     else:
                         # ProxyAnchor 비활성화 (L_naive, L_replay, no_proxy variants):
                         # grad-connected zero loss로 loss.backward()가 작동하도록.

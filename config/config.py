@@ -82,6 +82,7 @@ class Training:
     loss_head: str = 'proxy'          # 'proxy' | 'cosine_softmax' | 'vanilla_softmax'
     softmax_lr_ratio: float = 50.0    # softmax head LR = base_lr × 이 값 (proxy와 동등 대우)
     softmax_scale: float = 32.0       # cosine_softmax logit scale s = proxy_alpha(32) matched treatment
+    softmax_lambda: float = 0.5       # softmax 손실 weight λ = proxy_lambda(0.5) matched (미설정시 proxy_lambda 상속)
 
     # MRS (Memory-risk Replay Scheduling) — 전부 default OFF = 기존 동작 byte-identical
     use_mrs: bool = False             # ⓑ cohort 간격 + ⓒ 위험 override replay 활성화
