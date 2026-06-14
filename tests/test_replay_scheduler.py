@@ -134,6 +134,57 @@ def test_buffer_sample_budget_preserved():
 
 
 # --------------------------------------------------------------------------- #
+# ⓑ fair_remainder (AAVB B3 fix): n<N 또는 n%N!=0 시 早등록 편향 제거
+# --------------------------------------------------------------------------- #
+def test_fair_remainder_off_frontloads():
+    """fair_remainder=False(기본): n<클래스수면 *앞쪽* 클래스만 샘플(legacy 유지)."""
+    buf = _make_buffer(n_classes=5, per_class=8)  # fair_remainder defaults False
+    assert buf.fair_remainder is False
+    for seed in (0, 1, 7, 99):
+        torch.manual_seed(seed)
+        _, labels, _ = buf.sample(2)  # samples_per_class=0, remainder=2 -> 앞쪽 {0,1}
+        assert set(labels) == {0, 1}, f"seed={seed}: {set(labels)} (expected front-load)"
+
+
+def test_fair_remainder_on_no_permanent_starvation():
+    """fair_remainder=True: n<클래스수여도 반복 호출하면 *모든* 클래스가 등장(편향 제거)."""
+    buf = _make_buffer(n_classes=10, per_class=8)
+    buf.fair_remainder = True
+    torch.manual_seed(0)
+    seen = set()
+    for _ in range(200):
+        _, labels, _ = buf.sample(3)  # n=3 < 10
+        seen.update(labels)
+    assert seen == set(range(10)), f"starved classes: {set(range(10)) - seen}"
+
+
+def test_fair_remainder_on_bonus_randomized_when_n_ge_classes():
+    """fair_remainder=True: n>=클래스수면 +1 bonus가 *무작위* 클래스로(앞쪽 고정 아님)."""
+    from collections import Counter
+    buf = _make_buffer(n_classes=4, per_class=20, max_size=400)
+    buf.fair_remainder = True
+    torch.manual_seed(0)
+    bonus_seen = {c: 0 for c in range(4)}
+    for _ in range(200):
+        _, labels, _ = buf.sample(6)  # samples_per_class=1, remainder=2 -> 2 클래스가 2개
+        for cls, cnt in Counter(labels).items():
+            if cnt == 2:
+                bonus_seen[cls] += 1
+    # 모든 클래스가 가끔 bonus를 받아야 함 (legacy면 0,1만 받음)
+    assert all(v > 0 for v in bonus_seen.values()), f"bonus front-loaded: {bonus_seen}"
+
+
+def test_fair_remainder_on_budget_preserved():
+    """fair_remainder=True도 예산(n)·샘플 정확성 유지."""
+    buf = _make_buffer(n_classes=4, per_class=20, max_size=400)
+    buf.fair_remainder = True
+    torch.manual_seed(0)
+    _, labels, _ = buf.sample(16)
+    assert len(labels) == 16
+    assert set(labels).issubset(set(range(4)))
+
+
+# --------------------------------------------------------------------------- #
 # ⓑ cohort scheduler
 # --------------------------------------------------------------------------- #
 def test_cohort_off_when_interval_one():

@@ -110,7 +110,8 @@ class ClassBalancedBuffer:
         max_size: int,
         adaptive_size: bool = True,
         total_num_classes: Optional[int] = None,
-        min_samples_per_class: int = 10
+        min_samples_per_class: int = 10,
+        fair_remainder: bool = False
     ):
         """
         :param max_size: 전체 버퍼의 최대 용량
@@ -119,11 +120,18 @@ class ClassBalancedBuffer:
         :param total_num_classes: adaptive_size가 False일 때,
                                  미리 알고 있는 전체 클래스 수
         :param min_samples_per_class: 각 클래스별 최소 샘플 수 보장
+        :param fair_remainder: False(기본)면 ``sample(n)`` 의 나머지(remainder)를
+            *항상 앞쪽(早등록) 클래스*에 배분 — 기존 동작과 byte-identical.
+            True면 나머지를 *무작위* 클래스에 배분(매 호출). ``n < 클래스수`` 일 때
+            앞쪽 N명만 replay되고 최신 클래스가 영구히 0회 replay되는 편향, 그리고
+            ``n >= 클래스수`` 일 때 앞 ``remainder`` 명이 +1 더 받는 편향을 제거한다.
+            (AAVB 실험은 baseline 포함 *전 arm* 에서 True; legacy 재현만 False.)
         """
         self.max_size = max_size
         self.adaptive_size = adaptive_size
         self.total_num_classes = total_num_classes
         self.min_samples_per_class = min_samples_per_class
+        self.fair_remainder = bool(fair_remainder)
         self.seen_classes: Set[int] = set()  # 지금까지 본 클래스들
         self.buffer_groups: Dict[int, ReservoirSamplingBuffer] = {}  # 클래스별 버퍼
 
@@ -249,14 +257,23 @@ class ClassBalancedBuffer:
         samples_per_class = n // len(groups)
         remainder = n % len(groups)
 
+        # 나머지(+1)를 받을 클래스 인덱스 결정.
+        #   fair_remainder=False(기본): 앞쪽 0..remainder-1 — 기존 동작과 byte-identical
+        #     (추가 RNG 소비 없음 → randperm 호출 순서 동일).
+        #   fair_remainder=True: 매 호출 무작위 remainder개(早등록 편향 제거).
+        if self.fair_remainder and remainder > 0:
+            bonus_idx = set(torch.randperm(len(groups))[:remainder].tolist())
+        else:
+            bonus_idx = None  # 앞쪽 우선(legacy)
+
         all_data = []
         all_labels = []
         all_logits = []
 
         for i, (class_id, buffer) in enumerate(groups):
             n_samples = samples_per_class
-            # 나머지를 앞쪽 클래스에 1개씩 추가
-            if i < remainder:
+            # 나머지를 1개씩 추가 (fair_remainder에 따라 앞쪽 or 무작위)
+            if (bonus_idx is None and i < remainder) or (bonus_idx is not None and i in bonus_idx):
                 n_samples += 1
 
             data, labels, logits = buffer.sample(n_samples)

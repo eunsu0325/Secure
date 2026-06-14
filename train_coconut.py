@@ -441,7 +441,8 @@ def main(args):
         print("Using standard Class-Balanced Buffer with random sampling")
     memory_buffer = ClassBalancedBuffer(
         max_size=config_obj.training.memory_size,
-        min_samples_per_class=config_obj.training.min_samples_per_class
+        min_samples_per_class=config_obj.training.min_samples_per_class,
+        fair_remainder=getattr(config_obj.training, 'fair_remainder', False)
     )
 
     # COCONUT Trainer
