@@ -297,6 +297,31 @@ class COCONUTTrainer:
             channels=config.dataset.channels
         )
 
+        # ── AAVB (Activation-Adaptive View-Batch Replay) — plan §L. OFF=byte-identical ──
+        self.use_aavb = bool(getattr(config.training, 'use_aavb', False))
+        self.view_batch_V = int(getattr(config.training, 'view_batch_V', 3))
+        self.aavb_ssl = bool(getattr(config.training, 'aavb_ssl', False))
+        self.aavb_adaptive = bool(getattr(config.training, 'aavb_adaptive', False))
+        self.aavb_peak_window = int(getattr(config.training, 'aavb_peak_window', 10))
+        self.aavb_samples_per_user_target = int(getattr(config.training, 'aavb_samples_per_user_target', 5))
+        # 상호배타 (D13): use_qar / use_mrs / use_aavb 중 최대 1개만 True
+        if sum([bool(self.use_qar), bool(self.use_mrs), bool(self.use_aavb)]) > 1:
+            raise ValueError("use_qar / use_mrs / use_aavb 중 최대 1개만 True 가능 (plan §L D13)")
+        # AAVB 비대칭 증강 (weak anchor + strong); OFF면 None
+        self.aavb_weak_transform = None
+        self.aavb_strong_transform = None
+        if self.use_aavb:
+            if self.view_batch_V < 2:
+                raise ValueError(f"view_batch_V must be >= 2, got {self.view_batch_V}")
+            from coconut.data.transforms import get_aavb_weak_transform, get_aavb_strong_transform
+            self.aavb_weak_transform = get_aavb_weak_transform(
+                imside=config.dataset.height, channels=config.dataset.channels)
+            self.aavb_strong_transform = get_aavb_strong_transform(
+                imside=config.dataset.height, channels=config.dataset.channels)
+            if self.verbose:
+                print(f"[COCONUT] AAVB ON: V={self.view_batch_V}, ssl={self.aavb_ssl}, "
+                      f"adaptive={self.aavb_adaptive}, peak_W={self.aavb_peak_window}")
+
         # === 오픈셋 관련 초기화 ===
         self.openset_enabled = hasattr(config, 'openset') and config.openset.enabled
 
@@ -664,18 +689,35 @@ class COCONUTTrainer:
         self.registered_users.add(user_id)
         self.cohort_scheduler.register(user_id)  # MRS ⓑ: 등록 순서 기록 (OFF면 eligible()=None이라 미사용)
 
-        #  현재 사용자 데이터를 experience_batch_size만큼 증강
+        # AAVB(plan §L C1/D1): 같은 forward 예산(≈2·(eb+mb))을 distinct↓·V뷰↑로 재분배.
+        #   OFF면 V=2·현행 크기 = byte-identical(current=eb, memory=mb).
+        _eb = self.config.training.experience_batch_size
+        _mb = self.config.training.memory_batch_size
+        if self.use_aavb:
+            V = self.view_batch_V
+            _total_distinct = max(V, round(2 * (_eb + _mb) / V))
+            _current_distinct = max(1, round(_eb * _total_distinct / (_eb + _mb)))
+            _memory_distinct = max(1, _total_distinct - _current_distinct)
+        else:
+            _current_distinct = _eb
+            _memory_distinct = _mb
+
+        #  현재 사용자 데이터를 current_distinct만큼 증강
         augmented_current_paths, augmented_current_labels = repeat_and_augment_data(
-            train_paths, train_labels, self.config.training.experience_batch_size
+            train_paths, train_labels, _current_distinct
         )
 
-        # 증강된 현재 사용자 데이터셋 생성
+        # 증강된 현재 사용자 데이터셋 생성 (AAVB면 비대칭 V뷰, OFF면 dual-view)
         current_dataset = MemoryDataset(
             paths=augmented_current_paths,
             labels=augmented_current_labels,
             transform=self.train_transform,
             train=True,
-            channels=self.config.dataset.channels
+            channels=self.config.dataset.channels,
+            use_aavb_views=self.use_aavb,
+            n_views=self.view_batch_V,
+            weak_transform=self.aavb_weak_transform,
+            strong_transform=self.aavb_strong_transform,
         )
 
         # 학습 통계
@@ -713,11 +755,11 @@ class COCONUTTrainer:
                 #  증강된 현재 데이터를 전체 사용 (이미 experience_batch_size로 맞춰짐)
                 current_subset = current_dataset
 
-                # 메모리에서 샘플링
+                # 메모리에서 샘플링 (AAVB면 memory_distinct, OFF면 memory_batch_size)
                 if len(self.memory_buffer) > 0:
                     # Clipping: 실제 저장 수를 초과하지 않도록 제한 (초반 과적합 방지)
                     effective_memory_batch = min(
-                        self.config.training.memory_batch_size,
+                        _memory_distinct,
                         len(self.memory_buffer)
                     )
                     memory_paths, memory_labels, _ = self.memory_buffer.sample(
@@ -739,7 +781,11 @@ class COCONUTTrainer:
                             labels=augmented_memory_labels,
                             transform=self.train_transform,
                             train=True,
-                            channels=self.config.dataset.channels
+                            channels=self.config.dataset.channels,
+                            use_aavb_views=self.use_aavb,
+                            n_views=self.view_batch_V,
+                            weak_transform=self.aavb_weak_transform,
+                            strong_transform=self.aavb_strong_transform,
                         )
 
                         datasets = [current_subset, memory_dataset]
@@ -765,28 +811,31 @@ class COCONUTTrainer:
                 for data, batch_labels in batch_loader:
                     batch_size = len(batch_labels)
 
-                    view1 = data[0]
-                    view2 = data[1]
+                    # 뷰 일반화: dual-view면 [view1,view2](n_views=2=현행),
+                    #   AAVB면 [weak, strong, ...](n_views=V). 단일뷰면 [data].
+                    views = list(data) if isinstance(data, (list, tuple)) else [data]
+                    n_views = len(views)
 
-                    x = torch.cat([view1, view2], dim=0).to(self.device, non_blocking=True)
+                    x = torch.cat(views, dim=0).to(self.device, non_blocking=True)
                     batch_labels = batch_labels.to(self.device, non_blocking=True)
 
                     self.optimizer.zero_grad()
 
-                    # Forward: CCNet feature extraction (dual-view 그대로 — augmentation 효과)
+                    # Forward: CCNet feature extraction (V뷰 augmentation 효과)
                     # self.model.forward is monkey-patched to apply projection automatically
                     # when use_projection_head=True.
                     features_all = self.model(x)
 
                     # ProxyAnchorLoss
                     if self.use_proxy_anchor and self.proxy_anchor_loss.proxies is not None:
-                        all_labels = batch_labels.repeat(2)
+                        all_labels = batch_labels.repeat(n_views)
                         loss_proxy = self.proxy_anchor_loss(features_all, all_labels)
                         loss = self.proxy_lambda * loss_proxy
 
                         # MRS ⓐ: dual-view consistency (features_all[:B]=view1, [B:]=view2).
                         # w_ssl==0이면 ssl_loss=None → 미추가 = byte-identical.
-                        if self.ssl_loss is not None and self.w_ssl > 0:
+                        # (AAVB one-to-many KL은 Phase 3에서 별도 V뷰 경로로 추가 — 여기선 2뷰만)
+                        if self.ssl_loss is not None and self.w_ssl > 0 and n_views == 2:
                             loss = loss + self.w_ssl * self.ssl_loss(
                                 features_all[:batch_size], features_all[batch_size:]
                             )
@@ -803,7 +852,7 @@ class COCONUTTrainer:
                         # Loss-head ablation: ProxyAnchor 대신 softmax CE (cosine/vanilla).
                         # features_all=[2B,D] dual-view → labels.repeat(2)로 두 뷰 모두 분류.
                         # softmax_lambda는 기본 proxy_lambda와 동일 → matched (λ confound 제거).
-                        loss = self.softmax_lambda * self.softmax_head(features_all, batch_labels.repeat(2))
+                        loss = self.softmax_lambda * self.softmax_head(features_all, batch_labels.repeat(n_views))
                         if iteration == 0 and epoch == 0:
                             self._last_curriculum = {'loss_softmax': loss.item()}
                             if self.verbose:

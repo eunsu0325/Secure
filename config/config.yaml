@@ -82,6 +82,15 @@ Training:
   # ⚠️ AAVB 실험(Phase 0c~4)은 baseline 포함 전 arm에서 true로 둘 것.
   fair_remainder: false
 
+  # AAVB (Activation-Adaptive View-Batch Replay) — plan §L. 전부 OFF=byte-identical.
+  # 상호배타: use_qar/use_mrs/use_aavb 중 최대 1개만 true.
+  use_aavb: false           # 마스터 (C1 view-batch). Phase 2 A2/A4에서 true.
+  view_batch_V: 3           # 뷰 수 V (1 weak + V-1 strong). VBM x3~4 검증치.
+  aavb_ssl: false           # C2 one-to-many KL (Phase 3)
+  aavb_adaptive: false      # C3 activation 스케줄링 (Phase 4)
+  aavb_peak_window: 10      # C3 decline window-max W (D15)
+  aavb_samples_per_user_target: 5  # C3 K_target = memory_distinct // 이 값 (D5)
+
 # Open-set recognition settings
 Openset:
   enabled: true

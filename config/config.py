@@ -100,6 +100,15 @@ class Training:
     #   M>=N에서 앞 remainder명이 +1 더 받는 편향 제거. ⚠️ AAVB 실험은 baseline 포함 전 arm에서 True.
     fair_remainder: bool = False
 
+    # AAVB (Activation-Adaptive View-Batch Replay) — plan §L. 전부 OFF=byte-identical.
+    # 상호배타: use_qar/use_mrs/use_aavb 중 최대 1개만 True(trainer가 검증, D13).
+    use_aavb: bool = False            # 마스터 스위치 (C1 view-batch). False면 현행.
+    view_batch_V: int = 3             # 뷰 수 V (use_aavb 시만; 1 weak + V-1 strong). VBM x3~4 검증치.
+    aavb_ssl: bool = False            # C2 one-to-many KL (Phase 3). use_aavb일 때만.
+    aavb_adaptive: bool = False       # C3 activation-state 스케줄링 (Phase 4). use_aavb일 때만.
+    aavb_peak_window: int = 10        # C3 decline window-max W (D15). W >= 복습간격(N/K).
+    aavb_samples_per_user_target: int = 5  # C3 K_target = memory_distinct // 이 값 (D5).
+
 @dataclasses.dataclass
 class Openset:
     enabled: bool = True

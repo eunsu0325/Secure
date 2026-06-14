@@ -72,6 +72,27 @@ def get_scr_transforms(train=True, imside=128, channels=1):
         ])
 
 
+def get_aavb_weak_transform(imside=128, channels=1):
+    """AAVB weak view (anchor) — deterministic minimal aug (= eval transform).
+
+    plan §L C1/D2: weak = Resize + ToTensor + NormSingleROI. *No* augmentation
+    so it is a stable, clean "easy" anchor for the one-to-many KL (strong views
+    are pulled toward it). hflip is *not* used (get_scr_transforms has none, and
+    L↔R flip would break palm identity on train_left.txt).
+    """
+    return get_scr_transforms(train=False, imside=imside, channels=channels)
+
+
+def get_aavb_strong_transform(imside=128, channels=1):
+    """AAVB strong view — current training augmentation (plan §L D3).
+
+    = get_scr_transforms(train=True): RandomChoice of one of
+    {ColorJitter, RandomResizedCrop, RandomPerspective, RandomRotation}.
+    (Relatively mild; if SSL signal is weak the conditional arm A7 strengthens it.)
+    """
+    return get_scr_transforms(train=True, imside=imside, channels=channels)
+
+
 def get_repvit_transforms(train=False, imside=224):
     """Transform pipeline for the RepViT robustness backbone (Exp1).
 

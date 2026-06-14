@@ -32,7 +32,11 @@ class BaseVeinDataset(Dataset):
                  transform=None,
                  train: bool = True,
                  channels: int = 1,
-                 dual_views: Optional[bool] = None):
+                 dual_views: Optional[bool] = None,
+                 use_aavb_views: bool = False,
+                 n_views: int = 2,
+                 weak_transform=None,
+                 strong_transform=None):
         """
         Args:
             paths: List of image paths or path to txt file
@@ -41,11 +45,20 @@ class BaseVeinDataset(Dataset):
             train: Training mode flag
             channels: Number of channels (1 for grayscale, 3 for RGB)
             dual_views: Whether to return dual views (defaults to train mode)
+            use_aavb_views: AAVB(plan §L C1) — return ``n_views`` views, the 1st
+                from ``weak_transform`` (anchor) and the rest from ``strong_transform``.
+                Default False → 기존 dual/single 경로(byte-identical).
+            n_views: AAVB view count V (>=2).
+            weak_transform / strong_transform: AAVB 비대칭 증강(둘 다 주어져야 함).
         """
         self.transform = transform
         self.train = train
         self.channels = channels
         self.dual_views = dual_views if dual_views is not None else train
+        self.use_aavb_views = bool(use_aavb_views)
+        self.n_views = int(n_views)
+        self.weak_transform = weak_transform
+        self.strong_transform = strong_transform
 
         # Load paths and labels
         if isinstance(paths, str):
@@ -96,7 +109,13 @@ class BaseVeinDataset(Dataset):
         img = _open_with_channels(path, self.channels)
 
         # Apply transformations
-        if self.dual_views:
+        if self.use_aavb_views:
+            # AAVB(plan §L C1): 1 weak(anchor) + (n_views-1) strong, 비대칭 V뷰
+            w = self.weak_transform or self.transform
+            s = self.strong_transform or self.transform
+            views = [w(img)] + [s(img) for _ in range(self.n_views - 1)]
+            return views, label
+        elif self.dual_views:
             # Generate two different augmented views
             data1 = self.transform(img) if self.transform else img
             data2 = self.transform(img) if self.transform else img
@@ -116,9 +135,14 @@ class MemoryDataset(BaseVeinDataset):
                  transform,
                  train: bool = True,
                  dual_views: Optional[bool] = None,
-                 channels: int = 1):
+                 channels: int = 1,
+                 use_aavb_views: bool = False,
+                 n_views: int = 2,
+                 weak_transform=None,
+                 strong_transform=None):
         """
         Compatibility wrapper for existing MemoryDataset usage
+        (+ AAVB 비대칭 V뷰 패스스루, default off = 기존과 동일)
         """
         super().__init__(
             paths=paths,
@@ -126,5 +150,9 @@ class MemoryDataset(BaseVeinDataset):
             transform=transform,
             train=train,
             channels=channels,
-            dual_views=dual_views
+            dual_views=dual_views,
+            use_aavb_views=use_aavb_views,
+            n_views=n_views,
+            weak_transform=weak_transform,
+            strong_transform=strong_transform
         )
