@@ -325,6 +325,9 @@ class COCONUTTrainer:
             if self.verbose:
                 print(f"[COCONUT] AAVB ON: V={self.view_batch_V}, ssl={self.aavb_ssl}, "
                       f"adaptive={self.aavb_adaptive}, peak_W={self.aavb_peak_window}")
+        # C3(D9): AAVB adaptive면 decay_predictor를 켠다(at_risk floor override 사용).
+        #   use_aavb가 MRS 블록 뒤에 읽혀 여기서 override. adaptive off면 decay 불필요.
+        self.decay_predictor.enabled = bool(self.use_mrs or (self.use_aavb and self.aavb_adaptive))
 
         # === 오픈셋 관련 초기화 ===
         self.openset_enabled = hasattr(config, 'openset') and config.openset.enabled
@@ -746,7 +749,13 @@ class COCONUTTrainer:
 
         # MRS: 이번 experience의 replay 대상 제한 (ⓑ cohort 간격 ∪ ⓒ 위험 override).
         # OFF면 None → memory_buffer.sample(n, None) = 현행 균등 (byte-identical).
-        mrs_eligible = self._mrs_eligible_classes() if self.use_mrs else None
+        # replay 대상 제한: MRS(cohort) / AAVB(activation-state) / 없으면 None(균등).
+        if self.use_mrs:
+            mrs_eligible = self._mrs_eligible_classes()
+        elif self.use_aavb and self.aavb_adaptive:
+            mrs_eligible = self._aavb_select_eligible(_memory_distinct)
+        else:
+            mrs_eligible = None
 
         # SCR 논문 방식: epoch당 여러 iteration
         self.model.train()
@@ -1016,6 +1025,60 @@ class COCONUTTrainer:
                 _HistTracker(self._qar_score_history), candidate_ids=cands
             )
         return set(eligible) | set(at_risk)
+
+    def _aavb_select_eligible(self, memory_distinct):
+        """AAVB C3 (plan §L): activation-state replay 선택. → buffer.sample eligible set.
+
+        선택(고정 예산 K 채울 때까지):
+          1. **at-risk 강제** — decay slope 외삽 < floor (인증 무거부 안전망).
+             만성-평평-약자는 slope≈0이라 decay_predictor가 *자동 제외*(요구: slope<0).
+          2. **복습 band** — `decline = max(history[-W:]) − history[-1]` (window-max peak, D15)
+             큰 순. 만성약자는 decline≈0 → 자동 후순위(min_baseline 불필요).
+          3. **신규 보호** — history < min_history → 포함(추정 불가, starve 금지).
+        K = max(|at_risk|, memory_distinct // samples_per_user_target).
+        ★ "쉼"은 자동: 복습→다음 측정 활성도↑→window-max가 따라가 decline↓→다음 step 미선택→drift→재진입.
+        warmup(floor/history 없음) 또는 eligible=전체 → None(균등 폴백 = byte-identical).
+        """
+        floor = self._qar_raw_floor
+        if floor is None or not self._qar_score_history:
+            return None
+        self.decay_predictor.floor = float(floor)
+
+        groups = self.memory_buffer.buffer_groups
+        if not groups:
+            return None
+
+        # 1. at-risk 강제 (raw-cosine 궤적 slope<0 & predicted<floor)
+        cands = [u for u in self._qar_score_history if u in groups]
+        at_risk = set(self.decay_predictor.at_risk(
+            _HistTracker(self._qar_score_history), candidate_ids=cands))
+
+        # 2/3. decline band + 신규 보호
+        W = max(2, int(self.aavb_peak_window))
+        min_h = self.decay_predictor.min_history
+        new_users = set()
+        band = []  # (uid, decline)
+        for uid in groups:
+            if uid in at_risk:
+                continue
+            h = self._qar_score_history.get(uid, [])
+            if len(h) < min_h:
+                new_users.add(uid)            # 추정 불가 → 보호
+                continue
+            recent = h[-W:] if len(h) > W else h
+            band.append((uid, max(recent) - h[-1]))   # window-max peak − 현재
+        band.sort(key=lambda t: -t[1])         # decline 큰 순 (가장 많이 내려온 것 먼저)
+
+        # 예산 K: reviewed user당 ~samples_per_user_target장 가도록
+        K_target = max(len(at_risk),
+                       memory_distinct // max(1, self.aavb_samples_per_user_target))
+        remaining = max(0, K_target - len(at_risk) - len(new_users))
+        band_sel = {uid for uid, _ in band[:remaining]}
+
+        eligible = at_risk | new_users | band_sel
+        if not eligible or len(eligible) >= len(groups):
+            return None    # 비었거나 전체 = 균등과 동등 → None
+        return eligible
 
     def _qar_identify_tail_users(self) -> List[int]:
         """
@@ -1682,7 +1745,7 @@ class COCONUTTrainer:
             _class_means = {k: np.mean(v) for k, v in _class_scores.items()}
 
             # QAR/MRS: per-class genuine score 갱신 (MRS ⓒ도 이 궤적을 씀 → use_mrs도 포함)
-            if self.use_qar or self.use_mrs:
+            if self.use_qar or self.use_mrs or self.use_aavb:
                 self._qar_update_scores(_class_means)
 
             _worst5 = sorted(_class_means.items(), key=lambda x: x[1])[:5]

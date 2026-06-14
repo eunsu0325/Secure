@@ -195,6 +195,62 @@ def test_c2_empty_strong_is_zero():
 
 
 # --------------------------------------------------------------------------- #
+# C3 — activation-state scheduler (_aavb_select_eligible) — plan §L C3 / D15
+# --------------------------------------------------------------------------- #
+def _fake_aavb(hist, floor, groups, W=10, spu=5):
+    """trainer 전체 구성 없이 _aavb_select_eligible 로직만 테스트하는 fake self."""
+    from coconut.training.trainer import COCONUTTrainer
+    from coconut.memory import DecayPredictor
+    class _F: pass
+    f = _F()
+    f._qar_raw_floor = floor
+    f._qar_score_history = hist
+    f.aavb_peak_window = W
+    f.aavb_samples_per_user_target = spu
+    f.decay_predictor = DecayPredictor(enabled=True, higher_is_better=True,
+                                       floor=floor or 0.0, horizon=1, min_history=2)
+    class _B: pass
+    b = _B(); b.buffer_groups = {g: None for g in groups}
+    f.memory_buffer = b
+    return f, COCONUTTrainer._aavb_select_eligible
+
+
+def test_c3_warmup_returns_none():
+    """floor/history 없으면 None(균등 폴백)."""
+    f, m = _fake_aavb({}, None, [1, 2, 3])
+    assert m(f, 10) is None
+
+
+def test_c3_decline_first_and_chronic_excluded():
+    """at-risk 강제 + decline 큰 순 선택 + 만성약자(decline≈0) 예산압박 시 제외."""
+    hist = {1: [0.9, 0.6, 0.4],    # at-risk (declining below floor 0.5)
+            2: [0.9, 0.8, 0.7],    # decline 0.2 (above floor)
+            3: [0.8, 0.78, 0.76],  # decline 0.04
+            4: [0.3, 0.3, 0.3]}    # chronic flat (decline 0, slope 0)
+    f, m = _fake_aavb(hist, 0.5, [1, 2, 3, 4], spu=5)
+    elig = m(f, 15)               # K = max(|at_risk|=1, 15//5=3) = 3
+    assert elig is not None
+    assert 1 in elig, "at-risk must be forced"
+    assert 2 in elig, "biggest decline must be selected"
+    assert 4 not in elig, "chronic-weak (decline~0) excluded under budget"
+
+
+def test_c3_new_user_protected():
+    """history < min_history(2) 사용자는 보호(포함)."""
+    hist = {1: [0.9, 0.8, 0.7], 2: [0.6]}   # 2 = 1 eval → new
+    f, m = _fake_aavb(hist, 0.5, [1, 2], spu=5)
+    elig = m(f, 5)
+    assert elig is not None and 2 in elig, "new user must be protected"
+
+
+def test_c3_all_eligible_returns_none():
+    """전원이 eligible이면(=균등과 동등) None."""
+    hist = {1: [0.9, 0.6, 0.3], 2: [0.8, 0.5, 0.2]}  # 둘 다 floor 아래로 declining → at_risk
+    f, m = _fake_aavb(hist, 0.5, [1, 2], spu=5)
+    assert m(f, 5) is None
+
+
+# --------------------------------------------------------------------------- #
 def _run_all():
     fns = [v for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]
