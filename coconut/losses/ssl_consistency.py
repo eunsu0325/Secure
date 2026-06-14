@@ -85,6 +85,51 @@ class SSLConsistencyLoss(nn.Module):
         kl_21 = F.kl_div(logp1, p2, reduction="batchmean")
         return 0.5 * (kl_12 + kl_21)
 
+    # ------------------------------------------------------------------ #
+    # AAVB C2 — VBM Eq.3 one-to-many divergence (plan §L C2, D6/D7)
+    # ------------------------------------------------------------------ #
+    def one_to_many(self, weak: torch.Tensor, strong_views, prototypes: torch.Tensor = None) -> torch.Tensor:
+        """VBM Eq.3: ``L_ssl = 1/(V-1) Σ_j D_KL(p_weak.detach() ‖ p_strong_j)``.
+
+        weak view(=anchor)의 soft-assignment 분포로 strong view들을 *끌어당긴다*
+        (방향성). weak는 **detach** — anchor를 고정해 strong만 정렬(D6; detach 누락 시
+        anchor도 strong 쪽으로 끌려가 메커니즘이 깨짐).
+
+        Parameters
+        ----------
+        weak : Tensor [B, D]        — 약증강(anchor) view feature.
+        strong_views : list[Tensor] — 강증강 view feature들 (V-1개). 비면 0 반환.
+        prototypes : Tensor [C, D]  — 클래스 프로토타입(proxy). None/빈 텐서면
+            cosine 폴백(strong을 weak.detach()로 끌어당김; D7).
+
+        F.kl_div(input=log q, target=p) = KL(p‖q) 규약을 이용:
+            KL(p_weak ‖ p_strong) = F.kl_div(log_p_strong, p_weak.detach()).
+        """
+        if strong_views is None or len(strong_views) == 0:
+            return weak.new_zeros(())
+
+        use_proto = (self.mode == "proto_kl"
+                     and prototypes is not None and prototypes.numel() > 0)
+
+        if use_proto:
+            protos = F.normalize(prototypes, dim=1)
+            logp_weak = F.log_softmax(
+                (F.normalize(weak, dim=1) @ protos.t()) / self.temperature, dim=1)
+            p_weak = logp_weak.exp().detach()      # anchor 고정 (D6)
+            total = weak.new_zeros(())
+            for s in strong_views:
+                logp_s = F.log_softmax(
+                    (F.normalize(s, dim=1) @ protos.t()) / self.temperature, dim=1)
+                total = total + F.kl_div(logp_s, p_weak, reduction="batchmean")
+            return total / len(strong_views)
+
+        # cosine 폴백 (방향성: strong → weak.detach()). prototypes 없을 때(초기 등).
+        w = F.normalize(weak, dim=1).detach()
+        total = weak.new_zeros(())
+        for s in strong_views:
+            total = total + (1.0 - F.cosine_similarity(F.normalize(s, dim=1), w, dim=1)).mean()
+        return total / len(strong_views)
+
 
 # plan §H 에서 부르던 이름과의 호환 별칭
 VBMConsistencyLoss = SSLConsistencyLoss

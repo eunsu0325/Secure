@@ -105,6 +105,7 @@ class Training:
     use_aavb: bool = False            # 마스터 스위치 (C1 view-batch). False면 현행.
     view_batch_V: int = 3             # 뷰 수 V (use_aavb 시만; 1 weak + V-1 strong). VBM x3~4 검증치.
     aavb_ssl: bool = False            # C2 one-to-many KL (Phase 3). use_aavb일 때만.
+    aavb_ssl_weight: float = 1.0      # C2 weight (VBM Eq4: L_sup + L_ssl = 1.0 equal).
     aavb_adaptive: bool = False       # C3 activation-state 스케줄링 (Phase 4). use_aavb일 때만.
     aavb_peak_window: int = 10        # C3 decline window-max W (D15). W >= 복습간격(N/K).
     aavb_samples_per_user_target: int = 5  # C3 K_target = memory_distinct // 이 값 (D5).

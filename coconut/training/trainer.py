@@ -304,6 +304,10 @@ class COCONUTTrainer:
         self.aavb_adaptive = bool(getattr(config.training, 'aavb_adaptive', False))
         self.aavb_peak_window = int(getattr(config.training, 'aavb_peak_window', 10))
         self.aavb_samples_per_user_target = int(getattr(config.training, 'aavb_samples_per_user_target', 5))
+        self.aavb_ssl_weight = float(getattr(config.training, 'aavb_ssl_weight', 1.0))
+        # C2 one-to-many KL loss (aavb_ssl일 때만 생성; OFF면 None → 호출 안 됨 = byte-identical)
+        self.aavb_ssl_loss = (SSLConsistencyLoss(mode='proto_kl')
+                              if (self.use_aavb and self.aavb_ssl) else None)
         # 상호배타 (D13): use_qar / use_mrs / use_aavb 중 최대 1개만 True
         if sum([bool(self.use_qar), bool(self.use_mrs), bool(self.use_aavb)]) > 1:
             raise ValueError("use_qar / use_mrs / use_aavb 중 최대 1개만 True 가능 (plan §L D13)")
@@ -862,6 +866,21 @@ class COCONUTTrainer:
                         # ProxyAnchor 비활성화 (L_naive, L_replay, no_proxy variants):
                         # grad-connected zero loss로 loss.backward()가 작동하도록.
                         loss = features_all.sum() * 0.0
+
+                    # AAVB C2 (plan §L): one-to-many KL across V views (VBM Eq3).
+                    #   use_aavb & aavb_ssl & V>=2일 때만 → OFF면 byte-identical.
+                    #   features_all=[V·B,D]를 V조각으로: 뷰0=weak(anchor), 뷰1..=strong.
+                    #   prototypes=proxy(없으면 cosine 폴백, D7). weak는 loss 내부에서 detach(D6).
+                    if self.use_aavb and self.aavb_ssl and self.aavb_ssl_loss is not None and n_views >= 2:
+                        _B = batch_size
+                        _protos = (self.proxy_anchor_loss.proxies
+                                   if (self.proxy_anchor_loss is not None
+                                       and self.proxy_anchor_loss.proxies is not None)
+                                   else None)
+                        _strong = [features_all[k * _B:(k + 1) * _B] for k in range(1, n_views)]
+                        loss = loss + self.aavb_ssl_weight * self.aavb_ssl_loss.one_to_many(
+                            features_all[:_B], _strong, prototypes=_protos
+                        )
 
                     loss_avg.update(loss.item(), batch_size)
 

@@ -87,6 +87,7 @@ Training:
   use_aavb: false           # 마스터 (C1 view-batch). Phase 2 A2/A4에서 true.
   view_batch_V: 3           # 뷰 수 V (1 weak + V-1 strong). VBM x3~4 검증치.
   aavb_ssl: false           # C2 one-to-many KL (Phase 3)
+  aavb_ssl_weight: 1.0      # C2 weight (VBM Eq4 = 1.0)
   aavb_adaptive: false      # C3 activation 스케줄링 (Phase 4)
   aavb_peak_window: 10      # C3 decline window-max W (D15)
   aavb_samples_per_user_target: 5  # C3 K_target = memory_distinct // 이 값 (D5)

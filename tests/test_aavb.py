@@ -137,6 +137,64 @@ def test_margin_dprime_bounded_on_zscore_and_degenerate():
 
 
 # --------------------------------------------------------------------------- #
+# C2 — one-to-many KL (VBM Eq3) — plan §L C2 / D6 / D7
+# --------------------------------------------------------------------------- #
+def test_c2_zero_for_identical_views():
+    from coconut.losses import SSLConsistencyLoss
+    ssl = SSLConsistencyLoss(mode='proto_kl')
+    protos = torch.randn(5, 8)
+    feat = torch.randn(4, 8)
+    kl = ssl.one_to_many(feat, [feat.clone(), feat.clone()], prototypes=protos)
+    assert kl.item() < 1e-5, kl.item()
+
+
+def test_c2_positive_for_different_views():
+    from coconut.losses import SSLConsistencyLoss
+    ssl = SSLConsistencyLoss(mode='proto_kl')
+    torch.manual_seed(0)
+    kl = ssl.one_to_many(torch.randn(4, 8), [torch.randn(4, 8)], prototypes=torch.randn(5, 8))
+    assert kl.item() > 0
+
+
+def test_c2_weak_anchor_is_detached():
+    """D6: weak(anchor)엔 grad가 안 흐르고 strong에만 흘러야 함."""
+    from coconut.losses import SSLConsistencyLoss
+    ssl = SSLConsistencyLoss(mode='proto_kl')
+    protos = torch.randn(5, 8)
+    weak = torch.randn(4, 8, requires_grad=True)
+    strong = torch.randn(4, 8, requires_grad=True)
+    ssl.one_to_many(weak, [strong], prototypes=protos).backward()
+    assert weak.grad is None or weak.grad.abs().sum().item() == 0.0, "weak must be detached (D6)"
+    assert strong.grad is not None and strong.grad.abs().sum().item() > 0, "strong must receive grad"
+
+
+def test_c2_cosine_fallback_without_prototypes():
+    """D7: prototypes=None → cosine 폴백, 동일 뷰면 0."""
+    from coconut.losses import SSLConsistencyLoss
+    ssl = SSLConsistencyLoss(mode='proto_kl')
+    feat = torch.randn(4, 8)
+    kl = ssl.one_to_many(feat, [feat.clone()], prototypes=None)
+    assert kl.item() < 1e-5, kl.item()
+
+
+def test_c2_averages_over_multiple_strong_views():
+    """V=3 (strong 2개) 동작 + 유한·비음수."""
+    from coconut.losses import SSLConsistencyLoss
+    ssl = SSLConsistencyLoss(mode='proto_kl')
+    torch.manual_seed(0)
+    kl = ssl.one_to_many(torch.randn(4, 8), [torch.randn(4, 8), torch.randn(4, 8)],
+                         prototypes=torch.randn(5, 8))
+    assert torch.isfinite(kl).item() and kl.item() >= 0
+
+
+def test_c2_empty_strong_is_zero():
+    from coconut.losses import SSLConsistencyLoss
+    ssl = SSLConsistencyLoss(mode='proto_kl')
+    kl = ssl.one_to_many(torch.randn(4, 8), [], prototypes=torch.randn(5, 8))
+    assert kl.item() == 0.0
+
+
+# --------------------------------------------------------------------------- #
 def _run_all():
     fns = [v for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]
