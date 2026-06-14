@@ -125,22 +125,30 @@ def calculate_tar_at_far(genuine_scores: np.ndarray, impostor_scores: np.ndarray
 def calculate_similarity_margin(genuine_scores: np.ndarray,
                                impostor_scores: np.ndarray) -> float:
     """
-    Calculate the average margin between genuine and impostor scores.
+    Separation between genuine and impostor score distributions, reported as
+    **d-prime** (detection-theory sensitivity index):
 
-    Args:
-        genuine_scores: Similarity scores for genuine attempts
-        impostor_scores: Similarity scores for impostor attempts
+        d' = (mu_genuine - mu_impostor) / sqrt(0.5 * (var_g + var_i))
 
-    Returns:
-        Average margin (mean_genuine - mean_impostor)
+    Why d-prime (and not the raw mean difference): the scores fed here can be
+    S-norm per-class z-scores (use_snorm=True), whose raw mean-difference is
+    scale-dependent and blows up for near-degenerate classes (sigma->0) —
+    e.g. an early-cohort 'margin' BWT of -1320 was such an artifact, not a real
+    1320-unit drop. d-prime is **scale-invariant** (same on raw cosine or
+    z-scores) and the pooled-std denominator + floor keep it bounded and
+    outlier-robust. Higher = better genuine/impostor separation; lower over
+    time = the separation erosion that disallocation/AAVB targets (non-saturating,
+    unlike TAR@FAR which caps at 1.0).
     """
-    if len(genuine_scores) == 0 or len(impostor_scores) == 0:
+    g = np.asarray(genuine_scores, dtype=float)
+    i = np.asarray(impostor_scores, dtype=float)
+    if g.size == 0 or i.size == 0:
         return 0.0
 
-    genuine_mean = np.mean(genuine_scores)
-    impostor_mean = np.mean(impostor_scores)
-
-    return float(genuine_mean - impostor_mean)
+    num = float(g.mean() - i.mean())
+    # pooled std; impostor set is large so var_i>0 keeps this well-conditioned.
+    pooled = float(np.sqrt(0.5 * (g.var() + i.var())))
+    return num / (pooled + 1e-6)
 
 
 def compute_roc_curve(genuine_scores: np.ndarray, impostor_scores: np.ndarray,

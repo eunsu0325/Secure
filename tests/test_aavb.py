@@ -13,6 +13,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -104,6 +105,35 @@ def test_aavb_weak_is_deterministic():
     weak = get_aavb_weak_transform(imside=16, channels=1)
     a, b = weak(img), weak(img)
     assert torch.equal(a, b), "weak transform must be deterministic (no aug)"
+
+
+# --------------------------------------------------------------------------- #
+# margin = d-prime fix (scale-invariant, bounded) — plan §L 측정 정직성
+# --------------------------------------------------------------------------- #
+def test_margin_dprime_sign_and_forgetting():
+    """분리 좋으면 d'↑, genuine 하락(망각)하면 d'↓."""
+    from coconut.evaluation.biometric_metrics import calculate_similarity_margin as m
+    imp = np.array([0.2, 0.1, 0.3, 0.25])
+    good = m(np.array([0.8, 0.7, 0.75]), imp)
+    forgot = m(np.array([0.4, 0.3, 0.35]), imp)
+    assert good > 0, good
+    assert forgot < good, f"forgetting must lower d' ({forgot} !< {good})"
+
+
+def test_margin_dprime_scale_invariant():
+    """raw cosine든 z-score든(×100) 동일 = 스케일 불변."""
+    from coconut.evaluation.biometric_metrics import calculate_similarity_margin as m
+    g = np.array([0.8, 0.7, 0.75]); i = np.array([0.2, 0.1, 0.3])
+    # 1e-6 floor(div-0 방지)만큼만 차이 → 무시 수준(상대오차 <0.1%)
+    assert abs(m(g, i) - m(g * 100, i * 100)) < 1e-2
+
+
+def test_margin_dprime_bounded_on_zscore_and_degenerate():
+    """z-score 대형 입력·degenerate(genuine 1개)서 폭주 없음(|d'|<100)."""
+    from coconut.evaluation.biometric_metrics import calculate_similarity_margin as m
+    z = m(np.array([12.0, 10.0, 11.0]), np.array([0.5, -0.5, 1.0, 0.0, 2.0]))
+    deg = m(np.array([0.9]), np.array([0.2, 0.1, 0.3, 0.25]))
+    assert abs(z) < 100 and abs(deg) < 100, (z, deg)
 
 
 # --------------------------------------------------------------------------- #
