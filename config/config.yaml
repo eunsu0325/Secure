@@ -27,9 +27,9 @@ Model:
   pretrained_path: /content/drive/MyDrive/tongji.pth
 Training:
   experience_batch_size: 16
-  memory_batch_size: 160  # 200→160 (QAR rehab 추가분 감안, 총 배치 ~200-240 유지)
+  memory_batch_size: 160  
   num_experiences: 100
-  memory_size: 1000
+  memory_size: 160
   min_samples_per_class: 9
 
   epochs_per_experience: 3
@@ -77,6 +77,10 @@ Training:
   mrs_warmup_users: 10      # ⓑ: 등록 < 이 수면 균등
   mrs_override_cap: 0       # ⓒ: 한 번에 override할 최대 사용자 수 (0=무제한)
   w_ssl: 0.0                # ⓐ: SSL consistency 가중 (0=off; 켤 땐 0.3~0.5)
+
+  # AAVB: 공정한 replay 예산 배분 (plan §L B3/D8). false=legacy(byte-identical).
+  # ⚠️ AAVB 실험(Phase 0c~4)은 baseline 포함 전 arm에서 true로 둘 것.
+  fair_remainder: false
 
 # Open-set recognition settings
 Openset:

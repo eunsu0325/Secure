@@ -94,6 +94,12 @@ class Training:
     # A8: diagnostic Phase 2 용 minimal-output 모드 (Drive I/O 비용 절감)
     paper_minimal_outputs: bool = False  # True 면 per-step PNG/CSV/체크포인트 저장 skip
 
+    # AAVB Phase 0b: 공정한 replay 예산 배분 (plan §L B3/D8)
+    # False(기본)=legacy(remainder를 早등록 클래스에 front-load, byte-identical).
+    # True=remainder를 무작위 클래스로 → M<N 저예산 uniform이 최신 클래스를 굶기는 편향 +
+    #   M>=N에서 앞 remainder명이 +1 더 받는 편향 제거. ⚠️ AAVB 실험은 baseline 포함 전 arm에서 True.
+    fair_remainder: bool = False
+
 @dataclasses.dataclass
 class Openset:
     enabled: bool = True
