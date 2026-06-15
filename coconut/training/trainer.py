@@ -2133,8 +2133,13 @@ class COCONUTTrainer:
         accuracy = 100.0 * correct / total
         return accuracy
 
-    def save_checkpoint(self, path: str):
-        """[CORE] 안전한 체크포인트 저장 (디렉토리 생성 추가)"""
+    def save_checkpoint(self, path: str, include_optimizer: bool = True):
+        """[CORE] 안전한 체크포인트 저장 (디렉토리 생성 추가).
+
+        include_optimizer=False면 optimizer/scheduler state를 빼고 저장한다
+        (재추출·figure용엔 model/ncm/proxy면 충분 → 용량 ~2/3 절감). resume이
+        필요한 경로는 default(True)를 유지하므로 기존 호출은 byte-identical.
+        """
         # 디렉토리 생성
         save_dir = os.path.dirname(path)
         if save_dir:
@@ -2156,12 +2161,13 @@ class COCONUTTrainer:
             'memory_buffer_size': len(self.memory_buffer)
         }
 
-        # 옵티마이저 상태 안전 저장
-        try:
-            checkpoint_dict['optimizer_state_dict'] = self.optimizer.state_dict()
-            checkpoint_dict['scheduler_state_dict'] = self.scheduler.state_dict()
-        except Exception as e:
-            print(f"Warning: Could not save optimizer/scheduler state: {e}")
+        # 옵티마이저 상태 안전 저장 (include_optimizer=False면 skip → 용량 절감)
+        if include_optimizer:
+            try:
+                checkpoint_dict['optimizer_state_dict'] = self.optimizer.state_dict()
+                checkpoint_dict['scheduler_state_dict'] = self.scheduler.state_dict()
+            except Exception as e:
+                print(f"Warning: Could not save optimizer/scheduler state: {e}")
 
         # ProxyAnchorLoss 관련 저장
         if self.use_proxy_anchor and self.proxy_anchor_loss.proxies is not None:
