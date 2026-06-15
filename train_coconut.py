@@ -648,8 +648,9 @@ def main(args):
                       f"BWT={bwt:.4f} (음수=망각, 양수=전이) | "
                       f"Buf={len(memory_buffer)}")
 
-            # Save evaluation results — [P-Min] forgetting_analysis JSON은 perf_matrix/eval_curve와 중복 → skip
-            do_save_results = not paper_minimal
+            # Save evaluation results — [P-Min]은 per-step skip하되 최종 step은 저장
+            # (evaluation_history JSON은 per-step FNIR CI 등 eval_curve.csv 고정컬럼에 없는 진단의 유일한 보존처)
+            do_save_results = (not paper_minimal) or is_final_exp
             if do_save_results:
                 eval_results_dir = os.path.join(results_dir, "forgetting_analysis")
                 evaluator.save_results(eval_results_dir)
@@ -764,36 +765,34 @@ def main(args):
         trainer.save_det_curve(det_curve_path)
 
         # DET curve PNG — [P-Min] csv에서 재생성 가능 → paper_minimal이면 skip
-        try:
-            assert not paper_minimal, 'skip png (paper_minimal)'
-            import pandas as pd
-            det_df = pd.read_csv(det_curve_path)
-            fpir_arr = det_df['FPIR'].values.astype(float)
-            fnir_arr = det_df['FNIR'].values.astype(float)
+        if not paper_minimal:
+            try:
+                import pandas as pd
+                det_df = pd.read_csv(det_curve_path)
+                fpir_arr = det_df['FPIR'].values.astype(float)
+                fnir_arr = det_df['FNIR'].values.astype(float)
 
-            fig, ax = plt.subplots(figsize=(8, 8))
-            ax.plot(fpir_arr * 100, fnir_arr * 100, 'b-', linewidth=2)
-            for fp_target in [0.1, 1.0, 5.0]:
-                idx = int(np.argmin(np.abs(fpir_arr * 100 - fp_target)))
-                ax.plot(fpir_arr[idx] * 100, fnir_arr[idx] * 100,
-                        'ro', markersize=8,
-                        label=f'FPIR={fp_target:.1f}%, FNIR={fnir_arr[idx]*100:.2f}%')
-            ax.set_xscale('log')
-            ax.set_yscale('log')
-            ax.set_xlabel('FPIR (%)', fontsize=12)
-            ax.set_ylabel('FNIR (%)', fontsize=12)
-            ax.set_title('DET Curve (FPIR-FNIR Trade-off)', fontsize=14, fontweight='bold')
-            ax.legend(fontsize=9)
-            ax.grid(True, which='both', alpha=0.3)
-            det_plot_path = os.path.join(results_dir, "det_curve.png")
-            plt.savefig(det_plot_path, dpi=150, bbox_inches='tight')
-            plt.close()
-            if verbose:
-                print(f"[Plot] DET curve saved: {det_plot_path}")
-        except AssertionError:
-            pass  # [P-Min] DET png skip
-        except Exception as e:
-            print(f"WARNING: Could not generate DET curve plot: {e}")
+                fig, ax = plt.subplots(figsize=(8, 8))
+                ax.plot(fpir_arr * 100, fnir_arr * 100, 'b-', linewidth=2)
+                for fp_target in [0.1, 1.0, 5.0]:
+                    idx = int(np.argmin(np.abs(fpir_arr * 100 - fp_target)))
+                    ax.plot(fpir_arr[idx] * 100, fnir_arr[idx] * 100,
+                            'ro', markersize=8,
+                            label=f'FPIR={fp_target:.1f}%, FNIR={fnir_arr[idx]*100:.2f}%')
+                ax.set_xscale('log')
+                ax.set_yscale('log')
+                ax.set_xlabel('FPIR (%)', fontsize=12)
+                ax.set_ylabel('FNIR (%)', fontsize=12)
+                ax.set_title('DET Curve (FPIR-FNIR Trade-off)', fontsize=14, fontweight='bold')
+                ax.legend(fontsize=9)
+                ax.grid(True, which='both', alpha=0.3)
+                det_plot_path = os.path.join(results_dir, "det_curve.png")
+                plt.savefig(det_plot_path, dpi=150, bbox_inches='tight')
+                plt.close()
+                if verbose:
+                    print(f"[Plot] DET curve saved: {det_plot_path}")
+            except Exception as e:
+                print(f"WARNING: Could not generate DET curve plot: {e}")
 
     # --- FPIR Drift 그래프 3개 생성 --- [P-Min] csv에서 재생성 가능 → skip
     if (not paper_minimal) and fpir_drift_log and len(fpir_drift_log) >= 2:
