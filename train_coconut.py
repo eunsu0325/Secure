@@ -648,8 +648,8 @@ def main(args):
                       f"BWT={bwt:.4f} (음수=망각, 양수=전이) | "
                       f"Buf={len(memory_buffer)}")
 
-            # Save evaluation results — paper_minimal 이면 최종 step 만 저장
-            do_save_results = (not paper_minimal) or is_final_exp
+            # Save evaluation results — [P-Min] forgetting_analysis JSON은 perf_matrix/eval_curve와 중복 → skip
+            do_save_results = not paper_minimal
             if do_save_results:
                 eval_results_dir = os.path.join(results_dir, "forgetting_analysis")
                 evaluator.save_results(eval_results_dir)
@@ -666,7 +666,8 @@ def main(args):
                     results_dir,
                     f'checkpoint_exp_{exp_id + 1}.pth'
                 )
-                trainer.save_checkpoint(checkpoint_path)
+                # [P-Min] optimizer/scheduler state 제외 (재추출·figure엔 model+ncm+proxy로 충분, 용량 ~2/3↓)
+                trainer.save_checkpoint(checkpoint_path, include_optimizer=not paper_minimal)
 
         # 진행 상황 출력
         if (exp_id + 1) % 10 == 0:
@@ -693,9 +694,10 @@ def main(args):
 
     # FPIR drift 로그 저장 (JSON + CSV)
     if fpir_drift_log:
-        drift_json_path = os.path.join(results_dir, 'fpir_drift_log.json')
-        with open(drift_json_path, 'w') as f:
-            json.dump(fpir_drift_log, f, indent=2, default=_json_default)  # A6
+        if not paper_minimal:  # [P-Min] json은 csv와 동일 데이터 → skip
+            drift_json_path = os.path.join(results_dir, 'fpir_drift_log.json')
+            with open(drift_json_path, 'w') as f:
+                json.dump(fpir_drift_log, f, indent=2, default=_json_default)  # A6
 
         import csv as csv_mod
         drift_csv_path = os.path.join(results_dir, 'fpir_drift_log.csv')
@@ -744,15 +746,16 @@ def main(args):
     performance_csv_path = os.path.join(results_dir, "performance_matrix.csv")
     evaluator.create_performance_matrix_csv(performance_csv_path)
 
-    # Plot forgetting curves
-    forgetting_plot_path = os.path.join(results_dir, "forgetting_curves.png")
-    evaluator.plot_forgetting_curves(forgetting_plot_path)
+    # Plot forgetting curves — [P-Min] CSV에서 재생성 가능 → skip
+    if not paper_minimal:
+        forgetting_plot_path = os.path.join(results_dir, "forgetting_curves.png")
+        evaluator.plot_forgetting_curves(forgetting_plot_path)
 
     if openset_enabled and hasattr(trainer, 'save_eval_curve'):
         eval_curve_path = os.path.join(results_dir, "eval_curve.csv")
         trainer.save_eval_curve(eval_curve_path)
 
-        if hasattr(trainer, 'save_eval_curve_plot'):
+        if not paper_minimal and hasattr(trainer, 'save_eval_curve_plot'):
             eval_plot_path = os.path.join(results_dir, "performance_vs_users.png")
             trainer.save_eval_curve_plot(eval_plot_path)
 
@@ -760,8 +763,9 @@ def main(args):
         det_curve_path = os.path.join(results_dir, "det_curve.csv")
         trainer.save_det_curve(det_curve_path)
 
-        # DET curve PNG
+        # DET curve PNG — [P-Min] csv에서 재생성 가능 → paper_minimal이면 skip
         try:
+            assert not paper_minimal, 'skip png (paper_minimal)'
             import pandas as pd
             det_df = pd.read_csv(det_curve_path)
             fpir_arr = det_df['FPIR'].values.astype(float)
@@ -786,11 +790,13 @@ def main(args):
             plt.close()
             if verbose:
                 print(f"[Plot] DET curve saved: {det_plot_path}")
+        except AssertionError:
+            pass  # [P-Min] DET png skip
         except Exception as e:
             print(f"WARNING: Could not generate DET curve plot: {e}")
 
-    # --- FPIR Drift 그래프 3개 생성 ---
-    if fpir_drift_log and len(fpir_drift_log) >= 2:
+    # --- FPIR Drift 그래프 3개 생성 --- [P-Min] csv에서 재생성 가능 → skip
+    if (not paper_minimal) and fpir_drift_log and len(fpir_drift_log) >= 2:
         plot_fpir_drift_graphs(fpir_drift_log, results_dir, verbose=verbose)
 
     # 결과 요약 저장
