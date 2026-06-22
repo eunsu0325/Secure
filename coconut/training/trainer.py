@@ -594,6 +594,16 @@ class COCONUTTrainer:
             )
             if old_scheduler_state is not None:
                 self.scheduler.load_state_dict(old_scheduler_state)
+                # [LR-fix] 옵티마이저가 매 experience 재생성되며 lr이 base로 리셋되는데
+                # (_create_optimizer_with_grouped_params), StepLR.load_state_dict는 last_epoch만
+                # 복원하고 param_group의 lr은 재적용하지 않는다 → 의도된 감쇠가 매번 덮여 lr이
+                # 줄곧 base에 고정됨. StepLR의 절대 감쇠를 명시적으로 다시 써준다
+                # (initial_lr은 StepLR 생성 시 그룹별 base로 세팅됨).
+                _gamma = float(self.config.training.scheduler_gamma)
+                _step = max(1, int(self.config.training.scheduler_step_size))
+                _le = int(self.scheduler.last_epoch)
+                for _g in self.optimizer.param_groups:
+                    _g['lr'] = _g['initial_lr'] * (_gamma ** (_le // _step))
 
             self.last_num_proxies = current_num_proxies
             if self.verbose:
@@ -1076,6 +1086,10 @@ class COCONUTTrainer:
         band_sel = {uid for uid, _ in band[:remaining]}
 
         eligible = at_risk | new_users | band_sel
+        # [AAVB-C3 log] at-risk 궤적을 배치 로그에 남김 (로빈후드 기전 방어용; per-exp 1줄)
+        print(f"   [AAVB-C3] exp~{self.experience_count}: at_risk={len(at_risk)} "
+              f"new={len(new_users)} band={len(band_sel)} eligible={len(eligible)}/{len(groups)}",
+              flush=True)
         if not eligible or len(eligible) >= len(groups):
             return None    # 비었거나 전체 = 균등과 동등 → None
         return eligible
