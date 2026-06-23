@@ -688,10 +688,12 @@ def main(args):
     if verbose:
         print("\n=== Saving Final Results ===")
 
-    # 학습 기록 저장
-    history_path = os.path.join(results_dir, 'training_history.json')
-    with open(history_path, 'w') as f:
-        json.dump(training_history, f, indent=4, default=_json_default)  # A6
+    # 학습 기록 저장 — [P-Min] eval_curve/performance_matrix와 중복 + forgetting_reports 누적으로
+    # 커질 수 있음(우리 분석 미사용) → paper_minimal이면 skip.
+    if not paper_minimal:
+        history_path = os.path.join(results_dir, 'training_history.json')
+        with open(history_path, 'w') as f:
+            json.dump(training_history, f, indent=4, default=_json_default)  # A6
 
     # FPIR drift 로그 저장 (JSON + CSV)
     if fpir_drift_log:
