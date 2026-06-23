@@ -1656,8 +1656,11 @@ class COCONUTTrainer:
             results[f'id_fail@{fpir_key}%'] = id_only
             results[f'both_fail@{fpir_key}%'] = both
 
-            # Bootstrap 95% CI (단일 threshold 모드에서만)
+            # Bootstrap 95% CI (단일 threshold 모드) — [최적화] 최종 experience에서만 계산.
+            # per-step CI는 eval_curve/perf_matrix에 없고 최종 forgetting_analysis JSON만 소비 →
+            # 게이팅이 FNIR/TAR 등 우리 지표를 바꾸지 않음(CI는 FNIR 계산 *뒤* 부가 산출).
             if (self.rejection_gate != 'top1_margin'
+                    and len(self.registered_users) >= self.config.training.num_experiences
                     and len(_boot_nm) > 0 and len(_boot_mated_max) > 0):
                 ci_lo, ci_hi = self._bootstrap_fnir_ci(
                     _boot_mated_max, _boot_rank1, _boot_nm,
@@ -1672,23 +1675,24 @@ class COCONUTTrainer:
         rank1 = np.mean(mated_rank1_correct) if len(mated_rank1_correct) > 0 else 0.0
         results['Rank1'] = rank1
 
-        # FPIR_xdom (크로스도메인)
+        # FPIR_xdom (크로스도메인 진단) — [최적화] IITD ~1000장 재인코딩이 매 experience
+        # 비용이 큰데 우리 분석엔 미사용 → 최종 experience에서만 계산(타 step은 None).
+        # FNIR/TAR/det/id/Rank1은 이 위에서 이미 계산되므로 게이팅이 그 지표를 바꾸지 않음.
         TRR_n = FAR_n = None
-        _negref_source = str(self.config.dataset.xdomain_file)
-        negref_paths, _ = load_paths_labels_from_txt(_negref_source)
-
-        if len(negref_paths) > MAX_NEGREF_EVAL_SAMPLES:
-            rng = np.random.RandomState(eval_seed + 2000)
-            negref_paths = rng.choice(negref_paths, MAX_NEGREF_EVAL_SAMPLES, replace=False).tolist()
-
-        if negref_paths:
-            preds_neg = predict_batch(
-                self.model, self.ncm, negref_paths, self.test_transform, self.device,
-                channels=channels
-            )
-            TRR_n = sum(1 for p in preds_neg if p == -1) / len(preds_neg)
-            FAR_n = 1 - TRR_n
-
+        _is_final_eval = len(self.registered_users) >= self.config.training.num_experiences
+        if _is_final_eval:
+            _negref_source = str(self.config.dataset.xdomain_file)
+            negref_paths, _ = load_paths_labels_from_txt(_negref_source)
+            if len(negref_paths) > MAX_NEGREF_EVAL_SAMPLES:
+                rng = np.random.RandomState(eval_seed + 2000)
+                negref_paths = rng.choice(negref_paths, MAX_NEGREF_EVAL_SAMPLES, replace=False).tolist()
+            if negref_paths:
+                preds_neg = predict_batch(
+                    self.model, self.ncm, negref_paths, self.test_transform, self.device,
+                    channels=channels
+                )
+                TRR_n = sum(1 for p in preds_neg if p == -1) / len(preds_neg)
+                FAR_n = 1 - TRR_n
         results['TRR_negref'] = TRR_n
         results['FPIR_xdom'] = FAR_n
 
